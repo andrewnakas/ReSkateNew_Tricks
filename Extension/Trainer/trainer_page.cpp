@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdarg>
 #include <format>
 #include <string>
 #include <vector>
@@ -48,6 +49,21 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
 Page &page() {
     static auto *value = new Page;
     return *value;
+}
+// A tooltip that wraps at a readable width instead of running off the screen as one line.
+void wrapped_tooltip(const char *format, ...) {
+    if (!ImGui::BeginTooltip()) return;
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.0f);
+    va_list arguments;
+    va_start(arguments, format);
+    ImGui::TextV(format, arguments);
+    va_end(arguments);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+// What the control just drawn does, shown while the pointer (or the controller's focus) is on it.
+void tip(const char *text) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) wrapped_tooltip("%s", text);
 }
 std::string lower(std::string_view text) {
     std::string result(text);
@@ -108,7 +124,7 @@ void value_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tra
     ImGui::PushID(row.id.c_str());
     bool frozen = row.frozen;
     if (ImGui::Checkbox("##freeze", &frozen)) trainer_command(menu, callbacks, std::format("freeze {} {}", row.id, frozen ? 1 : 0));
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lock: presets and Reset values leave this value alone.\nReset everything (top of the page) clears locks too.\nYou do not need it for a change to apply.");
+    if (ImGui::IsItemHovered()) wrapped_tooltip("Lock: presets and Reset values leave this value alone.\nReset everything (top of the page) clears locks too.\nYou do not need it for a change to apply.");
     ImGui::SameLine();
     const float column = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x * 0.52f;
     const auto label = friendly && !row.friendly.empty() ? row.friendly : with_group ? row.group + " / " + row.label : row.label;
@@ -118,7 +134,7 @@ void value_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tra
     ImGui::TextUnformatted(row.used ? label.c_str() : (label + "  (no use found)").c_str());
     if (tinted) ImGui::PopStyleColor();
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s%s%s\nStock: %s%s", row.help.c_str(), row.help.empty() ? "" : "\n", row.id.c_str(), number(row.stock).c_str(),
+        wrapped_tooltip("%s%s%s\nStock: %s%s", row.help.c_str(), row.help.empty() ? "" : "\n", row.id.c_str(), number(row.stock).c_str(),
             row.used ? "" : "\nThe game was not found (or seen) reading this value, so changing it may do nothing.");
     ImGui::SameLine(column);
     const float reset = ImGui::CalcTextSize("Reset").x + ImGui::GetStyle().FramePadding.x * 2;
@@ -147,10 +163,14 @@ void value_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tra
             p.active.clear();
         }
     }
+    if (!ImGui::IsItemActive())
+        tip(row.kind == trainer::Kind::flag ? "Tick to switch this on, untick to switch it off."
+                                            : "Drag left or right to change it, or double-click to type a number. Blue means changed from the game's own.");
     if (edited) trainer_command(menu, callbacks, std::format("set {} {}", row.id, number(value)));
     if (row.touched && row.kind != trainer::Kind::flag) {
         ImGui::SameLine();
         if (ImGui::Button("Reset", ImVec2(reset, 0))) trainer_command(menu, callbacks, "reset " + row.id);
+        tip("Puts this one value back to the game's own.");
     }
     ImGui::EndDisabled();
     ImGui::PopID();
@@ -162,7 +182,7 @@ void preset_switch(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer:
     const bool pressed = ImGui::Button(preset.name.c_str());
     if (preset.active) ImGui::PopStyleColor();
     if (pressed) trainer_command(menu, callbacks, std::string(preset.active ? "preset remove " : "preset apply ") + preset.name);
-    if (ImGui::IsItemHovered() && !preset.note.empty()) ImGui::SetTooltip("%s", preset.note.c_str());
+    if (ImGui::IsItemHovered() && !preset.note.empty()) wrapped_tooltip("%s", preset.note.c_str());
 }
 // A built-in preset as a dial: one multiplier that moves everything the preset moves.
 void dial_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::PresetRow &preset) {
@@ -174,7 +194,7 @@ void dial_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trai
     ImGui::TextUnformatted(preset.title.c_str());
     if (moved) ImGui::PopStyleColor();
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s\n1 is the game's own; \"%s\" is x %s.", preset.note.c_str(), preset.name.c_str(), number(preset.amount).c_str());
+        wrapped_tooltip("%s\n1 is the game's own; \"%s\" is x %s.", preset.note.c_str(), preset.name.c_str(), number(preset.amount).c_str());
     ImGui::SameLine(column);
     const float button = ImGui::CalcTextSize("Fast Parkour Flips").x + ImGui::GetStyle().FramePadding.x * 2;
     const float reset = ImGui::CalcTextSize("Reset").x + ImGui::GetStyle().FramePadding.x * 2;
@@ -192,22 +212,24 @@ void dial_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trai
     } else if (p.active == id) {
         p.active.clear();
     }
+    if (!ImGui::IsItemActive() && ImGui::IsItemHovered()) wrapped_tooltip("%s 1 is the game's own.", preset.note.c_str());
     ImGui::SameLine();
     // Any number at all: the slider only covers the sensible range.
     double typed = preset.factor;
     ImGui::SetNextItemWidth(box);
     if (ImGui::InputDouble("##typed", &typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue) && typed > 0)
         trainer_command(menu, callbacks, std::format("dial {} {}", number(typed), preset.name));
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Type any multiplier and press Enter: the slider's ends are not a limit.");
+    if (ImGui::IsItemHovered()) wrapped_tooltip("Type any multiplier and press Enter: the slider's ends are not a limit.");
     ImGui::SameLine();
     if (preset.active) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
     const bool pressed = ImGui::Button(preset.name.c_str(), ImVec2(button, 0));
     if (preset.active) ImGui::PopStyleColor();
     if (pressed) trainer_command(menu, callbacks, std::string(preset.active ? "preset remove " : "preset apply ") + preset.name);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", preset.note.c_str());
+    if (ImGui::IsItemHovered()) wrapped_tooltip("%s", preset.note.c_str());
     if (moved) {
         ImGui::SameLine();
         if (ImGui::Button("Reset", ImVec2(reset, 0))) trainer_command(menu, callbacks, "dial 1 " + preset.name);
+        tip("Puts this dial back to 1, the game's own.");
     }
     ImGui::PopID();
 }
@@ -235,6 +257,10 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
             const bool on = p.mode == mode;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
             if (ImGui::Button(label, ImVec2(width, 0))) p.mode = mode;
+            tip(mode == 0 ? "A short list for toning the game down: lower pops, slower pushes, harder bails."
+                : mode == 1 ? "A short list for turning the game up: bigger pops, faster pushes, moon jumps."
+                : mode == 3 ? "Everything that makes a trick line in one place: board bending, reverts, pumping, pops, spins, manuals and grinds."
+                            : "Every dial, your own presets and every tuning value the trainer knows.");
             if (on) ImGui::PopStyleColor();
         }
     }
@@ -243,6 +269,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
     // One search for the whole tab: dials, switches, trick sliders and every value.
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::InputTextWithHint("##search", "Search: dials, tricks and every value...", p.search.data(), p.search.size());
+    tip("Type a word to find dials, trick sliders and tuning values on every list at once. Clear the box to go back to the list.");
     const auto words = lower(p.search.data());
     const bool searching = !words.empty();
     const auto listed = [&](const trainer::PresetRow &preset) {
@@ -291,7 +318,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
     }
     ImGui::BeginDisabled(!can_edit || !view.touched);
     if (ImGui::Button("Reset values")) trainer_command(menu, callbacks, "reset all");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Every tuning value back to the game's own. Locked values stay.");
+    if (ImGui::IsItemHovered()) wrapped_tooltip("Every tuning value back to the game's own. Locked values stay.");
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
@@ -316,6 +343,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
             } else if (ImGui::Button("Turn on", ImVec2(button, 0))) {
                 trainer_command(menu, callbacks, "preset apply " + preset.name);
             }
+            tip("Turn on sets every value saved in this preset. Turn off puts those values back to the game's own.");
             ImGui::SameLine();
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(preset.name.c_str());
@@ -323,11 +351,13 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
             ImGui::TextDisabled("%s", preset.note.c_str());
             ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - px(170));
             if (ImGui::SmallButton("This map")) trainer_command(menu, callbacks, "profile set " + preset.name);
+            tip("Applies this preset by itself every time this map loads.");
             ImGui::SameLine();
             if (ImGui::SmallButton("Share")) trainer_command(menu, callbacks, "preset export " + preset.name);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies this preset to the clipboard as one line of text. Paste it in a chat;\nanyone with the trainer can import it.");
+            if (ImGui::IsItemHovered()) wrapped_tooltip("Copies this preset to the clipboard as one line of text. Paste it in a chat;\nanyone with the trainer can import it.");
             ImGui::SameLine();
             if (ImGui::SmallButton("Delete")) trainer_command(menu, callbacks, "preset delete " + preset.name);
+            tip("Removes this preset from your list.");
             ImGui::PopID();
         }
         ImGui::EndDisabled();
@@ -335,22 +365,24 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         const float save = ImGui::CalcTextSize("Save").x + ImGui::GetStyle().FramePadding.x * 2;
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - save - ImGui::GetStyle().ItemSpacing.x);
         ImGui::InputText("##preset-name", p.preset_name.data(), p.preset_name.size());
+        tip("A name for the preset you are about to save.");
         ImGui::SameLine();
         ImGui::BeginDisabled(!p.preset_name[0] || !view.touched);
         if (ImGui::Button("Save", ImVec2(save, 0))) trainer_command(menu, callbacks, std::string("preset save ") + p.preset_name.data());
+        tip("Saves every value, dial and trick setting that is changed right now as a preset under this name. Share it from its row afterwards.");
         ImGui::EndDisabled();
         // Sharing: a preset travels as one line of text on the clipboard.
         ImGui::BeginDisabled(view.stock);
         if (ImGui::Button("Share what is changed now")) trainer_command(menu, callbacks, "preset export current");
         ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Copies your current setup to the clipboard as one line of text.");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) wrapped_tooltip("Copies your current setup to the clipboard as one line of text.");
         ImGui::SameLine();
         if (ImGui::Button("Import from clipboard")) {
             const char *text = ImGui::GetClipboardText();
             if (text && trainer::stage_import(text)) trainer_command(menu, callbacks, "preset import");
             else feedback(menu, "The clipboard holds no text.");
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy a preset line someone shared (it starts with RST1:), then press this.\nIt is added to your presets; nothing changes until you turn it on.");
+        if (ImGui::IsItemHovered()) wrapped_tooltip("Copy a preset line someone shared (it starts with RST1:), then press this.\nIt is added to your presets; nothing changes until you turn it on.");
         if (!view.map.empty()) {
             info(menu, "This map applies", view.profile_preset.empty() ? "nothing" : view.profile_preset);
             if (!view.profile_preset.empty() && ImGui::Button("Stop applying it on this map")) trainer_command(menu, callbacks, "profile clear");
@@ -376,14 +408,16 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
                 if (ImGui::Selectable(view.groups[i].c_str(), p.group == static_cast<int>(i) + 2)) p.group = static_cast<int>(i) + 2;
             ImGui::EndCombo();
         }
+        tip("Shows one group of tuning values at a time.");
         ImGui::Checkbox("Only what I changed", &p.only_changed);
+        tip("Lists only the values that differ from the game's own.");
         ImGui::SameLine();
         ImGui::Checkbox("Graph points", &p.graph_points);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show every point of the tuning graphs, not just one multiplier per graph.");
+        if (ImGui::IsItemHovered()) wrapped_tooltip("Show every point of the tuning graphs, not just one multiplier per graph.");
         ImGui::SameLine();
         ImGui::Checkbox("Values with no use found", &p.show_unused);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Also list the tuning values that the game was never found or seen reading.\nChanging those will probably do nothing.");
+            wrapped_tooltip("Also list the tuning values that the game was never found or seen reading.\nChanging those will probably do nothing.");
     } else if (searching) {
         trainer::note_class_list_shown();
     } else {
@@ -413,7 +447,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
     if (std::ranges::none_of(labels, wanted)) return;
     begin_card(menu, "trick-heights", "TRICKS", "1.0 is the game's own");
     // `limited`: the game itself stops at the slider's end, so a typed number is held to it too.
-    const auto slider = [&](const char *label, const char *option, float value, float &edit, bool &editing, float high = 50.0f, bool limited = false) {
+    const auto slider = [&](const char *label, const char *option, float value, float &edit, bool &editing, const char *help, float high = 50.0f, bool limited = false) {
         if (!wanted(label)) return false;
         field(menu, label);
         ImGui::PushID(option);
@@ -426,6 +460,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         }
         if (ImGui::IsItemDeactivatedAfterEdit()) trainer_command(menu, callbacks, std::format("option {} {:.2f}", option, edit));
         if (!ImGui::IsItemActive() && editing && std::abs(value - edit) < 0.005f * std::max(1.0f, std::abs(edit))) editing = false;
+        if (!ImGui::IsItemActive()) tip(help);
         ImGui::SameLine();
         float typed = value;
         ImGui::SetNextItemWidth(box);
@@ -434,23 +469,28 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
             trainer_command(menu, callbacks, std::format("option {} {}", option, typed));
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(limited ? "Type a multiplier and press Enter." : "Type any multiplier and press Enter: the slider's end is not a limit.");
+            wrapped_tooltip(limited ? "Type a multiplier and press Enter." : "Type any multiplier and press Enter: the slider's end is not a limit.");
         ImGui::PopID();
         return true;
     };
-    if (slider("Flip trick speed", "flip_speed", view.flip_speed, p.flip_edit, p.flip_editing, 3.0f) && ImGui::IsItemHovered()) ImGui::SetTooltip("Slows board flips (and gives them that much longer to come round). Above 1 the game's own limit on how fast a board turns takes over.");
+    slider("Flip trick speed", "flip_speed", view.flip_speed, p.flip_edit, p.flip_editing,
+           "How fast the board turns in a flip trick. Below 1 a flip is slower and gets that much longer to come round. On its own the game still "
+           "hurries a slow flip so it is finished before you land: tick the switch below to stop that. Above 1 the game's own limit on how fast a "
+           "board turns takes over.",
+           3.0f);
     if (wanted("Let slow flips stay slow (no finish before landing)")) {
         bool slow = !view.flip_gate;
         if (ImGui::Checkbox("Let slow flips stay slow", &slow)) trainer_command(menu, callbacks, std::format("option flip_gate {}", slow ? 0 : 1));
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("The game speeds a flip up so the board is round 1/6 s before the landing it predicts, however slow the flip speed is set. "
-                              "On: that rule is off, the board turns as slowly as set and lands however far round it got.");
+            wrapped_tooltip("%s", "The game speeds a flip up so the board is round 1/6 of a second before the landing it predicts, however slow the flip speed "
+                                  "is set. That is why a slowed flip still comes round on a small pop. Ticked: that rule is off. The board turns as "
+                                  "slowly as you set it and lands however far round it got, so a flip you start too late or too low is a bail.");
         if (slow && !view.flip_gate_found) ImGui::TextDisabled("Not found in the game yet: it takes effect a few seconds after a level loads.");
     }
-    slider("No comply height", "nocomply_height", view.nocomply_height, p.nocomply_edit, p.nocomply_editing);
-    slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing);
-    slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing);
-    slider("Off-board jump height", "offboard_height", view.offboard_height, p.offboard_edit, p.offboard_editing);
+    slider("No comply height", "nocomply_height", view.nocomply_height, p.nocomply_edit, p.nocomply_editing, "How high a no comply pops. 1 is the game's own.");
+    slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing, "How high a boneless pops. 1 is the game's own.");
+    slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing, "How high you jump off the board in a hippy jump. 1 is the game's own.");
+    slider("Off-board jump height", "offboard_height", view.offboard_height, p.offboard_edit, p.offboard_editing, "How high you jump on foot. 1 is the game's own.");
     if (wanted("Board bending boost (revert speed)")) {
         // Not a multiplier: 0 is the game's own (no boost).
         field(menu, "Board bending boost");
@@ -465,7 +505,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         if (ImGui::IsItemDeactivatedAfterEdit()) trainer_command(menu, callbacks, std::format("option revert_boost {:.2f}", p.revert_edit));
         if (!ImGui::IsItemActive() && p.revert_editing && std::abs(view.revert_boost - p.revert_edit) < 0.006f) p.revert_editing = false;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Board bending: land with the board turned out of line and the game snaps it straight. With this on, that snap\n"
+            wrapped_tooltip("Board bending: land with the board turned out of line and the game snaps it straight. With this on, that snap\n"
                               "throws you forward, as it did in Skate 3: chain bends to keep and build speed without pushing.\n"
                               "x 1 gives about +1.5 to +2.6 m/s a landing. 0 is off, the game's own. The Tricklining list has the details.\n"
                               "From AutoRevertBoost by Sivaes, jaq and OVM.");
@@ -476,7 +516,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
             p.revert_editing = false;
             trainer_command(menu, callbacks, std::format("option revert_boost {}", typed));
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Type any strength and press Enter: the slider's end is not a limit.");
+        if (ImGui::IsItemHovered()) wrapped_tooltip("Type any strength and press Enter: the slider's end is not a limit.");
         ImGui::PopID();
     }
     if (ImGui::Button("Reset tricks")) {
@@ -484,6 +524,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = false;
         trainer_command(menu, callbacks, "reset tricks");
     }
+    tip("Puts every slider and switch on this card back to the game's own.");
     note("Not tuning values: the game sets these in its trick scripts and flip curves. Type in the box to go past a slider's end.");
     end_card();
 }
@@ -523,10 +564,13 @@ void practice_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
             auto value = static_cast<float>(current);
             if (ImGui::SliderFloat("##game-speed", &value, 0.05f, 2.0f, current == 0.0 ? "paused" : "%.2fx", ImGuiSliderFlags_AlwaysClamp))
                 set(value);
+                if (!ImGui::IsItemActive()) tip("Slows the whole game down or speeds it up. 1x is normal speed.");
             if (ImGui::Button(current == 0.0 ? "Resume" : "Pause")) set(current == 0.0 ? 1.0 : 0.0);
+            tip("Freezes the game where it is. Press again to carry on.");
             for (const auto quick : {0.1, 0.25, 0.5, 0.75, 1.0}) {
                 ImGui::SameLine();
                 if (ImGui::Button(std::format("{}x", number(quick)).c_str())) set(quick);
+                tip("Sets the game speed to this straight away.");
             }
             note("The jump read-out measures real time, so it reads low while the game is slowed.");
         }
@@ -541,12 +585,15 @@ void practice_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     ImGui::BeginDisabled(view.map.empty());
     ImGui::BeginDisabled(!telemetry.skater);
     if (ImGui::Button("Save here")) trainer_command(menu, callbacks, "marker save");
+    tip("Saves where you are standing in the selected slot, for this map.");
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!marker.set);
     if (ImGui::Button("Go")) trainer_command(menu, callbacks, "marker go");
+    tip("Puts you back at the selected marker.");
     ImGui::SameLine();
     if (ImGui::Button("Clear")) trainer_command(menu, callbacks, "marker clear");
+    tip("Empties the selected slot.");
     ImGui::EndDisabled();
     ImGui::EndDisabled();
     bool auto_return = view.auto_return;
@@ -555,6 +602,7 @@ void practice_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     field(menu, "Return delay");
     float delay = view.return_delay;
     ImGui::SliderFloat("##return-delay", &delay, 0.0f, 10.0f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
+    if (!ImGui::IsItemActive()) tip("How long after a bail before you are put back at the marker.");
     if (ImGui::IsItemDeactivatedAfterEdit()) trainer_command(menu, callbacks, std::format("option return_delay {:.1f}", delay));
     bool pad = view.pad_shortcuts;
     if (toggle_row(menu, "Controller shortcuts", "Hold LB + RB, then D-pad: up saves, down goes, left / right pick the slot.", pad))
@@ -570,17 +618,22 @@ void practice_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
         info(menu, "You are at", std::format("{:.2f}, {:.2f}, {:.2f}", telemetry.position[0], telemetry.position[1], telemetry.position[2]));
     field(menu, "X, Y, Z");
     ImGui::InputFloat3("##teleport", p.teleport.data(), "%.2f");
+    tip("A position in the game's own coordinates: X, height, Z.");
     ImGui::BeginDisabled(!telemetry.skater);
     if (ImGui::Button("Here")) p.teleport = telemetry.position;
+    tip("Fills the boxes with where you are now.");
     ImGui::SameLine();
     if (ImGui::Button("Go##teleport"))
         trainer_command(menu, callbacks, std::format("tp {:.3f} {:.3f} {:.3f}", p.teleport[0], p.teleport[1], p.teleport[2]));
+        tip("Moves you to the position in the boxes. You arrive on foot.");
     ImGui::SameLine();
     if (ImGui::Button("Copy position"))
         ImGui::SetClipboardText(std::format("{:.3f}, {:.3f}, {:.3f}", telemetry.position[0], telemetry.position[1], telemetry.position[2]).c_str());
+        tip("Copies where you are to the clipboard as X, Y, Z.");
     ImGui::SameLine();
     if (ImGui::Button("Copy for Blender"))
         ImGui::SetClipboardText(std::format("{:.3f}, {:.3f}, {:.3f}", telemetry.position[0], -telemetry.position[2], telemetry.position[1]).c_str());
+        tip("Copies where you are in Blender's axes (Z up), for map makers.");
     ImGui::EndDisabled();
     end_card();
 }
@@ -617,7 +670,7 @@ void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::
         if (on) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
         if (ImGui::Button(choices[i].label, ImVec2(width, 0))) trainer_command(menu, callbacks, choices[i].command);
         if (on) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choices[i].tip);
+        if (ImGui::IsItemHovered()) wrapped_tooltip("%s", choices[i].tip);
     }
 }
 
@@ -704,11 +757,12 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
             } else if (p.active == key) {
                 p.active.clear();
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+            if (ImGui::IsItemHovered()) wrapped_tooltip("%s", tip);
             ImGui::SameLine();
             float typed = value;
             ImGui::SetNextItemWidth(px(64));
             if (ImGui::InputFloat("##typed", &typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue)) trainer_command(menu, callbacks, std::format("{} {}", command, typed));
+            if (ImGui::IsItemHovered()) wrapped_tooltip("%s", "Type any number and press Enter: the slider's ends are not a limit.");
             ImGui::PopID();
         };
         const auto &r = view.revert;
@@ -730,6 +784,7 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
         number_row("Time between boosts", "revert cooldown", r.cooldown, 0.0f, 3.0f, "%.2f s", "How soon the next revert can boost again.");
         number_row("Shortest flight", "revert min_air", r.min_air, 0.0f, 2.0f, "%.2f s", "A hop shorter than this never boosts.");
         if (ImGui::Button("Reset these rules")) trainer_command(menu, callbacks, "revert reset");
+        tip("Puts the rules above back to the trainer's defaults.");
         ImGui::TreePop();
         }
         ImGui::Spacing();
@@ -753,12 +808,13 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
 void camera_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     begin_card(menu, "rigs", "THE GAME'S CAMERAS", "Move the game's own cameras: they keep their smoothing and stay out of walls");
     if (ImGui::Button("SunJay's Low Cam")) trainer_command(menu, callbacks, "camera rig sunjay");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Both on-board cameras low and close, the numbers of SunJay's Low Cam mod.");
+    if (ImGui::IsItemHovered()) wrapped_tooltip("Both on-board cameras low and close, the numbers of SunJay's Low Cam mod.");
     ImGui::SameLine();
     if (ImGui::Button("Low, a little higher")) trainer_command(menu, callbacks, "camera rig low+");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The low camera lower and closer, but with more of the skater in view.");
+    if (ImGui::IsItemHovered()) wrapped_tooltip("The low camera lower and closer, but with more of the skater in view.");
     ImGui::SameLine();
     if (ImGui::Button("The game's own")) trainer_command(menu, callbacks, "camera rig stock");
+    tip("Puts all three of the game's cameras back as they shipped.");
     static constexpr const char *rig_ids[]{"low", "high", "foot"};
     static constexpr const char *rig_titles[]{"Low camera (on board)", "High camera (on board)", "On foot"};
     for (std::size_t i = 0; i < trainer::camera_rigs; ++i) {
@@ -772,12 +828,13 @@ void camera_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tr
             float shown = p.active == key ? static_cast<float>(p.active_value) : value;
             ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - px(64) - ImGui::GetStyle().ItemSpacing.x));
             if (ImGui::SliderFloat("##value", &shown, low, high, format)) trainer_command(menu, callbacks, std::format("camera rig {} {} {:.3f}", rig_ids[i], field, shown));
+            if (ImGui::IsItemHovered() && !ImGui::IsItemActive()) wrapped_tooltip("%s", tip);
             ImGui::SameLine();
             float typed = value;
             ImGui::SetNextItemWidth(px(64));
             if (ImGui::InputFloat("##typed", &typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue))
                 trainer_command(menu, callbacks, std::format("camera {} {} {} {}", "rig", rig_ids[i], field, typed));
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Type any number and press Enter: the slider's ends are not a limit.");
+            if (ImGui::IsItemHovered()) wrapped_tooltip("Type any number and press Enter: the slider's ends are not a limit.");
 
             if (ImGui::IsItemActive()) {
                 p.active = key;
@@ -785,7 +842,6 @@ void camera_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tr
             } else if (p.active == key) {
                 p.active.clear();
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
             ImGui::PopID();
             ImGui::PopID();
         };
@@ -809,12 +865,13 @@ void camera_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tr
     for (std::size_t i = 0; i < std::size(presets); ++i) {
         if (i) ImGui::SameLine();
         if (ImGui::Button(presets[i])) trainer_command(menu, callbacks, std::string("camera preset ") + presets[i]);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", notes[i]);
+        if (ImGui::IsItemHovered()) wrapped_tooltip("%s", notes[i]);
     }
     if (view.camera_game.empty()) note("Skate a few seconds with the game's own camera and its framing is measured here.");
     else {
         info(menu, "The game frames you from", view.camera_game);
         if (ImGui::Button("Start from the game's framing")) trainer_command(menu, callbacks, "camera game");
+        tip("Copies the framing measured from the game's camera into your camera's sliders below.");
     }
     end_card();
     const auto set_card = [&](const char *id, const char *title, const char *which, const trainer::CameraSet &set) {
@@ -827,12 +884,13 @@ void camera_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tr
             float shown = p.active == key ? static_cast<float>(p.active_value) : value;
             ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - px(64) - ImGui::GetStyle().ItemSpacing.x));
             if (ImGui::SliderFloat("##value", &shown, low, high, format)) trainer_command(menu, callbacks, std::format("camera set {} {} {:.3f}", which, field, shown));
+            if (ImGui::IsItemHovered() && !ImGui::IsItemActive()) wrapped_tooltip("%s", tip);
             ImGui::SameLine();
             float typed = value;
             ImGui::SetNextItemWidth(px(64));
             if (ImGui::InputFloat("##typed", &typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue))
                 trainer_command(menu, callbacks, std::format("camera {} {} {} {}", "set", which, field, typed));
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Type any number and press Enter: the slider's ends are not a limit.");
+            if (ImGui::IsItemHovered()) wrapped_tooltip("Type any number and press Enter: the slider's ends are not a limit.");
 
             if (ImGui::IsItemActive()) {
                 p.active = key;
@@ -840,7 +898,6 @@ void camera_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tr
             } else if (p.active == key) {
                 p.active.clear();
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
             ImGui::PopID();
             ImGui::PopID();
         };
@@ -896,11 +953,13 @@ void map_tab(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View 
         info(menu, "Author's preset", view.map_preset);
         ImGui::BeginDisabled(!view.editable);
         if (ImGui::Button("Apply the author's preset")) trainer_command(menu, callbacks, "preset apply map");
+        tip("Sets the values this map's maker recommends for it.");
         ImGui::EndDisabled();
     }
     for (std::size_t i = 0; i < view.spots.size(); ++i) {
         ImGui::PushID(static_cast<int>(i));
         if (ImGui::Button("Go")) trainer_command(menu, callbacks, std::format("spot {}", i + 1));
+        tip("Takes you to this spot.");
         ImGui::SameLine();
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(view.spots[i].name.c_str());
@@ -938,6 +997,7 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
         p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.revert_editing = false;
         trainer_command(menu, callbacks, "reset everything");
     }
+    tip("Puts back every value, lock, preset, dial, trick setting and camera: the game exactly as it shipped.");
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();

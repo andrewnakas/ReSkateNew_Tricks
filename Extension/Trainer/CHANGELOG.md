@@ -5,6 +5,13 @@
 Built on ReSkate 1.1.3. From what players asked for in the ReSkate Discord. Everything marked "untested" is in so that it
 can be tried: tell us what it does.
 
+- **Let slow flips stay slow.** The game speeds a flip trick up so the board is round 1/6 s before
+  the landing it predicts, however slow the flip speed is set: that is why a slowed flip still
+  came round on a small pop. The new switch under TRICKS turns that rule off (`trainer option
+  flip_gate 0`): the board turns as slowly as set and lands however far round it got. It is saved
+  and shared with your presets, and off under a host's enforced physics.
+- **Help on everything.** Every button, slider and switch of the trainer says what it does when
+  you point at it, and the tips wrap instead of running off the screen.
 - **Camera tab.** Move the game's own cameras: distance, height and side for the low camera, the
   high camera and the on-foot camera, with a "SunJay's Low Cam" button (the numbers of SunJay's
   mod, which showed where the game keeps them). The cameras keep their smoothing and stay out of
