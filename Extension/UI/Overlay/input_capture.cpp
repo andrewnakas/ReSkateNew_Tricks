@@ -300,6 +300,16 @@ BOOL WINAPI captured_cursor_position(LPPOINT output) {
     if (result && output && !overlay_input_access) { last = *output; sampled = true; }
     return result;
 }
+// A scripted controller (the trainer's `pad` command): while on, the game's polls of the
+// first controller read this state, whether or not a real one is connected.
+struct ScriptedPad {
+    std::atomic<bool> on{};
+    std::atomic<std::uint64_t> low{};  // XINPUT_GAMEPAD bytes 0..7
+    std::atomic<std::uint32_t> high{}; // bytes 8..11
+    std::atomic<std::uint32_t> packet{1};
+    std::atomic<std::uint64_t> polls{}, served{}, blanked{};
+};
+ScriptedPad& scripted_pad() { static auto* value = new ScriptedPad; return *value; }
 template<std::size_t I, bool Extended = false>
 DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
     const auto& hook = Extended ? input_hooks().xinput_extended[I] : input_hooks().xinput_state[I];
@@ -309,6 +319,20 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
         OverlayInputAccess access;
         result = original<DWORD(WINAPI*)(DWORD, XINPUT_STATE*)>(hook)(user, output);
     }
+    // The overlay's own reads see the scripted state too, so the trainer's pad shortcuts can be tested.
+    if (auto& scripted = scripted_pad(); user == 0 && output) {
+        if (!overlay_input_access) scripted.polls.fetch_add(1, std::memory_order_relaxed);
+        if (scripted.on.load(std::memory_order_acquire)) {
+            const auto low = scripted.low.load(std::memory_order_relaxed);
+            const auto high = scripted.high.load(std::memory_order_relaxed);
+            std::memcpy(&output->Gamepad, &low, 8);
+            std::memcpy(reinterpret_cast<std::byte*>(&output->Gamepad) + 8, &high, 4);
+            output->dwPacketNumber = scripted.packet.load(std::memory_order_relaxed);
+            scripted.served.fetch_add(1, std::memory_order_relaxed);
+            if (capture) scripted.blanked.fetch_add(1, std::memory_order_relaxed);
+            result = ERROR_SUCCESS;
+        }
+    }
     if (result == ERROR_SUCCESS && output && capture) {
         output->Gamepad = {};
         // The game must notice a neutral state even if the physical packet did
@@ -317,6 +341,30 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
     }
     return result;
 }
+}
+// `gamepad`: twelve bytes laid out as XINPUT_GAMEPAD, or null to hand the controller back.
+extern "C" void DingoSDKOverlayScriptController(const void* gamepad) {
+    auto& scripted = dingosdk::overlay::detail::scripted_pad();
+    if (!gamepad) { scripted.on.store(false, std::memory_order_release); return; }
+    std::uint64_t low{};
+    std::uint32_t high{};
+    std::memcpy(&low, gamepad, 8);
+    std::memcpy(&high, static_cast<const std::byte*>(gamepad) + 8, 4);
+    if (low != scripted.low.load() || high != scripted.high.load() || !scripted.on.load()) scripted.packet.fetch_add(1);
+    scripted.low.store(low, std::memory_order_relaxed);
+    scripted.high.store(high, std::memory_order_relaxed);
+    scripted.on.store(true, std::memory_order_release);
+}
+// How often the game polled the first controller, and how often it was given the scripted state.
+extern "C" void DingoSDKOverlayScriptControllerPolls(std::uint64_t* polls, std::uint64_t* served) {
+    auto& scripted = dingosdk::overlay::detail::scripted_pad();
+    if (polls) *polls = scripted.polls.load(std::memory_order_relaxed);
+    if (served) *served = scripted.served.load(std::memory_order_relaxed);
+}
+extern "C" std::uint64_t DingoSDKOverlayScriptControllerBlanked() {
+    return dingosdk::overlay::detail::scripted_pad().blanked.exchange(0, std::memory_order_relaxed);
+}
+namespace dingosdk::overlay::detail {
 template<std::size_t I>
 DWORD WINAPI captured_keystroke(DWORD user, DWORD reserved, PXINPUT_KEYSTROKE output) {
     const auto result = original<DWORD(WINAPI*)(DWORD, DWORD, PXINPUT_KEYSTROKE)>(
