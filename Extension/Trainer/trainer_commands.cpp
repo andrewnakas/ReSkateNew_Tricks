@@ -35,6 +35,7 @@ void register_trainer_commands(Commands &registry) {
         {"ctx", "Fields of the skater's physics context (diagnostic)", "<hex offset> ...", false},
         {"scanf", "Find numbers that sit together in memory (diagnostic)", "<window hex> <number> ...", false},
         {"peek", "Read numbers at an address (diagnostic)", "<address hex> [count]", false},
+        {"undo", "Dev: put the classes and flip curves back as the game would", nullptr, false},
         {"poke", "Write a number at an address (diagnostic)", "<address hex> <number>", false},
         {"sweep", "Which class values the game reads (diagnostic)", "<tag> [class key ...]", false},
         {"curves", "Find runs of curve references in memory (diagnostic)", "[run length]", false},

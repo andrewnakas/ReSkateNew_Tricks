@@ -68,6 +68,15 @@ struct FlipCurve {
     float low{}, high{}; // the bounds the curve clamps its output to (+0x20, +0x24)
 };
 constexpr std::size_t curve_point = 0x1c, curve_x = 0xc, curve_y = 0x14, curve_points_at = 0x18;
+// The point that tells what a curve holds: its largest output (some curves start at 0).
+std::size_t probe_point(const FlipCurve &curve) noexcept {
+    std::size_t best{};
+    for (std::size_t i = 1; i < curve.outputs.size(); ++i)
+        if (std::abs(curve.outputs[i]) > std::abs(curve.outputs[best])) best = i;
+    return best;
+}
+std::uintptr_t probe_address(const FlipCurve &curve) noexcept { return curve.points + probe_point(curve) * curve_point + curve_y; }
+float probe_output(const FlipCurve &curve) noexcept { return curve.outputs[probe_point(curve)]; }
 struct Found {
     std::mutex mutex;
     std::vector<FlipCurve> flip;
@@ -254,9 +263,15 @@ std::vector<FlipCurve> find_flip_curves(std::uintptr_t curve_type) {
     for (const auto run : runs) {
         std::array<std::uintptr_t, 8> curves{};
         if (!peek(run, curves)) continue;
-        std::array<FlipCurve, 4> speed;
+        // In memory order: 0 the flip speed against the flick, 1 the same for the legacy controls,
+        // 2 a multiplier for a high flick (1 to 2: left alone), 3, 6 and 7 the speed a flick's height
+        // and the stick sensitivity add (0 to 2.75), 4 flick speed to flip speed, 5 ollie speed to
+        // flip speed. Scaling only 0, 1, 4 and 5 slowed a flip by a third at x0.4: the rest is 3, 6, 7.
+        std::array<FlipCurve, 7> speed;
         if (!read_curve(curves[0], 3, 0.0f, 0.4f, speed[0]) || !read_curve(curves[1], 3, 0.35f, 0.65f, speed[1]) ||
-            !read_curve(curves[4], 3, 0.0f, 0.05f, speed[2]) || !read_curve(curves[5], 2, 0.0f, 1.0f, speed[3]))
+            !read_curve(curves[4], 3, 0.0f, 0.05f, speed[2]) || !read_curve(curves[5], 2, 0.0f, 1.0f, speed[3]) ||
+            !read_curve(curves[3], 4, 0.0f, 0.0f, speed[4]) || !read_curve(curves[6], 4, 0.0f, 0.0f, speed[5]) ||
+            !read_curve(curves[7], 4, 0.0f, 0.0f, speed[6]))
             continue;
         for (auto &curve : speed)
             if (std::ranges::none_of(result, [&](const FlipCurve &known) { return known.points == curve.points; })) result.push_back(std::move(curve));
@@ -352,15 +367,28 @@ DWORD WINAPI search(void *) noexcept {
                 std::lock_guard lock(f.mutex);
                 have = !f.flip.empty();
             }
-            // Curves already scaled no longer look like the shipped ones: keep those.
-            if (!have) {
-                auto curves = find_flip_curves(curve_type);
-                std::lock_guard lock(f.mutex);
-                flip_found = curves.size();
-                f.flip = std::move(curves);
-                f.flip_written = 1;
-                f.dirty = true;
+            // Curves already scaled no longer look like the shipped ones: those are kept while they
+            // still hold what was written. Fresh ones (the game builds new ones with a new skater)
+            // hold the game's own outputs and are brought level.
+            (void)have;
+            auto curves = find_flip_curves(curve_type);
+            std::lock_guard lock(f.mutex);
+            std::erase_if(f.flip, [&](const FlipCurve &curve) {
+                float y{};
+                return curve.outputs.empty() || !peek(probe_address(curve), y) ||
+                       std::abs(y - probe_output(curve) * f.flip_written) > 0.001f * std::max(1.0f, std::abs(y));
+            });
+            for (auto &curve : curves) {
+                if (std::ranges::any_of(f.flip, [&](const FlipCurve &known) { return known.points == curve.points; })) continue;
+                if (f.flip_written != 1) {
+                    for (std::size_t i = 0; i < curve.outputs.size(); ++i) (void)put(curve.points + i * curve_point + curve_y, curve.outputs[i] * f.flip_written);
+                    (void)put(curve.curve + 0x20, curve.low > 0 ? curve.low * f.flip_written : curve.low);
+                    (void)put(curve.curve + 0x24, curve.high > 0 ? curve.high * f.flip_written : curve.high);
+                }
+                f.flip.push_back(std::move(curve));
             }
+            flip_found = f.flip.size();
+            f.dirty = true;
         }
         logging::write(logging::Level::info, logging::Channel::skater,
                        std::format("Trainer: found {} of {} game tuning classes ({} copies) and {} flip trick speed curves in {} MB, {} ms.", classes,
@@ -370,6 +398,88 @@ DWORD WINAPI search(void *) noexcept {
     f.searching.store(false, std::memory_order_release);
     return 0;
 }
+// The game puts its own numbers back whenever it builds these objects again (a respawn, a
+// teleport, a new session) and may build new ones beside them: what was written once does not
+// stay written. Once a second, every copy that is wanted different from the game's own is
+// checked: one that went back to the game's number is written again, one that holds neither is
+// someone else's memory now and is forgotten.
+bool same(float a, float b) noexcept { return std::abs(a - b) <= 1e-5f * std::max(1.0f, std::abs(b)); }
+void write_flip_curve(const FlipCurve &curve, float factor) noexcept {
+    for (std::size_t i = 0; i < curve.outputs.size(); ++i) (void)put(curve.points + i * curve_point + curve_y, curve.outputs[i] * factor);
+    // The bounds move with the outputs, or the curve clamps the scaled values back.
+    (void)put(curve.curve + 0x20, curve.low > 0 ? curve.low * factor : curve.low);
+    (void)put(curve.curve + 0x24, curve.high > 0 ? curve.high * factor : curve.high);
+}
+} // namespace
+
+bool refresh_classes(std::uint64_t now) noexcept {
+    auto &f = found();
+    static std::uint64_t next{}, next_log{};
+    if (now < next) return false;
+    next = now + 1000;
+    std::unique_lock lock(f.mutex, std::try_to_lock);
+    if (!lock.owns_lock() || !f.ready || f.searching.load(std::memory_order_acquire)) return false;
+    bool lost = false;
+    std::size_t repaired{};
+    if (f.flip_written != 1) {
+        std::erase_if(f.flip, [&](const FlipCurve &curve) {
+            float y{};
+            if (curve.outputs.empty() || !peek(probe_address(curve), y)) return true;
+            if (same(y, probe_output(curve) * f.flip_written)) return false;
+            if (!same(y, probe_output(curve))) return true;
+            write_flip_curve(curve, f.flip_written);
+            ++repaired;
+            return false;
+        });
+        lost = lost || f.flip.empty();
+    }
+    for (std::size_t c = 0; c < class_count; ++c) {
+        const auto &spec = class_specs[c];
+        std::size_t probe = spec.count;
+        for (std::size_t i = 0; i < spec.count && probe == spec.count; ++i)
+            if (f.written[spec.first + i] != class_fields[spec.first + i].stock) probe = i;
+        if (probe == spec.count) continue; // the class holds the game's own: nothing to keep
+        std::erase_if(f.copies[c], [&](Copy copy) {
+            float value{};
+            if (!peek(copy.base + field_offset(spec, probe, copy.slots), value)) return true;
+            if (same(value, f.written[spec.first + probe])) return false;
+            if (!same(value, class_fields[spec.first + probe].stock)) return true;
+            for (std::size_t i = 0; i < spec.count; ++i)
+                if (const auto index = spec.first + i; f.written[index] != class_fields[index].stock)
+                    (void)put(copy.base + field_offset(spec, i, copy.slots), f.written[index]);
+            ++repaired;
+            return false;
+        });
+        lost = lost || f.copies[c].empty();
+    }
+    for (std::size_t m = 0; m < mirror_count; ++m) {
+        const auto &fields = f.mirror_fields[m];
+        std::size_t probe = fields.size();
+        for (std::size_t i = 0; i < mirrors[m].slots.size() && probe == fields.size(); ++i)
+            if (fields[i] >= 0 && f.written[fields[i]] != class_fields[fields[i]].stock) probe = i;
+        if (probe == fields.size()) continue;
+        std::erase_if(f.mirror_copies[m], [&](std::uintptr_t base) {
+            float value{};
+            if (!peek(base + probe * 4, value)) return true;
+            if (same(value, f.written[fields[probe]])) return false;
+            if (!same(value, class_fields[fields[probe]].stock)) return true;
+            for (std::size_t i = 0; i < mirrors[m].slots.size(); ++i)
+                if (fields[i] >= 0 && f.written[fields[i]] != class_fields[fields[i]].stock) (void)put(base + i * 4, f.written[fields[i]]);
+            ++repaired;
+            return false;
+        });
+        lost = lost || f.mirror_copies[m].empty();
+    }
+    if ((repaired || lost) && now >= next_log) {
+        next_log = now + 10000;
+        logging::write(logging::Level::info, logging::Channel::skater,
+                       std::format("Trainer: the game put its own numbers back in {} tuning objects: written again{}.", repaired,
+                                   lost ? "; some are gone, looking for the new ones" : ""));
+    }
+    return lost;
+}
+
+namespace {
 } // namespace
 
 void find_classes() noexcept {
@@ -418,7 +528,7 @@ std::size_t apply_classes() noexcept {
         // A curve whose first output is not what was last written is no longer that curve.
         std::erase_if(f.flip, [&](const FlipCurve &curve) {
             float y{};
-            return curve.outputs.empty() || !peek(curve.points + curve_y, y) || std::abs(y - curve.outputs[0] * f.flip_written) > 0.001f * std::max(1.0f, std::abs(y));
+            return curve.outputs.empty() || !peek(probe_address(curve), y) || std::abs(y - probe_output(curve) * f.flip_written) > 0.001f * std::max(1.0f, std::abs(y));
         });
         for (const auto &curve : f.flip) {
             for (std::size_t i = 0; i < curve.outputs.size(); ++i)
@@ -467,6 +577,27 @@ void want_flip_speed(float factor) noexcept {
         f.dirty = true;
     }
 }
+// <dev>
+// What the game does when it builds its tuning again: every flip curve and class copy back to
+// the game's own numbers, behind the trainer's back (`trainer undo`, to test refresh_classes).
+std::size_t dev_undo_classes() noexcept {
+    auto &f = found();
+    std::lock_guard lock(f.mutex);
+    std::size_t count{};
+    for (const auto &curve : f.flip) {
+        write_flip_curve(curve, 1.0f);
+        ++count;
+    }
+    for (std::size_t c = 0; c < class_count; ++c)
+        for (const auto copy : f.copies[c])
+            for (std::size_t i = 0; i < class_specs[c].count; ++i)
+                if (const auto index = class_specs[c].first + i; f.written[index] != class_fields[index].stock) {
+                    (void)put(copy.base + field_offset(class_specs[c], i, copy.slots), class_fields[index].stock);
+                    ++count;
+                }
+    return count;
+}
+// </dev>
 std::size_t flip_curves() noexcept {
     auto &f = found();
     std::lock_guard lock(f.mutex);

@@ -24,6 +24,12 @@ can be tried: tell us what it does.
   one someone sent you. Your own presets now carry the trick sliders too.
 - **You can see when you are stock:** a line beside Reset everything says STOCK or MODIFIED.
 - **Plainer words:** named values explain themselves, with units, when you point at them.
+- **Flip trick speed keeps working, and slows flips properly.** The game builds its tuning objects
+  again with a new skater (a respawn, a teleport, a session change) and they came back at its own
+  numbers, so a slowed flip (and every value of the game's tuning classes: push speeds, on-foot
+  values) quietly stopped applying. The trainer now checks once a second, writes back what the
+  game undid and looks for the new objects. The slider also scales the three flick-influence
+  curves it used to leave alone, which is why x0.4 only slowed a flip by a third.
 - No comply and boneless heights now also apply to weak upward launches (riding downhill).
 - The menu tab is called PHYSICS.
 
