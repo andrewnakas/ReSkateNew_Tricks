@@ -161,6 +161,8 @@ struct State {
     const char *boost_name{""};
     // The no comply and the boneless are launched by the trick scripts too (trainer_jump.cpp).
     float nocomply_height{1}, boneless_height{1};
+    float revert_boost{};            // 0: off
+    std::uint64_t revert_boosts_seen{};
     std::uint32_t last_state{};
     float boost_factor{}; // velocity factor of the jump now starting, 0: none
     std::uint64_t boost_until{};
@@ -331,6 +333,7 @@ void load_store() {
             s.offboard_height = std::clamp(o.value("offboard_height", 1.0f), height_low, height_high);
             s.flip_speed = std::clamp(o.value("flip_speed", 1.0f), flip_low, flip_high);
             s.boneless_height = std::clamp(o.value("boneless_height", 1.0f), height_low, height_high);
+            s.revert_boost = std::clamp(o.value("revert_boost", 0.0f), 0.0f, revert_boost_high);
             s.slot = std::clamp(o.value("slot", 0), 0, static_cast<int>(marker_slots) - 1);
         }
         if (json->contains("values") && json->at("values").is_object())
@@ -397,6 +400,7 @@ void save_store() {
         options["offboard_height"] = s.offboard_height;
         options["flip_speed"] = s.flip_speed;
         options["boneless_height"] = s.boneless_height;
+        options["revert_boost"] = s.revert_boost;
         options["slot"] = s.slot;
         json["options"] = std::move(options);
         Json values = Json::object();
@@ -922,18 +926,23 @@ std::string apply_dial(std::string_view name, double factor) {
 }
 // A preset of the player's own also carries the trick sliders that are off 1, under these keys.
 constexpr std::string_view trick_prefix = "trick.";
-constexpr std::string_view trick_names[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height"};
+constexpr std::string_view trick_names[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height", "revert_boost"};
+// What a trick slider is when the game is left alone: the multipliers 1, the revert boost off.
+constexpr float trick_stock(std::string_view name) { return name == "revert_boost" ? 0.0f : 1.0f; }
 float *trick_option(std::string_view name) {
     auto &s = state();
     return name == "flip_speed" ? &s.flip_speed : name == "hippy_height" ? &s.hippy_height : name == "nocomply_height" ? &s.nocomply_height
-         : name == "boneless_height" ? &s.boneless_height : name == "offboard_height" ? &s.offboard_height : nullptr;
+         : name == "boneless_height" ? &s.boneless_height : name == "offboard_height" ? &s.offboard_height
+         : name == "revert_boost" ? &s.revert_boost : nullptr;
 }
 // Sets a trick slider named by a preset key; false when the key is not one.
 bool set_trick_key(std::string_view key, double value) {
     if (!key.starts_with(trick_prefix)) return false;
     const auto name = key.substr(trick_prefix.size());
     if (auto *option = trick_option(name))
-        *option = name == "flip_speed" ? std::clamp(static_cast<float>(value), flip_low, flip_high) : std::clamp(static_cast<float>(value), height_low, height_high);
+        *option = name == "flip_speed" ? std::clamp(static_cast<float>(value), flip_low, flip_high)
+                : name == "revert_boost" ? std::clamp(static_cast<float>(value), 0.0f, revert_boost_high)
+                : std::clamp(static_cast<float>(value), height_low, height_high);
     return true;
 }
 std::string remove_preset(std::string_view name) {
@@ -958,7 +967,10 @@ std::string remove_preset(std::string_view name) {
     for (const auto &[user_name, values] : s.user) {
         if (lower(user_name) != wanted) continue;
         for (const auto &saved : values) {
-            if (set_trick_key(saved.first, 1.0)) ++count;
+            if (saved.first.starts_with(trick_prefix)) {
+                (void)set_trick_key(saved.first, trick_stock(std::string_view(saved.first).substr(trick_prefix.size())));
+                ++count;
+            }
             else if (auto *e = find_entry(saved.first)) put_back(*e);
         }
         removed = user_name;
@@ -1893,6 +1905,7 @@ void build_view() {
     next->offboard_height = s.offboard_height;
     next->flip_speed = s.flip_speed;
     next->boneless_height = s.boneless_height;
+    next->revert_boost = s.revert_boost;
     next->return_delay = s.return_delay;
     next->pad_shortcuts = s.pad_shortcuts;
     next->pad_menu = s.pad_menu;
@@ -1912,7 +1925,7 @@ void build_view() {
         next->camera_game = std::format("{:.1f} m behind, {:.1f} m up, tilt {:.0f} degrees, FOV {:.0f}", profile.distance, profile.height, profile.pitch, profile.fov);
     next->open_serial = s.open_serial;
     next->stock = !s.camera_on && s.rigs == std::array<RigSetting, camera_rigs>{} && !next->touched && s.active.empty() && std::ranges::none_of(s.entries, &Entry::frozen) &&
-                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == 1.0f; });
+                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); });
     next->share_text = s.share_text;
     next->share_serial = s.share_serial;
     next->open_tab = s.open_tab;
@@ -1968,7 +1981,7 @@ std::string export_preset(const std::string &name) {
         for (const auto &e : s.entries)
             if (e.touched) values[e.key] = e.value;
         for (const auto trick : trick_names)
-            if (const auto *option = trick_option(trick); *option != 1.0f) values[std::string(trick_prefix) + std::string(trick)] = *option;
+            if (const auto *option = trick_option(trick); *option != trick_stock(trick)) values[std::string(trick_prefix) + std::string(trick)] = *option;
         title = "My setup";
     } else {
         for (const auto &[user_name, saved] : s.user)
@@ -2135,6 +2148,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         // pushing speed, which only gates whether a push may start).
         const auto *top_speed = find_entry("physicspush.maxpushablespeed");
         set_push_speed(client, s.entity, 1.0f, top_speed ? static_cast<float>(top_speed->stock) : 0.0f, s.boosts.cruise);
+        // The revert boost adds speed, so it keeps to the session's rule for boosts and to a host's physics.
+        set_revert_boost(client, s.entity, s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 0.0f : s.revert_boost);
+        if (const auto boosts = revert_boosts(); boosts.fired != s.revert_boosts_seen) {
+            s.revert_boosts_seen = boosts.fired;
+            if (s.hud_jump || s.logging) say(logging::Level::info, std::format("Trainer revert boost: +{:.1f} m/s.", boosts.last_added));
+        }
         for (TrickLaunch launch; take_trick_launch(launch);)
             if (launch.factor != 1.0f)
                 say(logging::Level::info, std::format("Trainer trick: {} launched at {:.2f} m/s up, x{:.2f}.",
@@ -2294,6 +2313,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         }
         if (v == "reset" && lower(arg(0)) == "tricks") {
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = 1.0f;
+            s.revert_boost = 0.0f;
             changed();
             return "Trick heights and flip trick speed are the game's own again.";
         }
@@ -2321,6 +2341,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.camera_on = false;
             s.rigs = {};
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = 1.0f;
+            s.revert_boost = 0.0f;
             changed();
             return std::format("Everything is the game's own again: {} values put back, locks cleared, presets off, trick sliders at 1.", count);
         }
@@ -2385,7 +2406,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             for (const auto &e : s.entries)
                 if (e.touched) values[e.key] = e.value;
             for (const auto trick : trick_names)
-                if (const auto *option = trick_option(trick); *option != 1.0f) values[std::string(trick_prefix) + std::string(trick)] = *option;
+                if (const auto *option = trick_option(trick); *option != trick_stock(trick)) values[std::string(trick_prefix) + std::string(trick)] = *option;
             if (values.empty()) return "error: nothing is changed, so there is nothing to save.";
             const auto count = values.size();
             s.user[name] = std::move(values);
@@ -2457,6 +2478,11 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             if (!editable(&why)) return "error: " + why;
             (name == "hippy_height" ? s.hippy_height : name == "nocomply_height" ? s.nocomply_height : name == "offboard_height" ? s.offboard_height : s.boneless_height) =
                 std::clamp(static_cast<float>(*value), height_low, height_high);
+        } else if (name == "revert_boost") {
+            const auto value = number(arg(1));
+            if (!value) return "error: revert_boost needs a strength: 0 is off, 1 gives back about 2 m/s on an auto revert.";
+            if (!editable(&why)) return "error: " + why;
+            s.revert_boost = std::clamp(static_cast<float>(*value), 0.0f, revert_boost_high);
         } else if (name == "return_delay") {
             const auto value = number(arg(1));
             if (!value) return "error: return_delay needs seconds.";

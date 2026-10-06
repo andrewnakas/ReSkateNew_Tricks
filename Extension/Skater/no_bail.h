@@ -27,4 +27,21 @@ void watch_physics_state(std::uintptr_t client, std::uintptr_t entity) noexcept;
 PhysicsStateWatch watched_physics_state() noexcept;
 // Stopping flight must not discard the independent manual preference.
 void clear_no_bail_flight() noexcept;
+// The local skater's turn over each flight, for the trainer's revert boost: measured in the
+// physics state hook, every physics step, so the start and the end of the turn are not lost.
+// From AutoRevertBoost by Sivaes, jaq and OVM (github.com/Sivaes/AutoRevertBoost, GPL-3.0).
+struct RevertLanding {
+    std::uint64_t sequence{};     // 0: no landing yet; one more per finished flight
+    float spin_degrees{};         // signed turn about the vertical axis from takeoff to landing
+    float board_spin_degrees{};   // the same for the board's deck (if board_valid)
+    float board_offset_degrees{}; // the deck's heading minus the skater's at touchdown (if board_valid)
+    bool board_valid{};
+    std::uint32_t from{}, to{};   // the last air state, and the state chosen on landing
+    std::uint32_t steps{};        // physics steps in the air
+    std::uint64_t air_ms{}, landed_at{}; // flight time, and GetTickCount64() at the landing
+};
+// Which skater to measure: its physics selector, its world matrix and the deck's physics body
+// (rotation rows from +0x20). Asked again at least twice a second, or the measuring stops.
+void watch_revert_spin(std::uintptr_t selector, std::uintptr_t transform, std::uintptr_t board) noexcept;
+RevertLanding last_revert_landing() noexcept;
 }

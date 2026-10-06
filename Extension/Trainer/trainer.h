@@ -85,6 +85,7 @@ struct View {
     float hippy_height{1};
     // The same for the no comply and the boneless.
     float nocomply_height{1}, boneless_height{1};
+    float revert_boost{}; // strength of the speed given back on an auto revert; 0: off
     float offboard_height{1}; // a jump on foot
     float flip_speed{1};      // board flip tricks: x of the game's own speed
     // HUD

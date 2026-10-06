@@ -6,7 +6,9 @@
 #include "Engine/Game/Build/addresses.h"
 #include "Engine/Game/Build/20260929/engine.h"
 #include "Engine/Game/Build/20260929/no_bail.h"
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <intrin.h>
 
 namespace dingosdk {
@@ -68,6 +70,93 @@ struct StateWatch {
     std::atomic<std::int64_t> since{}, previous_ticks{}; // performance-counter ticks
 };
 StateWatch& state_watch() { static auto* value = new StateWatch; return *value; }
+// The turn of one skater over each flight (no_bail.h). The published fields are atomics; the
+// rest is only touched by that skater's physics selector.
+struct SpinWatch {
+    std::atomic<std::uintptr_t> selector{}, transform{}, board{};
+    std::atomic<std::uint64_t> until{};
+    bool airborne{}, have_yaw{}, board_ok{};
+    float yaw{}, spin{}, board_yaw{}, board_spin{};
+    std::uint32_t steps{}, last_air{};
+    std::uint64_t took_off{};
+    SRWLOCK lock = SRWLOCK_INIT;
+    RevertLanding last;
+};
+SpinWatch& spin_watch() { static auto* value = new SpinWatch; return *value; }
+void track_spin(std::uintptr_t selector, std::uint32_t chosen) noexcept {
+    constexpr float pi = 3.14159265f;
+    auto& s = spin_watch();
+    const auto now = GetTickCount64();
+    if (selector != s.selector.load(std::memory_order_acquire)) return;
+    if (now >= s.until.load(std::memory_order_acquire)) {
+        s.airborne = s.have_yaw = false;
+        return;
+    }
+    std::array<float, 16> m{};
+    const auto transform = s.transform.load(std::memory_order_acquire);
+    if (!transform || !read(transform, m) || !std::isfinite(m[8]) || !std::isfinite(m[10]) || std::abs(m[8]) + std::abs(m[10]) < 1e-3f) {
+        s.airborne = s.have_yaw = false;
+        return;
+    }
+    const float yaw = std::atan2(m[8], m[10]);
+    // The deck's heading, read the same way from its three rotation rows; only a set of unit rows counts.
+    std::array<float, 12> b{};
+    float board_yaw{};
+    bool board_ok = false;
+    if (const auto board = s.board.load(std::memory_order_acquire); board && read(board + 0x20, b)) {
+        const auto length = [&](int r) { return b[r * 4] * b[r * 4] + b[r * 4 + 1] * b[r * 4 + 1] + b[r * 4 + 2] * b[r * 4 + 2]; };
+        board_ok = std::isfinite(length(0) + length(1) + length(2)) && std::abs(length(0) - 1) < 0.05f && std::abs(length(1) - 1) < 0.05f &&
+                   std::abs(length(2) - 1) < 0.05f && std::abs(b[8]) + std::abs(b[10]) > 1e-3f;
+        if (board_ok) board_yaw = std::atan2(b[8], b[10]);
+    }
+    const auto wrap = [](float d) {
+        while (d > pi) d -= 2 * pi;
+        while (d < -pi) d += 2 * pi;
+        return d;
+    };
+    const bool air = chosen >= 200 && chosen <= 299;
+    if (!s.airborne) {
+        if (air && s.have_yaw) {
+            // Counted from the last ground pose, so the turn begun on the takeoff step is kept.
+            s.airborne = true;
+            s.spin = wrap(yaw - s.yaw);
+            s.board_spin = board_ok && s.board_ok ? wrap(board_yaw - s.board_yaw) : 0.0f;
+            s.board_ok = board_ok && s.board_ok;
+            s.steps = 1;
+            s.took_off = now;
+            s.last_air = chosen;
+        }
+    } else {
+        s.spin += wrap(yaw - s.yaw);
+        if (s.board_ok && board_ok) s.board_spin += wrap(board_yaw - s.board_yaw);
+        else s.board_ok = false;
+        if (air) {
+            ++s.steps;
+            s.last_air = chosen;
+        } else {
+            // The pose read here is the one the flight ended with, before the game's revert turns it.
+            RevertLanding landing;
+            landing.spin_degrees = s.spin * 180.0f / pi;
+            landing.board_spin_degrees = s.board_spin * 180.0f / pi;
+            landing.board_valid = s.board_ok;
+            landing.board_offset_degrees = wrap(board_yaw - yaw) * 180.0f / pi;
+            landing.from = s.last_air;
+            landing.to = chosen;
+            landing.steps = s.steps;
+            landing.air_ms = now - s.took_off;
+            landing.landed_at = now;
+            AcquireSRWLockExclusive(&s.lock);
+            landing.sequence = s.last.sequence + 1;
+            s.last = landing;
+            ReleaseSRWLockExclusive(&s.lock);
+            s.airborne = false;
+        }
+    }
+    s.yaw = yaw;
+    s.have_yaw = true;
+    if (!s.airborne) s.board_ok = board_ok; // on the ground: whether the next takeoff has a board pose
+    s.board_yaw = board_yaw;
+}
 
 // Recheck live local ownership at use time. A retained physics address alone
 // must never protect another skater after a respawn or level change.
@@ -208,6 +297,7 @@ std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
             if (chosen == wipeout_physics_state) w.wipeouts.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    track_spin(selector, chosen);
     return chosen;
 }
 void skeleton_response(std::uintptr_t rig, float seconds, bool wipeout) {
@@ -411,6 +501,20 @@ PhysicsStateWatch watched_physics_state() noexcept {
     result.changes = w.changes.load(std::memory_order_relaxed);
     result.wipeouts = w.wipeouts.load(std::memory_order_relaxed);
     return result;
+}
+void watch_revert_spin(std::uintptr_t selector, std::uintptr_t transform, std::uintptr_t board) noexcept {
+    auto& s = spin_watch();
+    s.transform.store(transform, std::memory_order_release);
+    s.board.store(board, std::memory_order_release);
+    s.selector.store(selector, std::memory_order_release);
+    s.until.store(GetTickCount64() + 500, std::memory_order_release);
+}
+RevertLanding last_revert_landing() noexcept {
+    auto& s = spin_watch();
+    AcquireSRWLockShared(&s.lock);
+    const auto landing = s.last;
+    ReleaseSRWLockShared(&s.lock);
+    return landing;
 }
 void clear_no_bail_flight() noexcept {
     auto& p = protection();

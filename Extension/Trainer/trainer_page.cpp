@@ -31,6 +31,8 @@ struct Page {
     std::array<float, 3> teleport{};
     double speed_edit{-1}, speed_until{};
     float hippy_edit{1}, nocomply_edit{1}, boneless_edit{1}, offboard_edit{1}, flip_edit{1};
+    float revert_edit{};
+    bool revert_editing{};
     bool hippy_editing{}, nocomply_editing{}, boneless_editing{}, offboard_editing{}, flip_editing{};
     std::uint64_t open_serial{}; // the last `trainer open` acted on
     std::uint64_t share_serial{}; // the last `preset export` put on the clipboard
@@ -382,7 +384,8 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
 }
 
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words) {
-    static constexpr const char *labels[]{"Flip trick speed", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height"};
+    static constexpr const char *labels[]{"Flip trick speed", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
+                                           "Revert speed boost"};
     const auto wanted = [&](const char *label) { return words.empty() || contains_words(lower(std::string(label) + " tricks"), words); };
     if (std::ranges::none_of(labels, wanted)) return;
     begin_card(menu, "trick-heights", "TRICKS", "1.0 is the game's own");
@@ -417,7 +420,35 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
     slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing);
     slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing);
     slider("Off-board jump height", "offboard_height", view.offboard_height, p.offboard_edit, p.offboard_editing);
+    if (wanted("Revert speed boost")) {
+        // Not a multiplier: 0 is the game's own (no boost).
+        field(menu, "Revert speed boost");
+        ImGui::PushID("revert_boost");
+        float shown = p.revert_editing ? p.revert_edit : view.revert_boost;
+        const float box = px(64);
+        ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - box - ImGui::GetStyle().ItemSpacing.x));
+        if (ImGui::SliderFloat("##strength", &shown, 0.0f, 5.0f, shown <= 0.0f ? "off" : "x %.2f")) {
+            p.revert_edit = shown;
+            p.revert_editing = true;
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) trainer_command(menu, callbacks, std::format("option revert_boost {:.2f}", p.revert_edit));
+        if (!ImGui::IsItemActive() && p.revert_editing && std::abs(view.revert_boost - p.revert_edit) < 0.006f) p.revert_editing = false;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Land a spin the game has to auto revert (the board well out of line) and get speed back, as earlier builds did.\n"
+                              "x 1 gives about +1.5 to +2.6 m/s a landing; chain reverts to build speed. 0 is off, the game's own.\n"
+                              "From AutoRevertBoost by Sivaes, jaq and OVM.");
+        ImGui::SameLine();
+        float typed = view.revert_boost;
+        ImGui::SetNextItemWidth(box);
+        if (ImGui::InputFloat("##typed", &typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue) && typed >= 0) {
+            p.revert_editing = false;
+            trainer_command(menu, callbacks, std::format("option revert_boost {}", typed));
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Type any strength and press Enter: the slider's end is not a limit.");
+        ImGui::PopID();
+    }
     if (ImGui::Button("Reset tricks")) {
+        p.revert_editing = false;
         p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = false;
         trainer_command(menu, callbacks, "reset tricks");
     }
@@ -716,7 +747,7 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     const auto view = trainer::view();
     ImGui::BeginDisabled(!callbacks.queue_console_command);
     if (ImGui::Button("RESET EVERYTHING")) {
-        p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = false;
+        p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.revert_editing = false;
         trainer_command(menu, callbacks, "reset everything");
     }
     ImGui::EndDisabled();

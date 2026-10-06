@@ -303,12 +303,108 @@ void trainer_push_speed(std::uintptr_t core) noexcept {
         }
     } catch (...) {}
 }
+// ---- revert boost ------------------------------------------------------------------------------
+// When the game auto reverts a landing the board is still well out of line with the body and the
+// game swings it round. Earlier builds of the game gained speed there; this gives it back: a
+// forward speed along the direction of travel on the step of that landing. The measuring, the
+// thresholds and the size of the boost are AutoRevertBoost's (Sivaes, jaq and OVM,
+// github.com/Sivaes/AutoRevertBoost, GPL-3.0), taken from their play logs: clean and short 180s
+// land with the board 1-3 degrees off the body, auto reverts 71-130 degrees off.
+constexpr float revert_min_spin = 90.0f;         // degrees the skater turned in the air
+constexpr float revert_min_board_offset = 40.0f; // board out of line with the body (forward or fakie) at touchdown
+constexpr float revert_max_speed = 40.0f;        // m/s (144 km/h): no boost above this
+constexpr ULONGLONG revert_min_air_ms = 250, revert_max_age_ms = 400, revert_cooldown_ms = 500;
+// How much, at strength 1, from how far the board turned relative to the body over the flight:
+// a board bend (up to 140 degrees) gives +2 m/s at 40 degrees rising to +2.6 at 140; an auto
+// revert (past 140) a flat +1.5 m/s, less than any bend.
+float revert_boost_amount(float board_rotation) {
+    if (board_rotation > 140.0f) return 1.5f;
+    return 2.0f + 2.0f * std::clamp((board_rotation - 40.0f) / 320.0f, 0.0f, 1.0f);
+}
+struct RevertBoost {
+    std::atomic<float> strength{}; // 0: off
+    std::uintptr_t client{}, entity{};
+    std::atomic<ULONGLONG> expires{};
+    std::atomic<std::uint64_t> fired{};
+    std::atomic<float> last_added{};
+    // Physics thread only.
+    bool primed{};          // the landing count has been read once since the boost was switched on
+    std::uint64_t seen{};   // the last landing handled
+    ULONGLONG cooldown_until{};
+};
+RevertBoost& revert_boost() { static auto* value = new RevertBoost; return *value; }
+void trainer_revert_boost(std::uintptr_t core) noexcept {
+    auto& r = revert_boost();
+    const float strength = r.strength.load(std::memory_order_relaxed);
+    const auto now = GetTickCount64();
+    if (!(strength > 0) || now >= r.expires.load(std::memory_order_acquire)) {
+        r.primed = false; // nothing is read while it is off
+        return;
+    }
+    SourceLastError error;
+    auto& state = source_state();
+    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
+    SourceBusyScope scope{state.busy};
+    try {
+        const auto bodies = debug_noclip_bodies(state.trial.base, r.client, r.entity);
+        if (bodies.core != core || bodies.parts.empty()) return;
+        SourceReader reader;
+        const auto selector = reader.pointer(bodies.core, 0x440);
+        source_require(reader.pointer(selector, 8) == bodies.context, "Skater physics selector changed.");
+        // The skater's world matrix, where debug_skater reads it.
+        const auto collection = reader.pointer(r.entity, 0x70);
+        source_require(reader.pointer(collection) == r.entity, "Skater transform owner changed.");
+        const auto first = reader.value<std::uint8_t>(collection, 9), extra = reader.value<std::uint8_t>(collection, 10);
+        source_require(reader.value<std::uint8_t>(collection, 8) <= 128 && first <= 128 && extra <= 32, "Skater transform layout changed.");
+        std::array<std::array<float, 3>, 32> velocities{};
+        std::array<std::uint32_t, 32> flags{};
+        const auto count = std::min<std::size_t>(bodies.parts.size(), velocities.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            velocities[i] = reader.value<std::array<float, 3>>(bodies.parts[i], 0x70);
+            flags[i] = reader.value<std::uint32_t>(bodies.parts[i], 0x60);
+        }
+        reader.verify();
+        watch_revert_spin(selector, collection + std::uintptr_t{0x10} + (std::uintptr_t{first} + 2 * std::uintptr_t{extra}) * 0x20, bodies.parts[0]);
+        const auto landing = last_revert_landing();
+        if (!r.primed) { // landings from before it was switched on are not ours
+            r.primed = true;
+            r.seen = landing.sequence;
+            return;
+        }
+        if (landing.sequence == r.seen) return;
+        r.seen = landing.sequence;
+        float board_offset = std::fmod(std::abs(landing.board_offset_degrees), 180.0f);
+        board_offset = std::min(board_offset, 180.0f - board_offset); // 0: lined up, forward or fakie
+        const bool revert = landing.board_valid && std::abs(landing.spin_degrees) >= revert_min_spin && board_offset >= revert_min_board_offset;
+        const bool landed = landing.to >= 100 && landing.to < 200 && !bodies.offboard; // riding
+        const bool fresh = now >= landing.landed_at && now - landing.landed_at <= revert_max_age_ms;
+        const float speed = std::hypot(velocities[0][0], velocities[0][2]);
+        if (!revert || !landed || !fresh || landing.air_ms < revert_min_air_ms || now < r.cooldown_until || !std::isfinite(speed) || speed < 1.0f ||
+            speed >= revert_max_speed)
+            return;
+        const float board_rotation = std::abs(landing.board_spin_degrees - landing.spin_degrees);
+        const float added = std::min(revert_boost_amount(board_rotation) * strength, revert_max_speed - speed);
+        if (!(added > 0.005f)) return;
+        const float scale = (speed + added) / speed;
+        // Like the native velocity writers: XYZ at +70 and the dirty bit 8 at +60.
+        for (std::size_t i = 0; i < count; ++i) {
+            velocities[i][0] *= scale;
+            velocities[i][2] *= scale;
+            body_write(bodies.parts[i] + 0x70, velocities[i]);
+            body_write(bodies.parts[i] + 0x60, flags[i] | 8u);
+        }
+        r.cooldown_until = now + revert_cooldown_ms;
+        r.last_added.store(added, std::memory_order_relaxed);
+        r.fired.fetch_add(1, std::memory_order_release);
+    } catch (...) {}
+}
 void noclip_physics_update(std::uintptr_t core) {
     const auto original = source_state().velocity_update_original.load(std::memory_order_acquire);
     if (original) original(core);
     noclip_apply_velocity(core);
     trainer_apply_jump_scale(core);
     trainer_push_speed(core);
+    trainer_revert_boost(core);
 }
 bool noclip_motion_target(std::uintptr_t rig, std::uintptr_t context,
     const std::array<float,16>* supplied, std::array<float,16>& target) noexcept {
@@ -397,6 +493,17 @@ void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, 
     p.stock.store(stock > 1 && stock < 100 ? stock : 9.25f, std::memory_order_relaxed);
     p.factor.store(factor > 0.02f && factor <= 50 ? factor : 1.0f, std::memory_order_relaxed);
     p.expires.store(GetTickCount64() + 500, std::memory_order_release);
+}
+void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float strength) noexcept {
+    auto& r = revert_boost();
+    r.client = client;
+    r.entity = entity;
+    r.strength.store(std::isfinite(strength) && strength > 0 ? std::min(strength, 1000.0f) : 0.0f, std::memory_order_relaxed);
+    r.expires.store(GetTickCount64() + 500, std::memory_order_release);
+}
+RevertBoostCount revert_boosts() noexcept {
+    auto& r = revert_boost();
+    return {r.fired.load(std::memory_order_acquire), r.last_added.load(std::memory_order_relaxed)};
 }
 JumpScaleResult take_jump_scale_result() noexcept {
     auto& j = jump_scale();

@@ -25,6 +25,15 @@ JumpScaleResult take_jump_scale_result() noexcept;
 // rolling skater that is not braking gains speed up to it (m/s). Publish every client tick: it
 // expires after 500 ms.
 void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, float stock, float cruise) noexcept;
+// The trainer's revert boost: speed given back on a landing the game auto reverts (client_noclip.cpp).
+// `strength` multiplies the boost (1: about +1.5 to +2.6 m/s a landing), 0 switches it off. Call
+// every tick: it lapses half a second after the last call.
+void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float strength) noexcept;
+struct RevertBoostCount {
+    std::uint64_t fired{}; // boosts given since the game started
+    float last_added{};    // m/s
+};
+RevertBoostCount revert_boosts() noexcept;
 // Engine-thread-only interactive controls. Presentation callbacks only queue requests.
 overlay::DebugModel on_client_debug_tick(std::uintptr_t base, std::uintptr_t client,
     bool can_control, bool camera_phase_observed, const overlay::DebugRequest* request = nullptr,
