@@ -33,6 +33,7 @@ void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float streng
 struct RevertBoostReport {
     std::uint64_t sequence{}; // one more per landing judged; 0: none yet
     float spin{}, board_offset{}, board_rotation{}; // degrees
+    float slip{};                                   // degrees the board landed out of line with the direction of travel
     float speed{}, added{};                         // m/s
     std::uint32_t air_ms{}, landed_state{};
     bool board_read{};

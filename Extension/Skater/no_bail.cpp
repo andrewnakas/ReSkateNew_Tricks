@@ -140,6 +140,7 @@ void track_spin(std::uintptr_t selector, std::uint32_t chosen) noexcept {
             landing.board_spin_degrees = s.board_spin * 180.0f / pi;
             landing.board_valid = s.board_ok;
             landing.board_offset_degrees = wrap(board_yaw - yaw) * 180.0f / pi;
+            landing.heading_degrees = (s.board_ok ? board_yaw : yaw) * 180.0f / pi;
             landing.from = s.last_air;
             landing.to = chosen;
             landing.steps = s.steps;

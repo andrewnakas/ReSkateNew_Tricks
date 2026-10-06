@@ -312,6 +312,10 @@ void trainer_push_speed(std::uintptr_t core) noexcept {
 // land with the board 1-3 degrees off the body, auto reverts 71-130 degrees off.
 constexpr float revert_min_spin = 90.0f;         // degrees the skater turned in the air
 constexpr float revert_min_board_offset = 40.0f; // board out of line with the body (forward or fakie) at touchdown
+// The other revert, and the common one (measured 2026-10-06: twelve spins of 90 to 120 degrees all
+// landed with the board 0 to 3 degrees off the body): board and body together out of line with the
+// direction of travel, which the game then swings round. A clean 180 lands in line and gets nothing.
+constexpr float revert_min_slip = 12.0f;
 constexpr float revert_max_speed = 40.0f;        // m/s (144 km/h): no boost above this
 constexpr ULONGLONG revert_min_air_ms = 250, revert_max_age_ms = 400, revert_cooldown_ms = 500;
 // How much, at strength 1, from how far the board turned relative to the body over the flight:
@@ -378,10 +382,15 @@ void trainer_revert_boost(std::uintptr_t core) noexcept {
         const float spin = std::abs(landing.spin_degrees);
         const float board_rotation = landing.board_valid ? std::abs(landing.board_spin_degrees - landing.spin_degrees) : 0.0f;
         const float speed = std::hypot(velocities[0][0], velocities[0][2]);
+        // Out of line with the travel, forward or fakie: 0 = lined up, 90 = sideways.
+        float slip = 0.0f;
+        if (std::isfinite(speed) && speed >= 1.0f) {
+            slip = std::fmod(std::abs(landing.heading_degrees - std::atan2(velocities[0][0], velocities[0][2]) * 57.29578f), 180.0f);
+            slip = std::min(slip, 180.0f - slip);
+        }
         const float added = std::isfinite(speed) ? std::min(revert_boost_amount(board_rotation) * strength, revert_max_speed - speed) : 0.0f;
-        const char *outcome = !landing.board_valid ? "no boost: the board's pose could not be read"
-            : spin < revert_min_spin ? "no boost: under 90 degrees of spin"
-            : board_offset < revert_min_board_offset ? "no boost: the board landed in line (a clean landing)"
+        const char *outcome = spin < revert_min_spin ? "no boost: under 90 degrees of spin"
+            : (!landing.board_valid || board_offset < revert_min_board_offset) && slip < revert_min_slip ? "no boost: the board landed in line (a clean landing)"
             : landing.to < 100 || landing.to >= 200 || bodies.offboard ? "no boost: not riding"
             : now < landing.landed_at || now - landing.landed_at > revert_max_age_ms ? "no boost: seen too late"
             : landing.air_ms < revert_min_air_ms ? "no boost: too short a flight"
@@ -390,7 +399,7 @@ void trainer_revert_boost(std::uintptr_t core) noexcept {
             : "boost";
         const bool fire = std::string_view(outcome) == "boost";
         AcquireSRWLockExclusive(&r.report_lock);
-        r.report = {r.report.sequence + 1, spin, board_offset, board_rotation, speed, fire ? added : 0.0f, static_cast<std::uint32_t>(landing.air_ms),
+        r.report = {r.report.sequence + 1, spin, board_offset, board_rotation, slip, speed, fire ? added : 0.0f, static_cast<std::uint32_t>(landing.air_ms),
                     landing.to, landing.board_valid, outcome};
         ReleaseSRWLockExclusive(&r.report_lock);
         if (!fire) return;

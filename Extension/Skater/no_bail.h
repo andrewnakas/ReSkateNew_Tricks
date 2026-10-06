@@ -35,6 +35,7 @@ struct RevertLanding {
     float spin_degrees{};         // signed turn about the vertical axis from takeoff to landing
     float board_spin_degrees{};   // the same for the board's deck (if board_valid)
     float board_offset_degrees{}; // the deck's heading minus the skater's at touchdown (if board_valid)
+    float heading_degrees{};      // where the deck (the skater, without a deck pose) points at touchdown: 0 = +Z, as atan2(x, z)
     bool board_valid{};
     std::uint32_t from{}, to{};   // the last air state, and the state chosen on landing
     std::uint32_t steps{};        // physics steps in the air

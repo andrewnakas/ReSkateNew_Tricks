@@ -2155,9 +2155,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             // Every landing with some spin in it, boosted or not, so a report can say why not.
             if ((s.hud_jump || s.logging) && report.spin >= 30.0f)
                 say(logging::Level::info,
-                    std::format("Trainer revert: landed after {} ms with {:.0f} deg of spin, board {} off the body, board turned {:.0f} deg past the body, state {}, "
+                    std::format("Trainer revert: landed after {} ms with {:.0f} deg of spin, board {} off the body and {:.0f} deg off the travel, board turned {:.0f} deg past the body, state {}, "
                                 "{:.1f} m/s: {}{}.",
-                                report.air_ms, report.spin, report.board_read ? std::format("{:.0f} deg", report.board_offset) : std::string("unread"),
+                                report.air_ms, report.spin, report.board_read ? std::format("{:.0f} deg", report.board_offset) : std::string("unread"), report.slip,
                                 report.board_rotation, report.landed_state, report.speed, report.outcome,
                                 report.added > 0 ? std::format(" +{:.1f} m/s", report.added) : std::string()));
         }
