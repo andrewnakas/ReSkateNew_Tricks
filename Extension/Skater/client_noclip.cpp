@@ -310,27 +310,25 @@ void trainer_push_speed(std::uintptr_t core) noexcept {
 // thresholds and the size of the boost are AutoRevertBoost's (Sivaes, jaq and OVM,
 // github.com/Sivaes/AutoRevertBoost, GPL-3.0), taken from their play logs: clean and short 180s
 // land with the board 1-3 degrees off the body, auto reverts 71-130 degrees off.
-constexpr float revert_min_spin = 90.0f;         // degrees the skater turned in the air
-constexpr float revert_min_board_offset = 40.0f; // board out of line with the body (forward or fakie) at touchdown
+// The thresholds and sizes are RevertTuning's (client_source_spawn.h), the player's to change.
 // The other revert, and the common one (measured 2026-10-06: twelve spins of 90 to 120 degrees all
 // landed with the board 0 to 3 degrees off the body): board and body together out of line with the
 // direction of travel, which the game then swings round. A clean 180 lands in line and gets nothing.
-constexpr float revert_min_slip = 12.0f;
-constexpr float revert_max_speed = 40.0f;        // m/s (144 km/h): no boost above this
-constexpr ULONGLONG revert_min_air_ms = 250, revert_max_age_ms = 400, revert_cooldown_ms = 500;
+constexpr ULONGLONG revert_max_age_ms = 400;
 // How much, at strength 1, from how far the board turned relative to the body over the flight:
 // a board bend (up to 140 degrees) gives +2 m/s at 40 degrees rising to +2.6 at 140; an auto
 // revert (past 140) a flat +1.5 m/s, less than any bend.
-float revert_boost_amount(float board_rotation) {
-    if (board_rotation > 140.0f) return 1.5f;
-    return 2.0f + 2.0f * std::clamp((board_rotation - 40.0f) / 320.0f, 0.0f, 1.0f);
+float revert_boost_amount(const RevertTuning &t, float board_rotation) {
+    if (board_rotation > 140.0f) return t.auto_boost;
+    return t.bend_boost + (t.full_boost - t.bend_boost) * std::clamp((board_rotation - 40.0f) / 320.0f, 0.0f, 1.0f);
 }
 struct RevertBoost {
     std::atomic<float> strength{}; // 0: off
     std::uintptr_t client{}, entity{};
     std::atomic<ULONGLONG> expires{};
-    SRWLOCK report_lock = SRWLOCK_INIT;
+    SRWLOCK report_lock = SRWLOCK_INIT; // the report and the tuning
     RevertBoostReport report;
+    RevertTuning tuning;
     // Physics thread only.
     bool primed{};          // the landing count has been read once since the boost was switched on
     std::uint64_t seen{};   // the last landing handled
@@ -370,6 +368,9 @@ void trainer_revert_boost(std::uintptr_t core) noexcept {
         reader.verify();
         watch_revert_spin(selector, collection + std::uintptr_t{0x10} + (std::uintptr_t{first} + 2 * std::uintptr_t{extra}) * 0x20, bodies.parts[0]);
         const auto landing = last_revert_landing();
+        AcquireSRWLockShared(&r.report_lock);
+        const auto t = r.tuning;
+        ReleaseSRWLockShared(&r.report_lock);
         if (!r.primed) { // landings from before it was switched on are not ours
             r.primed = true;
             r.seen = landing.sequence;
@@ -388,12 +389,12 @@ void trainer_revert_boost(std::uintptr_t core) noexcept {
             slip = std::fmod(std::abs(landing.heading_degrees - std::atan2(velocities[0][0], velocities[0][2]) * 57.29578f), 180.0f);
             slip = std::min(slip, 180.0f - slip);
         }
-        const float added = std::isfinite(speed) ? std::min(revert_boost_amount(board_rotation) * strength, revert_max_speed - speed) : 0.0f;
-        const char *outcome = spin < revert_min_spin ? "no boost: under 90 degrees of spin"
-            : (!landing.board_valid || board_offset < revert_min_board_offset) && slip < revert_min_slip ? "no boost: the board landed in line (a clean landing)"
+        const float added = std::isfinite(speed) ? std::min(revert_boost_amount(t, board_rotation) * strength, t.max_speed - speed) : 0.0f;
+        const char *outcome = spin < t.min_spin ? "no boost: not enough spin"
+            : (!landing.board_valid || board_offset < t.min_twist) && slip < t.min_slip ? "no boost: the board landed in line (a clean landing)"
             : landing.to < 100 || landing.to >= 200 || bodies.offboard ? "no boost: not riding"
             : now < landing.landed_at || now - landing.landed_at > revert_max_age_ms ? "no boost: seen too late"
-            : landing.air_ms < revert_min_air_ms ? "no boost: too short a flight"
+            : static_cast<float>(landing.air_ms) < t.min_air * 1000.0f ? "no boost: too short a flight"
             : now < r.cooldown_until ? "no boost: too soon after the last"
             : !std::isfinite(speed) || speed < 1.0f || !(added > 0.005f) ? "no boost: standing still or already at the speed limit"
             : "boost";
@@ -411,7 +412,7 @@ void trainer_revert_boost(std::uintptr_t core) noexcept {
             body_write(bodies.parts[i] + 0x70, velocities[i]);
             body_write(bodies.parts[i] + 0x60, flags[i] | 8u);
         }
-        r.cooldown_until = now + revert_cooldown_ms;
+        r.cooldown_until = now + static_cast<ULONGLONG>(std::clamp(t.cooldown, 0.0f, 60.0f) * 1000.0f);
     } catch (...) {}
 }
 void noclip_physics_update(std::uintptr_t core) {
@@ -510,8 +511,11 @@ void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, 
     p.factor.store(factor > 0.02f && factor <= 50 ? factor : 1.0f, std::memory_order_relaxed);
     p.expires.store(GetTickCount64() + 500, std::memory_order_release);
 }
-void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float strength) noexcept {
+void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float strength, const RevertTuning &tuning) noexcept {
     auto& r = revert_boost();
+    AcquireSRWLockExclusive(&r.report_lock);
+    r.tuning = tuning;
+    ReleaseSRWLockExclusive(&r.report_lock);
     r.client = client;
     r.entity = entity;
     r.strength.store(std::isfinite(strength) && strength > 0 ? std::min(strength, 1000.0f) : 0.0f, std::memory_order_relaxed);

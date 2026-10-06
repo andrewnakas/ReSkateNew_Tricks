@@ -18,6 +18,8 @@ void register_trainer_commands(Commands &registry) {
         {"reset", "Put a value (or all) back to stock", "<value id>|all", false},
         {"find", "List tuning values whose id contains the words", "<words>", false},
         {"preset", "Apply, remove, save or delete a preset", "apply|remove|save|delete|export <name> | import [file]", false},
+        {"revert", "What counts as a revert and what its speed boost is worth", "<field> <number> | reset", false},
+        {"trickline", "Trick line settings: Skate 3's, or the game's own", "skate3|stock", false},
         {"camera", "Your own follow camera: distance, height, tilt, shoulder, FOV", "on|off | game | preset <name> | set board|foot <field> <number>", false},
         {"dial", "Turn a built-in preset up or down: 1 is the game's own", "<multiplier> <preset name>", false},
         {"slot", "Select a marker slot", "<1-5>", false},

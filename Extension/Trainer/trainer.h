@@ -5,6 +5,7 @@
 // console command, so the menu page (presentation thread) only queues commands and reads
 // the two snapshots below; nothing here touches the game from the UI.
 #include "trainer_camera.h"
+#include "Extension/Skater/client_source_spawn.h"
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -86,6 +87,7 @@ struct View {
     // The same for the no comply and the boneless.
     float nocomply_height{1}, boneless_height{1};
     float revert_boost{}; // strength of the speed given back on an auto revert; 0: off
+    RevertTuning revert;  // what counts as a revert and what it is worth
     float offboard_height{1}; // a jump on foot
     float flip_speed{1};      // board flip tricks: x of the game's own speed
     // HUD

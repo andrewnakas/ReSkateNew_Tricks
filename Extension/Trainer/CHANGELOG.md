@@ -32,9 +32,15 @@ can be tried: tell us what it does.
   curves it used to leave alone, which is why x0.4 only slowed a flip by a third. And below 1 it
   stretches the flip catch times by the same factor: the game hurries any flip that would not
   finish inside its catch time, so slowed flips used to snap back to full speed.
+- **Trick lines tab.** Everything that makes a trick line in one place (reverts and powerslides,
+  pumping, pops, spins and flips, manuals and grinds), with one button for Skate 3's settings and
+  one for the game's own. The revert boost's rules are yours to change there: how much spin
+  counts, how far out of line the board must land, what each kind of revert is worth.
 - **Revert speed boost** (TRICKS). Land a spin the game has to auto revert and get speed back, as
   earlier builds of the game did; chain reverts to build speed. 0 is off. The measuring and the
-  numbers are AutoRevertBoost's, by Sivaes, jaq and OVM (github.com/Sivaes/AutoRevertBoost).
+  numbers are AutoRevertBoost's, by Sivaes, jaq and OVM (github.com/Sivaes/AutoRevertBoost). It also
+  counts the common revert theirs did not: board and body together landing out of line with the
+  direction of travel.
 - **No limits of the trainer's own.** A slider's ends are only where the slider stops: every value,
   dial, trick slider and camera number takes any typed number (flip trick speed 0.01 to 100, camera
   numbers have a box beside the slider).

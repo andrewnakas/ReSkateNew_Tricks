@@ -28,7 +28,21 @@ void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, 
 // The trainer's revert boost: speed given back on a landing the game auto reverts (client_noclip.cpp).
 // `strength` multiplies the boost (1: about +1.5 to +2.6 m/s a landing), 0 switches it off. Call
 // every tick: it lapses half a second after the last call.
-void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float strength) noexcept;
+// What counts as a revert and what it is worth. The defaults are AutoRevertBoost's, plus the
+// landing out of line with the travel (see client_noclip.cpp).
+struct RevertTuning {
+    float min_spin{90.0f};   // degrees the skater must have turned in the air
+    float min_slip{12.0f};   // degrees the board must land out of line with the direction of travel, or
+    float min_twist{40.0f};  // degrees the board must land out of line with the body (a board bend)
+    float bend_boost{2.0f};  // m/s for a landing whose board turned 40 degrees past the body, rising to
+    float full_boost{4.0f};  // m/s at 360 degrees
+    float auto_boost{1.5f};  // m/s once the board turned more than 140 degrees past the body (an auto revert)
+    float max_speed{40.0f};  // m/s: nothing is added above this
+    float cooldown{0.5f};    // seconds between boosts
+    float min_air{0.25f};    // seconds a flight must last
+    bool operator==(const RevertTuning &) const = default;
+};
+void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float strength, const RevertTuning &tuning = {}) noexcept;
 // The last landing the revert boost judged, for the trainer's log: what it measured and what it did.
 struct RevertBoostReport {
     std::uint64_t sequence{}; // one more per landing judged; 0: none yet
