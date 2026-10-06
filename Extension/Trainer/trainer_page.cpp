@@ -33,7 +33,7 @@ struct Page {
     float hippy_edit{1}, nocomply_edit{1}, boneless_edit{1}, offboard_edit{1}, flip_edit{1};
     float revert_edit{};
     bool revert_editing{};
-    // The Trick lines tab: rows of the value table per group, for one snapshot.
+    // The Tricklining list: rows of the value table per group, for one snapshot.
     std::array<std::vector<std::size_t>, 5> trick_rows;
     std::uint64_t trick_revision{~0ull};
     bool hippy_editing{}, nocomply_editing{}, boneless_editing{}, offboard_editing{}, flip_editing{};
@@ -226,7 +226,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
     if (!view.editable) warn(view.blocked.c_str());
     // Two short lists, the trick line section and the whole table (modes 0, 1, 3 and 2).
     {
-        static constexpr std::pair<const char *, int> modes[]{{"REALISTIC", 0}, {"FUN", 1}, {"TRICK LINES", 3}, {"EVERYTHING", 2}};
+        static constexpr std::pair<const char *, int> modes[]{{"REALISTIC", 0}, {"FUN", 1}, {"TRICKLINING", 3}, {"EVERYTHING", 2}};
         const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 3) / 4;
         bool first = true;
         for (const auto &[label, mode] : modes) {
@@ -459,7 +459,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Board bending: land with the board turned out of line and the game snaps it straight. With this on, that snap\n"
                               "throws you forward, as it did in Skate 3: chain bends to keep and build speed without pushing.\n"
-                              "x 1 gives about +1.5 to +2.6 m/s a landing. 0 is off, the game's own. The Trick lines list has the details.\n"
+                              "x 1 gives about +1.5 to +2.6 m/s a landing. 0 is off, the game's own. The Tricklining list has the details.\n"
                               "From AutoRevertBoost by Sivaes, jaq and OVM.");
         ImGui::SameLine();
         float typed = view.revert_boost;
@@ -618,12 +618,12 @@ void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::
 void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     const bool can_edit = view.editable && callbacks.queue_console_command != nullptr;
     ImGui::BeginDisabled(!can_edit);
-    begin_card(menu, "trickline", "TRICK LINE EXTRAS", "What Skate 3's trick lines had beyond its tuning");
+    begin_card(menu, "trickline", "TRICKLINING EXTRAS", "What Skate 3's tricklining had beyond its tuning");
     bool extras = view.revert_boost > 0;
-    if (toggle_row(menu, "Skate 3's trick line extras",
+    if (toggle_row(menu, "Skate 3's tricklining extras",
             "The board bending boost below at x 1, and heavier revert and powerslide friction (x 3 and x 1.5: a first guess, tune them below).", extras))
         trainer_command(menu, callbacks, extras ? "trickline extras on" : "trickline extras off");
-    note("Pick the game to play like above, then tune the trick line part of it here. Blue = changed; Reset puts one value back. Type in a box to go past a slider's end.");
+    note("Pick the game to play like above, then tune the tricklining part of it here. Blue = changed; Reset puts one value back. Type in a box to go past a slider's end.");
     end_card();
 
     // Rows of the value table by id, looked up once per snapshot.
@@ -680,7 +680,7 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
             if (i < view.rows.size()) value_row(menu, callbacks, p, view, view.rows[i], false, true);
     };
 
-    begin_card(menu, "trick-revert", "BOARD BENDING, REVERTS AND POWERSLIDES", "Speed out of a bent landing, and what a revert or slide costs");
+    begin_card(menu, "trick-revert", "BOARD BENDING, REVERTS AND POWERSLIDES", "Speed out of a bent landing");
     {
         // The revert speed boost: its strength, then what counts and what it is worth.
         const auto number_row = [&](const char *label, const char *command, float value, float low, float high, const char *format, const char *tip) {
@@ -704,7 +704,7 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
             ImGui::PopID();
         };
         const auto &r = view.revert;
-        note("Board bending is how a trick line keeps its speed. Land a spin with the board out of line (twisted off your body, or you and the "
+        note("Board bending is how tricklining keeps its speed. Land a spin with the board out of line (twisted off your body, or you and the "
              "board together sideways to where you are going) and the game snaps the board straight. In Skate 3 that snap threw you forward, so "
              "liners bend the board on every landing instead of pushing. skate. gives nothing for it; this boost puts the speed back.");
         number_row("Board bending boost", "option revert_boost", view.revert_boost, 0.0f, 5.0f, view.revert_boost <= 0 ? "off" : "x %.2f",

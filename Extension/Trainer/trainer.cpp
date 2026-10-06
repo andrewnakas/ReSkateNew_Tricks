@@ -1880,7 +1880,7 @@ std::string trickline_command(const std::vector<std::string> &a) {
         if (auto *e = find_entry(key); e && !is_locked(*e)) set_entry(*e, on ? e->stock * factor : e->stock);
     s.revert_boost = on ? std::max(s.revert_boost, 1.0f) : 0.0f;
     changed();
-    return on ? "Trick line extras on: speed back out of reverts, heavier revert and powerslide friction." : "Trick line extras off.";
+    return on ? "Tricklining extras on: the board bending boost, heavier revert and powerslide friction." : "Tricklining extras off.";
 }
 // The game's own cameras: `trainer camera rig low|high|foot <field> <number>`, or a preset for all three.
 std::string rig_command(const std::vector<std::string> &a) {

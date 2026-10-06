@@ -20,7 +20,7 @@ void register_trainer_commands(Commands &registry) {
         {"preset", "Apply, remove, save or delete a preset", "apply|remove|save|delete|export <name> | import [file]", false},
         {"revert", "What counts as a revert and what its speed boost is worth", "<field> <number> | reset", false},
         {"feel", "Which game the skating plays like", "stock|easy|normal|hardcore", false},
-        {"trickline", "Skate 3's trick line extras: revert boost and heavier revert friction", "extras on|off", false},
+        {"trickline", "Skate 3's tricklining extras: the board bending boost and heavier revert friction", "extras on|off", false},
         {"camera", "Your own follow camera: distance, height, tilt, shoulder, FOV", "on|off | game | preset <name> | set board|foot <field> <number>", false},
         {"dial", "Turn a built-in preset up or down: 1 is the game's own", "<multiplier> <preset name>", false},
         {"slot", "Select a marker slot", "<1-5>", false},

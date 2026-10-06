@@ -1,8 +1,8 @@
 # Changelog
 
-## Next (0.4.0, in progress)
+## v0.4.0 - 2026-10-06 (test build)
 
-From what players asked for in the ReSkate Discord. Everything marked "untested" is in so that it
+Built on ReSkate 1.1.3. From what players asked for in the ReSkate Discord. Everything marked "untested" is in so that it
 can be tried: tell us what it does.
 
 - **Camera tab.** Move the game's own cameras: distance, height and side for the low camera, the
@@ -32,14 +32,14 @@ can be tried: tell us what it does.
   curves it used to leave alone, which is why x0.4 only slowed a flip by a third. And below 1 it
   stretches the flip catch times by the same factor: the game hurries any flip that would not
   finish inside its catch time, so slowed flips used to snap back to full speed.
-- **Trick lines** (a fourth list on the Tune tab). Everything that makes a trick line in one place (reverts and powerslides,
+- **Tricklining** (a fourth list on the Tune tab). Everything tricklining needs in one place (reverts and powerslides,
   pumping, pops, spins and flips, manuals and grinds), under a "play like" choice:
   skate., Skate 3 Easy, Skate 3 or Skate 3 Hardcore (the choice heads every list of the Tune tab), plus
-  Skate 3's trick line extras. The revert boost's rules are yours to change there: how much spin
+  Skate 3's tricklining extras. The revert boost's rules are yours to change there: how much spin
   counts, how far out of line the board must land, what each kind of revert is worth.
 - **Skate 3 presets grind the older way.** They also set 21 grind and pumping values from the unused
   tuning set the game still carries (Skate 3's wherever the two can be compared): grind friction,
-  slide angles, no automatic turning between grinds. Each trick line card says what it is for.
+  slide angles, no automatic turning between grinds. Each tricklining card says what it is for.
 - **Board bending boost** (TRICKS; it was first called the revert speed boost). Land a spin the game has to auto revert and get speed back, as
   earlier builds of the game did; chain reverts to build speed. 0 is off. The measuring and the
   numbers are AutoRevertBoost's, by Sivaes, jaq and OVM (github.com/Sivaes/AutoRevertBoost). It also
