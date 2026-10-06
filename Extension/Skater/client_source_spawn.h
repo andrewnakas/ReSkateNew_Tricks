@@ -29,11 +29,16 @@ void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, 
 // `strength` multiplies the boost (1: about +1.5 to +2.6 m/s a landing), 0 switches it off. Call
 // every tick: it lapses half a second after the last call.
 void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float strength) noexcept;
-struct RevertBoostCount {
-    std::uint64_t fired{}; // boosts given since the game started
-    float last_added{};    // m/s
+// The last landing the revert boost judged, for the trainer's log: what it measured and what it did.
+struct RevertBoostReport {
+    std::uint64_t sequence{}; // one more per landing judged; 0: none yet
+    float spin{}, board_offset{}, board_rotation{}; // degrees
+    float speed{}, added{};                         // m/s
+    std::uint32_t air_ms{}, landed_state{};
+    bool board_read{};
+    const char *outcome = ""; // "boost", or why not
 };
-RevertBoostCount revert_boosts() noexcept;
+RevertBoostReport revert_boost_report() noexcept;
 // Engine-thread-only interactive controls. Presentation callbacks only queue requests.
 overlay::DebugModel on_client_debug_tick(std::uintptr_t base, std::uintptr_t client,
     bool can_control, bool camera_phase_observed, const overlay::DebugRequest* request = nullptr,

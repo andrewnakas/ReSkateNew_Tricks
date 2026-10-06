@@ -325,8 +325,8 @@ struct RevertBoost {
     std::atomic<float> strength{}; // 0: off
     std::uintptr_t client{}, entity{};
     std::atomic<ULONGLONG> expires{};
-    std::atomic<std::uint64_t> fired{};
-    std::atomic<float> last_added{};
+    SRWLOCK report_lock = SRWLOCK_INIT;
+    RevertBoostReport report;
     // Physics thread only.
     bool primed{};          // the landing count has been read once since the boost was switched on
     std::uint64_t seen{};   // the last landing handled
@@ -375,16 +375,25 @@ void trainer_revert_boost(std::uintptr_t core) noexcept {
         r.seen = landing.sequence;
         float board_offset = std::fmod(std::abs(landing.board_offset_degrees), 180.0f);
         board_offset = std::min(board_offset, 180.0f - board_offset); // 0: lined up, forward or fakie
-        const bool revert = landing.board_valid && std::abs(landing.spin_degrees) >= revert_min_spin && board_offset >= revert_min_board_offset;
-        const bool landed = landing.to >= 100 && landing.to < 200 && !bodies.offboard; // riding
-        const bool fresh = now >= landing.landed_at && now - landing.landed_at <= revert_max_age_ms;
+        const float spin = std::abs(landing.spin_degrees);
+        const float board_rotation = landing.board_valid ? std::abs(landing.board_spin_degrees - landing.spin_degrees) : 0.0f;
         const float speed = std::hypot(velocities[0][0], velocities[0][2]);
-        if (!revert || !landed || !fresh || landing.air_ms < revert_min_air_ms || now < r.cooldown_until || !std::isfinite(speed) || speed < 1.0f ||
-            speed >= revert_max_speed)
-            return;
-        const float board_rotation = std::abs(landing.board_spin_degrees - landing.spin_degrees);
-        const float added = std::min(revert_boost_amount(board_rotation) * strength, revert_max_speed - speed);
-        if (!(added > 0.005f)) return;
+        const float added = std::isfinite(speed) ? std::min(revert_boost_amount(board_rotation) * strength, revert_max_speed - speed) : 0.0f;
+        const char *outcome = !landing.board_valid ? "no boost: the board's pose could not be read"
+            : spin < revert_min_spin ? "no boost: under 90 degrees of spin"
+            : board_offset < revert_min_board_offset ? "no boost: the board landed in line (a clean landing)"
+            : landing.to < 100 || landing.to >= 200 || bodies.offboard ? "no boost: not riding"
+            : now < landing.landed_at || now - landing.landed_at > revert_max_age_ms ? "no boost: seen too late"
+            : landing.air_ms < revert_min_air_ms ? "no boost: too short a flight"
+            : now < r.cooldown_until ? "no boost: too soon after the last"
+            : !std::isfinite(speed) || speed < 1.0f || !(added > 0.005f) ? "no boost: standing still or already at the speed limit"
+            : "boost";
+        const bool fire = std::string_view(outcome) == "boost";
+        AcquireSRWLockExclusive(&r.report_lock);
+        r.report = {r.report.sequence + 1, spin, board_offset, board_rotation, speed, fire ? added : 0.0f, static_cast<std::uint32_t>(landing.air_ms),
+                    landing.to, landing.board_valid, outcome};
+        ReleaseSRWLockExclusive(&r.report_lock);
+        if (!fire) return;
         const float scale = (speed + added) / speed;
         // Like the native velocity writers: XYZ at +70 and the dirty bit 8 at +60.
         for (std::size_t i = 0; i < count; ++i) {
@@ -394,8 +403,6 @@ void trainer_revert_boost(std::uintptr_t core) noexcept {
             body_write(bodies.parts[i] + 0x60, flags[i] | 8u);
         }
         r.cooldown_until = now + revert_cooldown_ms;
-        r.last_added.store(added, std::memory_order_relaxed);
-        r.fired.fetch_add(1, std::memory_order_release);
     } catch (...) {}
 }
 void noclip_physics_update(std::uintptr_t core) {
@@ -501,9 +508,12 @@ void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float streng
     r.strength.store(std::isfinite(strength) && strength > 0 ? std::min(strength, 1000.0f) : 0.0f, std::memory_order_relaxed);
     r.expires.store(GetTickCount64() + 500, std::memory_order_release);
 }
-RevertBoostCount revert_boosts() noexcept {
+RevertBoostReport revert_boost_report() noexcept {
     auto& r = revert_boost();
-    return {r.fired.load(std::memory_order_acquire), r.last_added.load(std::memory_order_relaxed)};
+    AcquireSRWLockShared(&r.report_lock);
+    const auto report = r.report;
+    ReleaseSRWLockShared(&r.report_lock);
+    return report;
 }
 JumpScaleResult take_jump_scale_result() noexcept {
     auto& j = jump_scale();

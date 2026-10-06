@@ -2150,9 +2150,16 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         set_push_speed(client, s.entity, 1.0f, top_speed ? static_cast<float>(top_speed->stock) : 0.0f, s.boosts.cruise);
         // The revert boost adds speed, so it keeps to the session's rule for boosts and to a host's physics.
         set_revert_boost(client, s.entity, s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 0.0f : s.revert_boost);
-        if (const auto boosts = revert_boosts(); boosts.fired != s.revert_boosts_seen) {
-            s.revert_boosts_seen = boosts.fired;
-            if (s.hud_jump || s.logging) say(logging::Level::info, std::format("Trainer revert boost: +{:.1f} m/s.", boosts.last_added));
+        if (const auto report = revert_boost_report(); report.sequence != s.revert_boosts_seen) {
+            s.revert_boosts_seen = report.sequence;
+            // Every landing with some spin in it, boosted or not, so a report can say why not.
+            if ((s.hud_jump || s.logging) && report.spin >= 30.0f)
+                say(logging::Level::info,
+                    std::format("Trainer revert: landed after {} ms with {:.0f} deg of spin, board {} off the body, board turned {:.0f} deg past the body, state {}, "
+                                "{:.1f} m/s: {}{}.",
+                                report.air_ms, report.spin, report.board_read ? std::format("{:.0f} deg", report.board_offset) : std::string("unread"),
+                                report.board_rotation, report.landed_state, report.speed, report.outcome,
+                                report.added > 0 ? std::format(" +{:.1f} m/s", report.added) : std::string()));
         }
         for (TrickLaunch launch; take_trick_launch(launch);)
             if (launch.factor != 1.0f)
