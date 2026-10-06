@@ -1,9 +1,19 @@
 # Changelog
 
-## v0.4.0 - 2026-10-06 (test build)
+## v0.4.2 - 2026-10-06
 
-Built on ReSkate 1.1.3. From what players asked for in the ReSkate Discord. Everything marked "untested" is in so that it
-can be tried: tell us what it does.
+- **Board bending boost: no more speed from ordinary 180s.** 0.4.1 also counted a landing whose
+  board and body were together 12 degrees or more out of line with the travel. The game
+  straightens plain short or crooked 180s (flip trick 180s too) that way, so they got a boost,
+  and a bigger one than a real auto revert. That rule is now off as shipped ("or off the travel"
+  reads "off" at 90): a bend is the board landing 40 degrees or more off your body, as in
+  AutoRevertBoost. Settings saved by 0.4.1 with the old 12 are moved to off. Turn the rule on
+  yourself and a landing that counts by it alone gets the auto revert boost at most. Found and
+  measured by AutoRevertBoost's authors (Sivaes, jaq and OVM).
+
+## v0.4.1 - 2026-10-06
+
+Built on ReSkate 1.1.3. Everything of the 0.4.0 test build, plus:
 
 - **Let slow flips stay slow.** The game speeds a flip trick up so the board is round 1/6 s before
   the landing it predicts, however slow the flip speed is set: that is why a slowed flip still
@@ -12,6 +22,12 @@ can be tried: tell us what it does.
   and shared with your presets, and off under a host's enforced physics.
 - **Help on everything.** Every button, slider and switch of the trainer says what it does when
   you point at it, and the tips wrap instead of running off the screen.
+
+## v0.4.0 - 2026-10-06 (test build)
+
+Built on ReSkate 1.1.3. From what players asked for in the ReSkate Discord. Everything marked "untested" is in so that it
+can be tried: tell us what it does.
+
 - **Camera tab.** Move the game's own cameras: distance, height and side for the low camera, the
   high camera and the on-foot camera, with a "SunJay's Low Cam" button (the numbers of SunJay's
   mod, which showed where the game keeps them). The cameras keep their smoothing and stay out of

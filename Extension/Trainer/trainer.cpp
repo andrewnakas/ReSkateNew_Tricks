@@ -386,6 +386,9 @@ void load_store() {
             for (const auto &field : revert_fields)
                 if (const auto name = std::string(field.name); json->at("revert").contains(name) && json->at("revert").at(name).is_number())
                     s.revert.*field.member = json->at("revert").at(name).get<float>();
+            // 0.4.1 saved its own default for the off-the-travel rule (12 degrees), which paid ordinary
+            // 180s: a file from before the rules were numbered that still holds it gets today's (off).
+            if (!json->at("revert").contains("rules") && s.revert.min_slip == 12.0f) s.revert.min_slip = RevertTuning{}.min_slip;
             s.revert = sane_revert(s.revert);
         }
         if (json->contains("camera") && json->at("camera").is_object()) {
@@ -474,6 +477,7 @@ void save_store() {
         json["maps"] = std::move(maps);
         Json revert = Json::object();
         for (const auto &field : revert_fields) revert[std::string(field.name)] = s.revert.*field.member;
+        revert["rules"] = 2;
         json["revert"] = std::move(revert);
         Json camera = Json::object();
         camera["on"] = s.camera_on;
@@ -2339,7 +2343,7 @@ std::string revert_command(const std::vector<std::string> &a) {
     if (name == "reset") {
         s.revert = {};
         changed();
-        return "Reverts are judged the way they shipped: 90 degrees of spin, the board 12 degrees off the travel or 40 off the body.";
+        return "Bends are judged the way they shipped: 90 degrees of spin and the board 40 degrees off the body (the off-the-travel rule is off).";
     }
     const auto found = std::ranges::find(revert_fields, name, &RevertField::name);
     const auto value = a.size() > 1 ? number(a[1]) : std::nullopt;

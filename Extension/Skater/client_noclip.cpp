@@ -311,9 +311,12 @@ void trainer_push_speed(std::uintptr_t core) noexcept {
 // github.com/Sivaes/AutoRevertBoost, GPL-3.0), taken from their play logs: clean and short 180s
 // land with the board 1-3 degrees off the body, auto reverts 71-130 degrees off.
 // The thresholds and sizes are RevertTuning's (client_source_spawn.h), the player's to change.
-// The other revert, and the common one (measured 2026-10-06: twelve spins of 90 to 120 degrees all
-// landed with the board 0 to 3 degrees off the body): board and body together out of line with the
-// direction of travel, which the game then swings round. A clean 180 lands in line and gets nothing.
+// A second rule, off as shipped (min_slip 90): board and body together out of line with the
+// direction of travel, which the game then swings round. 0.4.1 had it on at 12 degrees and it paid
+// ordinary short or crooked 180s, flip trick 180s among them, whose landing the game merely
+// straightens (AutoRevertBoost's authors, with 60 Hz logs: those land 0 to 3 degrees off the body,
+// real auto reverts 70 to 82, board bends 85 to 90). A player may still turn it on; a landing that
+// counts by it alone never gets more than an auto revert does.
 constexpr ULONGLONG revert_max_age_ms = 400;
 // How much, at strength 1, from how far the board turned relative to the body over the flight:
 // a board bend (up to 140 degrees) gives +2 m/s at 40 degrees rising to +2.6 at 140; an auto
@@ -389,9 +392,13 @@ void trainer_revert_boost(std::uintptr_t core) noexcept {
             slip = std::fmod(std::abs(landing.heading_degrees - std::atan2(velocities[0][0], velocities[0][2]) * 57.29578f), 180.0f);
             slip = std::min(slip, 180.0f - slip);
         }
-        const float added = std::isfinite(speed) ? std::min(revert_boost_amount(t, board_rotation) * strength, t.max_speed - speed) : 0.0f;
+        const bool twisted = landing.board_valid && board_offset >= t.min_twist;
+        const bool slipped = t.min_slip < 90.0f && slip >= t.min_slip;
+        float amount = revert_boost_amount(t, board_rotation);
+        if (!twisted) amount = std::min(amount, t.auto_boost);
+        const float added = std::isfinite(speed) ? std::min(amount * strength, t.max_speed - speed) : 0.0f;
         const char *outcome = spin < t.min_spin ? "no boost: not enough spin"
-            : (!landing.board_valid || board_offset < t.min_twist) && slip < t.min_slip ? "no boost: the board landed in line (a clean landing)"
+            : !twisted && !slipped ? "no boost: the board landed in line with the body (a clean landing)"
             : landing.to < 100 || landing.to >= 200 || bodies.offboard ? "no boost: not riding"
             : now < landing.landed_at || now - landing.landed_at > revert_max_age_ms ? "no boost: seen too late"
             : static_cast<float>(landing.air_ms) < t.min_air * 1000.0f ? "no boost: too short a flight"

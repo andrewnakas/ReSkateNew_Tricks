@@ -32,7 +32,7 @@ void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, 
 // landing out of line with the travel (see client_noclip.cpp).
 struct RevertTuning {
     float min_spin{90.0f};   // degrees the skater must have turned in the air
-    float min_slip{12.0f};   // degrees the board must land out of line with the direction of travel, or
+    float min_slip{90.0f};   // 90: off. Below it: degrees the board lands out of line with the direction of travel also count, or
     float min_twist{40.0f};  // degrees the board must land out of line with the body (a board bend)
     float bend_boost{2.0f};  // m/s for a landing whose board turned 40 degrees past the body, rising to
     float full_boost{4.0f};  // m/s at 360 degrees

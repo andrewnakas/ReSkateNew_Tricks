@@ -766,17 +766,21 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
             ImGui::PopID();
         };
         const auto &r = view.revert;
-        note("Board bending is how tricklining keeps its speed. Land a spin with the board out of line (twisted off your body, or you and the "
-             "board together sideways to where you are going) and the game snaps the board straight. In Skate 3 that snap threw you forward, so "
+        note("Board bending is how tricklining keeps its speed. Land a spin with the board twisted off your body "
+             "and the game snaps the board straight. In Skate 3 that snap threw you forward, so "
              "liners bend the board on every landing instead of pushing. skate. gives nothing for it; this boost puts the speed back.");
         number_row("Board bending boost", "option revert_boost", view.revert_boost, 0.0f, 5.0f, view.revert_boost <= 0 ? "off" : "x %.2f",
                    "How hard a bend throws you forward. 0 is off, the game's own; x 1 is about +2 m/s (7 km/h) a landing.\nFrom AutoRevertBoost by Sivaes, jaq and OVM.");
         ImGui::Spacing();
         if (ImGui::TreeNodeEx("What counts as a bend, and what it is worth", ImGuiTreeNodeFlags_SpanAvailWidth)) {
         number_row("Spin needed", "revert spin", r.min_spin, 0.0f, 180.0f, "%.0f deg", "How far you must have turned in the air. Lower it and smaller turns count as bends.");
-        number_row("Board off the travel", "revert slip", r.min_slip, 0.0f, 90.0f, "%.0f deg",
-                   "The board must land at least this far out of line with where you are going (0 = lined up, 90 = sideways).");
-        number_row("or off your body", "revert twist", r.min_twist, 0.0f, 90.0f, "%.0f deg", "A board bend: the board twisted this far off your body at touchdown also counts.");
+        number_row("Board off your body", "revert twist", r.min_twist, 0.0f, 90.0f, "%.0f deg",
+                   "The rule that makes a bend: the board must land twisted at least this far off your body. Clean and short 180s land 0 to 3 degrees off, "
+                   "auto reverts and board bends 70 to 90.");
+        number_row("or off the travel", "revert slip", r.min_slip, 0.0f, 90.0f, r.min_slip >= 90.0f ? "off" : "%.0f deg",
+                   "Off at 90, as shipped. Lower it and a landing also counts when you and the board together land this far out of line with where you are "
+                   "going. Careful: the game straightens ordinary 180s that way too, so a low number gives speed on plain 180s and flip trick 180s. A "
+                   "landing that counts by this rule alone gets the auto revert boost at most.");
         number_row("Boost: a small bend", "revert bend", r.bend_boost, 0.0f, 10.0f, "+%.1f m/s", "Speed added when the board turned 40 degrees past the body over the flight (times the boost strength).");
         number_row("Boost: a full bend", "revert full", r.full_boost, 0.0f, 10.0f, "+%.1f m/s", "The same at 360 degrees; in between it rises in a straight line up to 140 degrees.");
         number_row("Boost: an auto revert", "revert auto", r.auto_boost, 0.0f, 10.0f, "+%.1f m/s", "Speed added when the board turned more than 140 degrees past the body.");
