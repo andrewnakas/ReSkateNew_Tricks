@@ -32,6 +32,9 @@ can be tried: tell us what it does.
   curves it used to leave alone, which is why x0.4 only slowed a flip by a third. And below 1 it
   stretches the flip catch times by the same factor: the game hurries any flip that would not
   finish inside its catch time, so slowed flips used to snap back to full speed.
+- **No limits of the trainer's own.** A slider's ends are only where the slider stops: every value,
+  dial, trick slider and camera number takes any typed number (flip trick speed 0.01 to 100, camera
+  numbers have a box beside the slider).
 - No comply and boneless heights now also apply to weak upward launches (riding downhill).
 - The menu tab is called PHYSICS.
 

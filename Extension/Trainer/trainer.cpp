@@ -285,12 +285,12 @@ float *camera_field(CameraSet &set, std::string_view name) {
 }
 CameraSet sane_camera(CameraSet set) {
     const auto finite = [](float value, float low, float high, float otherwise) { return std::isfinite(value) ? std::clamp(value, low, high) : otherwise; };
-    set.distance = finite(set.distance, 0.2f, 30.0f, 3.4f);
-    set.height = finite(set.height, -2.0f, 20.0f, 1.5f);
-    set.pitch = finite(set.pitch, -85.0f, 85.0f, -9.0f);
-    set.side = finite(set.side, -5.0f, 5.0f, 0.0f);
-    set.fov = set.fov < 20.0f ? 0.0f : finite(set.fov, 20.0f, 150.0f, 0.0f);
-    set.lag = finite(set.lag, 0.0f, 2.0f, 0.08f);
+    set.distance = finite(set.distance, 0.0f, 10000.0f, 3.4f);
+    set.height = finite(set.height, -10000.0f, 10000.0f, 1.5f);
+    set.pitch = finite(set.pitch, -89.0f, 89.0f, -9.0f);
+    set.side = finite(set.side, -10000.0f, 10000.0f, 0.0f);
+    set.fov = set.fov < 1.0f ? 0.0f : finite(set.fov, 1.0f, 179.0f, 0.0f);
+    set.lag = finite(set.lag, 0.0f, 60.0f, 0.08f);
     return set;
 }
 Json write_camera(const CameraSet &set) {
@@ -311,6 +311,7 @@ CameraSet read_camera(const Json &row, CameraSet set) {
 }
 Json write_position(const Vec3 &p) { return Json::array({Json(p[0]), Json(p[1]), Json(p[2])}); }
 
+RigSetting sane_rig(RigSetting rig);
 void load_store() {
     auto &s = state();
     s.loaded = true;
@@ -362,7 +363,7 @@ void load_store() {
                     rig.raise = row.value("raise", 0.0f);
                     rig.side = row.value("side", 1.0f);
                     const auto finite = [](float value, float low, float high, float otherwise) { return std::isfinite(value) ? std::clamp(value, low, high) : otherwise; };
-                    s.rigs[i] = {finite(rig.distance, 0.1f, 10.0f, 1.0f), finite(rig.height, -3.0f, 10.0f, 0.0f), finite(rig.raise, -3.0f, 10.0f, 0.0f), finite(rig.side, -5.0f, 5.0f, 1.0f)};
+                    s.rigs[i] = sane_rig(rig);
                 }
         }
         if (json->contains("maps") && json->at("maps").is_object())
@@ -519,8 +520,10 @@ double sane(const Entry &e, double value) {
     if (!std::isfinite(value)) return e.stock;
     if (e.kind == Kind::flag) return value != 0 ? 1 : 0;
     if (e.kind == Kind::integer) return std::round(value);
-    if (e.kind == Kind::curve || e.kind == Kind::graph) return std::clamp(value, 0.0, 1.0e6);
-    return std::clamp(value, -1.0e6, 1.0e6);
+    // No limits of the trainer's own beyond keeping a number a number: what a value may sensibly
+    // be is the player's call (a slider's ends are only where the slider stops).
+    if (e.kind == Kind::curve || e.kind == Kind::graph) return std::clamp(value, -1.0e9, 1.0e9);
+    return std::clamp(value, -1.0e12, 1.0e12);
 }
 // The held flip class's catch times: how long each kind of flip may take to come round.
 bool slowed_catch_time(std::string_view key) {
@@ -535,7 +538,7 @@ void want_class(const Entry &e) {
     // The game hurries any flip that would not come round inside its catch time (measured: at
     // every flip speed below about x0.9 a kickflip turned at 360 degrees per 0.2 s, the stock
     // catch time). A flip slowed by the trick slider is given that much longer.
-    if (s.boosts.flip < 1.0f && slowed_catch_time(e.key)) value /= std::max(s.boosts.flip, 0.05f);
+    if (s.boosts.flip < 1.0f && slowed_catch_time(e.key)) value /= std::max(s.boosts.flip, flip_low);
     want_class_value(field, value);
 }
 void apply_entry(Entry &e) {
@@ -2189,10 +2192,10 @@ float *rig_field(RigSetting &rig, std::string_view name) {
 }
 RigSetting sane_rig(RigSetting rig) {
     const auto finite = [](float value, float low, float high, float otherwise) { return std::isfinite(value) ? std::clamp(value, low, high) : otherwise; };
-    rig.distance = finite(rig.distance, 0.1f, 10.0f, 1.0f);
-    rig.height = finite(rig.height, -3.0f, 10.0f, 0.0f);
-    rig.raise = finite(rig.raise, -3.0f, 10.0f, 0.0f);
-    rig.side = finite(rig.side, -5.0f, 5.0f, 1.0f);
+    rig.distance = finite(rig.distance, -1000.0f, 1000.0f, 1.0f);
+    rig.height = finite(rig.height, -1000.0f, 1000.0f, 0.0f);
+    rig.raise = finite(rig.raise, -1000.0f, 1000.0f, 0.0f);
+    rig.side = finite(rig.side, -1000.0f, 1000.0f, 1.0f);
     return rig;
 }
 // The game's own cameras: `trainer camera rig low|high|foot <field> <number>`, or a preset for all three.

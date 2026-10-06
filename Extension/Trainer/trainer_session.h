@@ -12,8 +12,8 @@
 
 namespace dingosdk::trainer {
 // What the trick multipliers may be, here and in the trainer's own options.
-inline constexpr float height_low = 0.05f, height_high = 1.0e6f; // heights; the sliders stop far short, a typed number need not
-inline constexpr float flip_low = 0.1f, flip_high = 3.0f;        // board flip speed: the game's own limit takes over above
+inline constexpr float height_low = 0.001f, height_high = 1.0e6f; // heights; the sliders stop far short, a typed number need not
+inline constexpr float flip_low = 0.01f, flip_high = 100.0f;     // board flip speed; the slider stops far short, a typed number need not
 inline constexpr float cruise_high = 100.0f;                     // auto push, m/s
 
 struct SessionExtras {

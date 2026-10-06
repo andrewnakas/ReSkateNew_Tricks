@@ -570,7 +570,7 @@ std::size_t apply_classes() noexcept {
 }
 void want_flip_speed(float factor) noexcept {
     auto &f = found();
-    if (!(factor > 0.01f) || !(factor < 100.0f)) return;
+    if (!(factor >= 0.005f) || !(factor <= 1000.0f)) return;
     std::lock_guard lock(f.mutex);
     if (f.flip_wanted != factor) {
         f.flip_wanted = factor;

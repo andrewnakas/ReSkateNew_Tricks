@@ -128,7 +128,7 @@ void value_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tra
         ImGui::SetNextItemWidth(std::max(px(90), ImGui::GetContentRegionAvail().x - reset - ImGui::GetStyle().ItemSpacing.x));
         const bool scale = row.kind == trainer::Kind::curve || row.kind == trainer::Kind::graph;
         const bool whole = row.kind == trainer::Kind::integer;
-        const double low = scale ? 0.0 : -1.0e6, high = 1.0e6;
+        const double low = scale ? -1.0e9 : -1.0e12, high = scale ? 1.0e9 : 1.0e12; // none of the trainer's own
         const auto speed = whole ? 0.1f : scale ? 0.01f
             : static_cast<float>(std::max({std::abs(row.stock), std::abs(value), 0.01}) * 0.004);
         edited = ImGui::DragScalar("##value", ImGuiDataType_Double, &value, speed, &low, &high, whole ? "%.0f" : scale ? "x %.2f" : "%.4g",
@@ -412,7 +412,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         ImGui::PopID();
         return true;
     };
-    if (slider("Flip trick speed", "flip_speed", view.flip_speed, p.flip_edit, p.flip_editing, 3.0f, true) && ImGui::IsItemHovered()) ImGui::SetTooltip("Slows board flips. Above 1 the game's own limit on how fast a board turns takes over.");
+    if (slider("Flip trick speed", "flip_speed", view.flip_speed, p.flip_edit, p.flip_editing, 3.0f) && ImGui::IsItemHovered()) ImGui::SetTooltip("Slows board flips (and gives them that much longer to come round). Above 1 the game's own limit on how fast a board turns takes over.");
     slider("No comply height", "nocomply_height", view.nocomply_height, p.nocomply_edit, p.nocomply_editing);
     slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing);
     slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing);
@@ -552,14 +552,22 @@ void camera_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tr
             menu::field(menu, label);
             const auto key = std::string("rig:") + rig_ids[i] + field;
             float shown = p.active == key ? static_cast<float>(p.active_value) : value;
+            ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - px(64) - ImGui::GetStyle().ItemSpacing.x));
             if (ImGui::SliderFloat("##value", &shown, low, high, format)) trainer_command(menu, callbacks, std::format("camera rig {} {} {:.3f}", rig_ids[i], field, shown));
+            ImGui::SameLine();
+            float typed = value;
+            ImGui::SetNextItemWidth(px(64));
+            if (ImGui::InputFloat("##typed", &typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue))
+                trainer_command(menu, callbacks, std::format("camera {} {} {} {}", "rig", rig_ids[i], field, typed));
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Type any number and press Enter: the slider's ends are not a limit.");
+
             if (ImGui::IsItemActive()) {
                 p.active = key;
                 p.active_value = shown;
             } else if (p.active == key) {
                 p.active.clear();
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nCtrl + click to type a number.", tip);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
             ImGui::PopID();
             ImGui::PopID();
         };
@@ -599,14 +607,22 @@ void camera_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tr
             menu::field(menu, label);
             const auto key = std::string("camera:") + which + field;
             float shown = p.active == key ? static_cast<float>(p.active_value) : value;
+            ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - px(64) - ImGui::GetStyle().ItemSpacing.x));
             if (ImGui::SliderFloat("##value", &shown, low, high, format)) trainer_command(menu, callbacks, std::format("camera set {} {} {:.3f}", which, field, shown));
+            ImGui::SameLine();
+            float typed = value;
+            ImGui::SetNextItemWidth(px(64));
+            if (ImGui::InputFloat("##typed", &typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue))
+                trainer_command(menu, callbacks, std::format("camera {} {} {} {}", "set", which, field, typed));
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Type any number and press Enter: the slider's ends are not a limit.");
+
             if (ImGui::IsItemActive()) {
                 p.active = key;
                 p.active_value = shown;
             } else if (p.active == key) {
                 p.active.clear();
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nCtrl + click to type a number.", tip);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
             ImGui::PopID();
             ImGui::PopID();
         };

@@ -196,8 +196,8 @@ std::size_t apply_camera_rigs(std::uint64_t now) noexcept {
                 continue;
             const auto &want = s.wanted[static_cast<std::size_t>(found.rig)];
             const bool foot = found.rig == CameraRig::foot;
-            const float distance = finite(want.distance, 0.1f, 10.0f, 1.0f), side = finite(want.side, -5.0f, 5.0f, 1.0f);
-            const float height = finite(want.height, -3.0f, 10.0f, 0.0f), raise = finite(want.raise, -3.0f, 10.0f, 0.0f);
+            const float distance = finite(want.distance, -1000.0f, 1000.0f, 1.0f), side = finite(want.side, -1000.0f, 1000.0f, 1.0f);
+            const float height = finite(want.height, -1000.0f, 1000.0f, 0.0f), raise = finite(want.raise, -1000.0f, 1000.0f, 0.0f);
             std::array<float, 3> target = found.stock;
             if (found.pivot) target[1] += height;
             else {

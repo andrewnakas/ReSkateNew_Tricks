@@ -172,15 +172,15 @@ std::optional<std::array<float, 16>> custom_camera(float &fov) noexcept {
     s.custom_last = pos;
     s.custom_at = now;
     const float hx = s.custom_hx, hz = s.custom_hz;
-    const float distance = std::clamp(c.distance, 0.2f, 30.0f), height = std::clamp(c.height, -2.0f, 20.0f);
-    const float side = std::clamp(c.side, -5.0f, 5.0f), pitch = std::clamp(c.pitch, -85.0f, 85.0f) / 57.2958f;
+    const float distance = std::clamp(c.distance, 0.0f, 10000.0f), height = std::clamp(c.height, -10000.0f, 10000.0f);
+    const float side = std::clamp(c.side, -10000.0f, 10000.0f), pitch = std::clamp(c.pitch, -89.0f, 89.0f) / 57.2958f;
     // Right of the direction of travel, on the ground plane.
     const std::array<float, 3> target{pos[0] - hx * distance - hz * side, pos[1] + height, pos[2] - hz * distance + hx * side};
     // The camera trails its place by `lag`; a teleport (or the first frame) snaps.
     const float gap = std::abs(target[0] - s.custom_eye[0]) + std::abs(target[1] - s.custom_eye[1]) + std::abs(target[2] - s.custom_eye[2]);
-    if (fresh || c.lag < 0.005f || gap > 25.0f) s.custom_eye = target;
+    if (fresh || c.lag < 0.005f || gap > 25.0f + distance) s.custom_eye = target;
     else {
-        const float k = 1.0f - std::exp(-dt / std::min(c.lag, 2.0f));
+        const float k = 1.0f - std::exp(-dt / std::min(c.lag, 60.0f));
         for (std::size_t i = 0; i < 3; ++i) s.custom_eye[i] += (target[i] - s.custom_eye[i]) * k;
     }
     s.custom_running = true;
@@ -192,7 +192,7 @@ std::optional<std::array<float, 16>> custom_camera(float &fov) noexcept {
     if (flat > .001f) { right[0] /= flat; right[2] /= flat; } else right = {1, 0, 0};
     const std::array<float, 3> up{back[1] * right[2] - back[2] * right[1], back[2] * right[0] - back[0] * right[2],
                                   back[0] * right[1] - back[1] * right[0]};
-    fov = c.fov >= 20.0f && c.fov <= 150.0f ? c.fov : s.profile.fov;
+    fov = c.fov >= 1.0f && c.fov <= 179.0f ? c.fov : s.profile.fov;
     return std::array<float, 16>{right[0], right[1], right[2], 0, up[0], up[1], up[2], 0, back[0], back[1], back[2], 0, eye[0], eye[1], eye[2], 1};
 }
 } // namespace dingosdk::multiplayer
