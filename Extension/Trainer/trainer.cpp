@@ -174,6 +174,8 @@ struct State {
     SessionExtras host;
     std::array<float, class_field_count> host_classes{};
     Boosts boosts;         // what is in force this tick
+    std::string share_text; // the last exported preset, for the menu to put on the clipboard
+    std::uint64_t share_serial{};
     bool extras_due{true}; // the player's own extras are to be published for a session again
     bool wipeouts_known{}; // the wipeout count the session started with was read
     int open_tab{};
@@ -815,6 +817,22 @@ std::string apply_dial(std::string_view name, double factor) {
     changed();
     return std::format("{} x{:.2f}: {} values set{}.", presets[p].name, factor, count, locked ? std::format("; {} locked values left alone", locked) : "");
 }
+// A preset of the player's own also carries the trick sliders that are off 1, under these keys.
+constexpr std::string_view trick_prefix = "trick.";
+constexpr std::string_view trick_names[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height"};
+float *trick_option(std::string_view name) {
+    auto &s = state();
+    return name == "flip_speed" ? &s.flip_speed : name == "hippy_height" ? &s.hippy_height : name == "nocomply_height" ? &s.nocomply_height
+         : name == "boneless_height" ? &s.boneless_height : name == "offboard_height" ? &s.offboard_height : nullptr;
+}
+// Sets a trick slider named by a preset key; false when the key is not one.
+bool set_trick_key(std::string_view key, double value) {
+    if (!key.starts_with(trick_prefix)) return false;
+    const auto name = key.substr(trick_prefix.size());
+    if (auto *option = trick_option(name))
+        *option = name == "flip_speed" ? std::clamp(static_cast<float>(value), flip_low, flip_high) : std::clamp(static_cast<float>(value), height_low, height_high);
+    return true;
+}
 std::string remove_preset(std::string_view name) {
     auto &s = state();
     const auto wanted = lower(name);
@@ -836,8 +854,10 @@ std::string remove_preset(std::string_view name) {
     };
     for (const auto &[user_name, values] : s.user) {
         if (lower(user_name) != wanted) continue;
-        for (const auto &saved : values)
-            if (auto *e = find_entry(saved.first)) put_back(*e);
+        for (const auto &saved : values) {
+            if (set_trick_key(saved.first, 1.0)) ++count;
+            else if (auto *e = find_entry(saved.first)) put_back(*e);
+        }
         removed = user_name;
         break;
     }
@@ -891,8 +911,10 @@ std::string apply_preset(std::string_view name) {
     if (applied.empty())
         for (const auto &[user_name, values] : s.user) {
             if (lower(user_name) != wanted) continue;
-            for (const auto &[key, value] : values)
-                if (auto *e = find_entry(key); e && !is_locked(*e)) { set_entry(*e, value); ++count; }
+            for (const auto &[key, value] : values) {
+                if (set_trick_key(key, value)) ++count;
+                else if (auto *e = find_entry(key); e && !is_locked(*e)) { set_entry(*e, value); ++count; }
+            }
             applied = user_name;
             break;
         }
@@ -1777,12 +1799,142 @@ void build_view() {
     next->map_preset = s.map_file.preset.empty() ? std::string{} : s.map_file.preset_name.empty() ? "Map preset" : s.map_file.preset_name;
     next->spots = s.map_file.spots;
     next->open_serial = s.open_serial;
+    next->stock = !next->touched && s.active.empty() && std::ranges::none_of(s.entries, &Entry::frozen) &&
+                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == 1.0f; });
+    next->share_text = s.share_text;
+    next->share_serial = s.share_serial;
     next->open_tab = s.open_tab;
     if (const auto found = s.maps.find(s.map); found != s.maps.end()) {
         next->markers = found->second.markers;
         next->profile_preset = found->second.preset;
     }
     publish(std::move(next));
+}
+// ---- sharing presets ---------------------------------------------------------------------------
+// One line of text, short enough to paste in a chat: "RST1:" and the preset's JSON in base64.
+constexpr std::string_view share_tag = "RST1:";
+constexpr std::string_view base64_digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+std::string base64(std::string_view bytes) {
+    std::string out;
+    for (std::size_t i = 0; i < bytes.size(); i += 3) {
+        std::uint32_t chunk{};
+        const auto count = std::min<std::size_t>(3, bytes.size() - i);
+        for (std::size_t k = 0; k < 3; ++k) chunk = chunk << 8 | (k < count ? static_cast<unsigned char>(bytes[i + k]) : 0u);
+        for (std::size_t k = 0; k < 4; ++k) out += k <= count ? base64_digits[chunk >> (18 - 6 * k) & 63] : '=';
+    }
+    return out;
+}
+std::optional<std::string> unbase64(std::string_view text) {
+    std::string out;
+    std::uint32_t chunk{};
+    int bits{};
+    for (const char c : text) {
+        if (c == '=' || std::isspace(static_cast<unsigned char>(c))) continue;
+        const auto digit = base64_digits.find(c);
+        if (digit == std::string_view::npos) return std::nullopt;
+        chunk = chunk << 6 | static_cast<std::uint32_t>(digit);
+        if ((bits += 6) >= 8) out += static_cast<char>(chunk >> (bits -= 8) & 0xff);
+    }
+    return out;
+}
+std::filesystem::path shared_directory() {
+    const auto directory = data_directory();
+    return directory.empty() ? directory : directory / L"shared";
+}
+// File names from preset names: letters, digits, space, '-' and '_' only.
+std::string file_stem(std::string_view name) {
+    std::string stem;
+    for (const char c : name) stem += std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '-' || c == '_' ? c : '_';
+    return stem.empty() ? "preset" : stem;
+}
+// `preset export <name>`: one of the player's presets, or "current" for what is changed right now.
+std::string export_preset(const std::string &name) {
+    auto &s = state();
+    Json values = Json::object();
+    std::string title;
+    if (lower(name) == "current") {
+        for (const auto &e : s.entries)
+            if (e.touched) values[e.key] = e.value;
+        for (const auto trick : trick_names)
+            if (const auto *option = trick_option(trick); *option != 1.0f) values[std::string(trick_prefix) + std::string(trick)] = *option;
+        title = "My setup";
+    } else {
+        for (const auto &[user_name, saved] : s.user)
+            if (lower(user_name) == lower(name)) {
+                for (const auto &[key, value] : saved) values[key] = value;
+                title = user_name;
+            }
+        if (title.empty()) return "error: no preset of yours is called \"" + name + "\". Use \"current\" for what is changed right now.";
+    }
+    if (values.empty()) return "error: nothing is changed, so there is nothing to share.";
+    const auto count = values.size();
+    Json json = Json::object();
+    json["reskate_trainer"] = 1;
+    json["name"] = title;
+    json["values"] = std::move(values);
+    s.share_text = std::string(share_tag) + base64(json.dump());
+    ++s.share_serial;
+    std::string where;
+    if (const auto directory = shared_directory(); !directory.empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        std::ofstream file(directory / (file_stem(title) + ".json"), std::ios::binary | std::ios::trunc);
+        file << json.dump(2);
+        if (file) where = std::format(" Also saved as shared\\{}.json.", file_stem(title));
+    }
+    changed();
+    return std::format("\"{}\" copied to the clipboard as one line ({} values): paste it anywhere.{}", title, count, where);
+}
+// `preset import [file]`: the text the menu put in shared\clipboard.txt, or a file in shared\.
+// Either the one-line form or the JSON itself. The preset joins the player's own; nothing is applied.
+std::string import_preset(const std::string &file_name) {
+    auto &s = state();
+    const auto directory = shared_directory();
+    if (directory.empty()) return "error: the trainer's folder could not be found.";
+    const auto path = directory / (file_name.empty() ? "clipboard.txt" : file_stem(std::filesystem::path(file_name).stem().string()) + ".json");
+    std::string text;
+    {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return file_name.empty() ? "error: there is nothing to import." : "error: shared\\" + path.filename().string() + " does not exist.";
+        text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
+    if (text.size() > 256 * 1024) return "error: that is too long to be a preset.";
+    if (const auto tag = text.find(share_tag); tag != std::string::npos) {
+        const auto start = tag + share_tag.size();
+        const auto end = text.find_first_of(" \t\r\n`\"'", start);
+        const auto decoded = unbase64(std::string_view(text).substr(start, end == std::string::npos ? end : end - start));
+        if (!decoded) return "error: that is not a whole preset line: copy all of it, from RST1: to the end.";
+        text = *decoded;
+    }
+    try {
+        const auto json = Json::parse(text);
+        if (!json.is_object() || !json.contains("values") || !json.at("values").is_object()) return "error: that is not a ReSkate Trainer preset.";
+        std::map<std::string, double, std::less<>> values;
+        std::size_t unknown{};
+        for (const auto &[key, value] : json.at("values").items()) {
+            if (!value.is_number() || values.size() >= 512) continue;
+            const auto id = lower(key);
+            const bool trick = id.starts_with(trick_prefix) && trick_option(std::string_view(id).substr(trick_prefix.size()));
+            if (!trick && !find_entry(id)) ++unknown; // kept: another build of the game may have it
+            values[id] = value.get<double>();
+        }
+        if (values.empty()) return "error: that preset holds no values.";
+        auto name = json.value("name", "Imported");
+        if (name.empty() || name.size() > 40) name = "Imported";
+        const auto taken = [&](const std::string &candidate) {
+            if (lower(candidate) == "stock" || lower(candidate) == "map" || s.user.contains(candidate)) return true;
+            return std::ranges::any_of(builtin_presets(), [&](const auto &preset) { return lower(preset.name) == lower(candidate); });
+        };
+        auto unique = name;
+        for (int n = 2; taken(unique); ++n) unique = std::format("{} {}", name, n);
+        const auto count = values.size();
+        s.user[unique] = std::move(values);
+        changed();
+        return std::format("Imported \"{}\" ({} values{}). Turn it on under Your presets.", unique, count,
+                           unknown ? std::format(", {} of them unknown to this version", unknown) : "");
+    } catch (...) {
+        return "error: that is not a ReSkate Trainer preset.";
+    }
 }
 bool flag(const std::string &text, bool &out) {
     const auto value = lower(text);
@@ -1971,7 +2123,9 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         const auto action = lower(arg(0));
         std::string name;
         for (std::size_t i = 1; i < a.size(); ++i) name += (i > 1 ? " " : "") + a[i];
-        if (name.empty()) return "error: usage: trainer preset apply|remove|save|delete <name>";
+        if (action == "import") return import_preset(name);
+        if (name.empty()) return "error: usage: trainer preset apply|remove|save|delete|export <name>, or preset import [file]";
+        if (action == "export") return export_preset(name);
         if (action == "remove") {
             std::string why;
             if (!editable(&why)) return "error: " + why;
@@ -1990,6 +2144,8 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             std::map<std::string, double, std::less<>> values;
             for (const auto &e : s.entries)
                 if (e.touched) values[e.key] = e.value;
+            for (const auto trick : trick_names)
+                if (const auto *option = trick_option(trick); *option != 1.0f) values[std::string(trick_prefix) + std::string(trick)] = *option;
             if (values.empty()) return "error: nothing is changed, so there is nothing to save.";
             const auto count = values.size();
             s.user[name] = std::move(values);
@@ -2449,6 +2605,19 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
 }
 } // namespace
 
+bool stage_import(std::string_view text) noexcept {
+    try {
+        const auto directory = shared_directory();
+        if (directory.empty() || text.empty() || text.size() > 256 * 1024) return false;
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        std::ofstream file(directory / "clipboard.txt", std::ios::binary | std::ios::trunc);
+        file << text;
+        return static_cast<bool>(file);
+    } catch (...) {
+        return false;
+    }
+}
 std::string command(std::string_view verb, const std::vector<std::string> &arguments) {
     auto result = run(verb, arguments);
     // The menu shows the last answer, except for the ones a dragged slider sends every frame.

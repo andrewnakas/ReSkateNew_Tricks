@@ -33,6 +33,8 @@ struct Page {
     float hippy_edit{1}, nocomply_edit{1}, boneless_edit{1}, offboard_edit{1}, flip_edit{1};
     bool hippy_editing{}, nocomply_editing{}, boneless_editing{}, offboard_editing{}, flip_editing{};
     std::uint64_t open_serial{}; // the last `trainer open` acted on
+    std::uint64_t share_serial{}; // the last `preset export` put on the clipboard
+    bool share_seen{};
     bool show_page{};
 };
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words);
@@ -294,8 +296,11 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
             ImGui::TextUnformatted(preset.name.c_str());
             ImGui::SameLine();
             ImGui::TextDisabled("%s", preset.note.c_str());
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - px(120));
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - px(170));
             if (ImGui::SmallButton("This map")) trainer_command(menu, callbacks, "profile set " + preset.name);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Share")) trainer_command(menu, callbacks, "preset export " + preset.name);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies this preset to the clipboard as one line of text. Paste it in a chat;\nanyone with the trainer can import it.");
             ImGui::SameLine();
             if (ImGui::SmallButton("Delete")) trainer_command(menu, callbacks, "preset delete " + preset.name);
             ImGui::PopID();
@@ -309,6 +314,18 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         ImGui::BeginDisabled(!p.preset_name[0] || !view.touched);
         if (ImGui::Button("Save", ImVec2(save, 0))) trainer_command(menu, callbacks, std::string("preset save ") + p.preset_name.data());
         ImGui::EndDisabled();
+        // Sharing: a preset travels as one line of text on the clipboard.
+        ImGui::BeginDisabled(view.stock);
+        if (ImGui::Button("Share what is changed now")) trainer_command(menu, callbacks, "preset export current");
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Copies your current setup to the clipboard as one line of text.");
+        ImGui::SameLine();
+        if (ImGui::Button("Import from clipboard")) {
+            const char *text = ImGui::GetClipboardText();
+            if (text && trainer::stage_import(text)) trainer_command(menu, callbacks, "preset import");
+            else feedback(menu, "The clipboard holds no text.");
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy a preset line someone shared (it starts with RST1:), then press this.\nIt is added to your presets; nothing changes until you turn it on.");
         if (!view.map.empty()) {
             info(menu, "This map applies", view.profile_preset.empty() ? "nothing" : view.profile_preset);
             if (!view.profile_preset.empty() && ImGui::Button("Stop applying it on this map")) trainer_command(menu, callbacks, "profile clear");
@@ -598,7 +615,17 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("The game as it shipped: every value, lock, preset and trick slider.");
+    if (view->ready && view->stock) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "STOCK: the game is exactly as it shipped. Nothing of the trainer's is on.");
+    else if (view->ready) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "MODIFIED: this button puts back every value, lock, preset and trick slider.");
+    else ImGui::TextDisabled("The game as it shipped: every value, lock, preset and trick slider.");
+    // `preset export` leaves its line here; the clipboard belongs to this thread.
+    if (!p.share_seen) {
+        p.share_seen = true;
+        p.share_serial = view->share_serial;
+    } else if (p.share_serial != view->share_serial) {
+        p.share_serial = view->share_serial;
+        ImGui::SetClipboardText(view->share_text.c_str());
+    }
     category_tabs(menu, p.tab, {"TUNE", "PRACTICE", "MAP & HUD"}, "trainer-tabs");
     ImGui::PushID(p.tab);
     ImGui::BeginChild("trainer-tab", ImVec2(0, page_body_height(menu)));

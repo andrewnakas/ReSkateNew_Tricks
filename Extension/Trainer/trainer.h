@@ -63,6 +63,8 @@ struct View {
     std::vector<std::string> groups;
     std::vector<PresetRow> presets;
     std::size_t touched{};
+    // Nothing the trainer does is in force: no changed value, lock, preset or trick slider.
+    bool stock{true};
     // Practice
     int slot{};
     std::array<Marker, marker_slots> markers{};
@@ -83,6 +85,8 @@ struct View {
     std::vector<Spot> spots;
     // `trainer open <tab>`: each new serial opens the menu on the trainer page at that tab.
     std::uint64_t open_serial{};
+    std::string share_text; // `preset export`: the line to put on the clipboard
+    std::uint64_t share_serial{};
     int open_tab{};
 };
 
@@ -118,6 +122,9 @@ void publish(const Telemetry &) noexcept;
 // for a player who has a use for it: this is one. Any thread; the game thread takes the note.
 void note_class_list_shown() noexcept;
 bool take_class_list_shown() noexcept;
+// The menu hands over text to import (a pasted preset line): written where `preset import`
+// reads it. Any thread; touches no trainer state.
+bool stage_import(std::string_view text) noexcept;
 
 // Game thread (trainer.cpp).
 // Each client tick; `playing` while a local skater can exist, `level` the loaded level asset.
