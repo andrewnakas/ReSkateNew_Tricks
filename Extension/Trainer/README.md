@@ -1,6 +1,6 @@
 # ReSkate Trainer
 
-A TRAINER page in the ReSkate menu (Insert): live physics tuning, presets, practice markers and a
+The PHYSICS page in the ReSkate menu (Insert): live physics tuning, tricklining, Skate 3 presets, cameras, practice markers and a
 telemetry HUD. It ships no game data: the list of values is built at run time from the player's own
 `Gameplay/SkatePhysicsTuning`.
 
