@@ -37,7 +37,10 @@ can be tried: tell us what it does.
   skate., Skate 3 Easy, Skate 3 or Skate 3 Hardcore (the choice heads every list of the Tune tab), plus
   Skate 3's trick line extras. The revert boost's rules are yours to change there: how much spin
   counts, how far out of line the board must land, what each kind of revert is worth.
-- **Revert speed boost** (TRICKS). Land a spin the game has to auto revert and get speed back, as
+- **Skate 3 presets grind the older way.** They also set 21 grind and pumping values from the unused
+  tuning set the game still carries (Skate 3's wherever the two can be compared): grind friction,
+  slide angles, no automatic turning between grinds. Each trick line card says what it is for.
+- **Board bending boost** (TRICKS; it was first called the revert speed boost). Land a spin the game has to auto revert and get speed back, as
   earlier builds of the game did; chain reverts to build speed. 0 is off. The measuring and the
   numbers are AutoRevertBoost's, by Sivaes, jaq and OVM (github.com/Sivaes/AutoRevertBoost). It also
   counts the common revert theirs did not: board and body together landing out of line with the

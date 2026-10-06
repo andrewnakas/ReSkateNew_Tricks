@@ -251,6 +251,11 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
 
     if (!searching) {
         begin_card(menu, "feel", "PLAY LIKE", "The game's own tuning, or Skate 3's on one of its difficulties");
+        if (p.mode == 3)
+            note("A Skate 3 choice sets Skate 3's own numbers for everything the two games share (pop, grind pops, pushing, pumping, steering, "
+                 "manuals, spins, bails), and for grinds the way they were before skate.: the older grind friction, Skate 3's lock-on distances, wider slide "
+                 "angles, and no automatic turning between grinds. What a number cannot change stays skate.'s: animations and which stick "
+                 "motion asks for which grind.");
         ImGui::BeginDisabled(!can_edit);
         feel_buttons(menu, callbacks, view);
         ImGui::EndDisabled();
@@ -403,7 +408,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
 
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words) {
     static constexpr const char *labels[]{"Flip trick speed", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
-                                           "Revert speed boost"};
+                                           "Board bending boost (revert speed)"};
     const auto wanted = [&](const char *label) { return words.empty() || contains_words(lower(std::string(label) + " tricks"), words); };
     if (std::ranges::none_of(labels, wanted)) return;
     begin_card(menu, "trick-heights", "TRICKS", "1.0 is the game's own");
@@ -438,9 +443,9 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
     slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing);
     slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing);
     slider("Off-board jump height", "offboard_height", view.offboard_height, p.offboard_edit, p.offboard_editing);
-    if (wanted("Revert speed boost")) {
+    if (wanted("Board bending boost (revert speed)")) {
         // Not a multiplier: 0 is the game's own (no boost).
-        field(menu, "Revert speed boost");
+        field(menu, "Board bending boost");
         ImGui::PushID("revert_boost");
         float shown = p.revert_editing ? p.revert_edit : view.revert_boost;
         const float box = px(64);
@@ -452,8 +457,9 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         if (ImGui::IsItemDeactivatedAfterEdit()) trainer_command(menu, callbacks, std::format("option revert_boost {:.2f}", p.revert_edit));
         if (!ImGui::IsItemActive() && p.revert_editing && std::abs(view.revert_boost - p.revert_edit) < 0.006f) p.revert_editing = false;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Land a spin the game has to auto revert (the board well out of line) and get speed back, as earlier builds did.\n"
-                              "x 1 gives about +1.5 to +2.6 m/s a landing; chain reverts to build speed. 0 is off, the game's own.\n"
+            ImGui::SetTooltip("Board bending: land with the board turned out of line and the game snaps it straight. With this on, that snap\n"
+                              "throws you forward, as it did in Skate 3: chain bends to keep and build speed without pushing.\n"
+                              "x 1 gives about +1.5 to +2.6 m/s a landing. 0 is off, the game's own. The Trick lines list has the details.\n"
                               "From AutoRevertBoost by Sivaes, jaq and OVM.");
         ImGui::SameLine();
         float typed = view.revert_boost;
@@ -615,7 +621,7 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
     begin_card(menu, "trickline", "TRICK LINE EXTRAS", "What Skate 3's trick lines had beyond its tuning");
     bool extras = view.revert_boost > 0;
     if (toggle_row(menu, "Skate 3's trick line extras",
-            "Speed back out of reverts (the revert boost below, at x 1) and heavier revert and powerslide friction (x 3 and x 1.5: a first guess, tune them below).", extras))
+            "The board bending boost below at x 1, and heavier revert and powerslide friction (x 3 and x 1.5: a first guess, tune them below).", extras))
         trainer_command(menu, callbacks, extras ? "trickline extras on" : "trickline extras off");
     note("Pick the game to play like above, then tune the trick line part of it here. Blue = changed; Reset puts one value back. Type in a box to go past a slider's end.");
     end_card();
@@ -634,8 +640,22 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
                             "physicsreckoning.flipmaxspeed heldflip.straightflipcatchtime heldflip.shuvmincatchtime heldflip.varialmincatchtime "
                             "heldflip.bigflipmincatchtime"},
         {"MANUALS AND GRINDS", "physicsmanual.manualscalar_p physicsmanual.manualscalar_i physicsmanual.manualscalar_d physicsmanual.maxtiltangle "
-                               "physicsmode.grindlockdist physicsgrind.commonfrictionscalar physicsfriction.noinputtime physicssteering.generalscalar "
-                               "physicssteering.damping"},
+                               "physicsmode.grindlockdist physicsgrind.commonfrictionscalar physicsgrindsair.maxdistboardslide physicsgrindsair.maxdisttipslide "
+                               "physicsgrind.grind_tipslide_minangletoprimitive physicsgrind.slowgrindexitspeed physicsgrind.copingexitstarttime "
+                               "physicsgrind.curbexitstarttime physicsgrind.fairlysteepexitstarttime physicsfriction.noinputtime "
+                               "physicssteering.generalscalar physicssteering.damping"},
+    };
+    // What each group is for in a line, said once at the top of its card.
+    static constexpr const char *group_notes[]{
+        "",
+        "Pumping is speed without pushing: crouch into a transition and stand up out of it. Strength is how much a pump gives, the limit how "
+        "fast it may build. Skate 3 pumped harder (18 against 13) but capped it lower.",
+        "A line lives on pops you can count on. Max is a held pop, min a quick flick; bring them together and every pop is the same height. "
+        "Each kind of grind has its own pair, and the stick boost is the speed you can add by pushing the stick as you pop.",
+        "How fast you and the board turn, and how long a flip may take to come round (its catch time). Slower spins and longer catch times "
+        "read as style; faster ones fit more into a small gap.",
+        "Manual balance (the three balance numbers are how hard the game corrects you), how far a rail reaches out to grab you, how quickly a "
+        "grind loses speed, and when the game ends a grind for you. The tuning skate. grew out of ended slow grinds by itself; in skate. those exit timers are off (-1).",
     };
     if (p.trick_revision != view.revision) {
         p.trick_revision = view.revision;
@@ -660,7 +680,7 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
             if (i < view.rows.size()) value_row(menu, callbacks, p, view, view.rows[i], false, true);
     };
 
-    begin_card(menu, "trick-revert", groups[0][0], "Speed back out of a revert, and what a revert costs");
+    begin_card(menu, "trick-revert", "BOARD BENDING, REVERTS AND POWERSLIDES", "Speed out of a bent landing, and what a revert or slide costs");
     {
         // The revert speed boost: its strength, then what counts and what it is worth.
         const auto number_row = [&](const char *label, const char *command, float value, float low, float high, const char *format, const char *tip) {
@@ -684,11 +704,14 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
             ImGui::PopID();
         };
         const auto &r = view.revert;
-        number_row("Revert speed boost", "option revert_boost", view.revert_boost, 0.0f, 5.0f, view.revert_boost <= 0 ? "off" : "x %.2f",
-                   "Speed back on a landing the game has to swing round. 0 is off, the game's own. From AutoRevertBoost by Sivaes, jaq and OVM.");
+        note("Board bending is how a trick line keeps its speed. Land a spin with the board out of line (twisted off your body, or you and the "
+             "board together sideways to where you are going) and the game snaps the board straight. In Skate 3 that snap threw you forward, so "
+             "liners bend the board on every landing instead of pushing. skate. gives nothing for it; this boost puts the speed back.");
+        number_row("Board bending boost", "option revert_boost", view.revert_boost, 0.0f, 5.0f, view.revert_boost <= 0 ? "off" : "x %.2f",
+                   "How hard a bend throws you forward. 0 is off, the game's own; x 1 is about +2 m/s (7 km/h) a landing.\nFrom AutoRevertBoost by Sivaes, jaq and OVM.");
         ImGui::Spacing();
-        if (ImGui::TreeNodeEx("What counts as a revert, and what it is worth", ImGuiTreeNodeFlags_SpanAvailWidth)) {
-        number_row("Spin needed", "revert spin", r.min_spin, 0.0f, 180.0f, "%.0f deg", "How far you must have turned in the air. Lower it and smaller turns count as reverts.");
+        if (ImGui::TreeNodeEx("What counts as a bend, and what it is worth", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+        number_row("Spin needed", "revert spin", r.min_spin, 0.0f, 180.0f, "%.0f deg", "How far you must have turned in the air. Lower it and smaller turns count as bends.");
         number_row("Board off the travel", "revert slip", r.min_slip, 0.0f, 90.0f, "%.0f deg",
                    "The board must land at least this far out of line with where you are going (0 = lined up, 90 = sideways).");
         number_row("or off your body", "revert twist", r.min_twist, 0.0f, 90.0f, "%.0f deg", "A board bend: the board twisted this far off your body at touchdown also counts.");
@@ -698,17 +721,20 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
         number_row("No boost above", "revert max_speed", r.max_speed, 5.0f, 100.0f, "%.0f m/s", "Reverts stop adding speed here (1 m/s = 3.6 km/h).");
         number_row("Time between boosts", "revert cooldown", r.cooldown, 0.0f, 3.0f, "%.2f s", "How soon the next revert can boost again.");
         number_row("Shortest flight", "revert min_air", r.min_air, 0.0f, 2.0f, "%.2f s", "A hop shorter than this never boosts.");
-        if (ImGui::Button("Reset revert rules")) trainer_command(menu, callbacks, "revert reset");
+        if (ImGui::Button("Reset these rules")) trainer_command(menu, callbacks, "revert reset");
         ImGui::TreePop();
         }
         ImGui::Spacing();
     }
+    note("Friction: how much speed a revert or a powerslide scrubs off (higher loses more). Skate 3's were heavier, which is why bending "
+         "mattered there. Forward force: a push the game adds while you revert or slide.");
     rows(0);
     end_card();
     trick_heights(menu, callbacks, p, view, std::string{});
     for (std::size_t g = 1; g < std::size(groups); ++g) {
         if (p.trick_rows[g].empty()) continue;
         begin_card(menu, groups[g][0], groups[g][0]);
+        note(group_notes[g]);
         rows(g);
         end_card();
     }
