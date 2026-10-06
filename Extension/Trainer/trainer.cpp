@@ -170,6 +170,7 @@ struct State {
     int class_search_tries{};
     std::uint64_t class_search_seen{};      // the searches that had finished when this level loaded
     bool class_list_wanted{};               // the player has the list of every value open on this level
+    float flip_applied{1};                  // the flip speed the catch times were last set for
     std::uint64_t class_entity{};           // the skater the last search was for
     std::uint64_t class_research_after{};   // no new search before this, however many skaters come and go
     std::vector<std::size_t> class_entries; // the entries that are fields of those classes
@@ -521,12 +522,21 @@ double sane(const Entry &e, double value) {
     if (e.kind == Kind::curve || e.kind == Kind::graph) return std::clamp(value, 0.0, 1.0e6);
     return std::clamp(value, -1.0e6, 1.0e6);
 }
+// The held flip class's catch times: how long each kind of flip may take to come round.
+bool slowed_catch_time(std::string_view key) {
+    return key.starts_with("heldflip.") && key.ends_with("catchtime");
+}
 // What a class field should hold: the player's value, or the host's while a session's host
 // sets everyone's physics.
 void want_class(const Entry &e) {
     auto &s = state();
     const auto field = static_cast<std::size_t>(e.class_field);
-    want_class_value(field, s.enforced ? s.host_classes[field] : static_cast<float>(e.touched ? e.value : e.stock));
+    auto value = s.enforced ? s.host_classes[field] : static_cast<float>(e.touched ? e.value : e.stock);
+    // The game hurries any flip that would not come round inside its catch time (measured: at
+    // every flip speed below about x0.9 a kickflip turned at 360 degrees per 0.2 s, the stock
+    // catch time). A flip slowed by the trick slider is given that much longer.
+    if (s.boosts.flip < 1.0f && slowed_catch_time(e.key)) value /= std::max(s.boosts.flip, 0.05f);
+    want_class_value(field, value);
 }
 void apply_entry(Entry &e) {
     auto &s = state();
@@ -2096,6 +2106,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             }
         }
         want_flip_speed(s.boosts.flip);
+        if (s.boosts.flip != s.flip_applied) {
+            // The catch times follow the flip speed (want_class).
+            s.flip_applied = s.boosts.flip;
+            for (const auto &e : s.entries)
+                if (e.class_field >= 0 && slowed_catch_time(e.key)) want_class(e);
+        }
         (void)apply_classes();
         // The game builds its tuning objects again with a new skater (a respawn, a teleport, a
         // session change) and they start at its own numbers: look again, but not in a flurry.

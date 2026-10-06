@@ -29,7 +29,9 @@ can be tried: tell us what it does.
   numbers, so a slowed flip (and every value of the game's tuning classes: push speeds, on-foot
   values) quietly stopped applying. The trainer now checks once a second, writes back what the
   game undid and looks for the new objects. The slider also scales the three flick-influence
-  curves it used to leave alone, which is why x0.4 only slowed a flip by a third.
+  curves it used to leave alone, which is why x0.4 only slowed a flip by a third. And below 1 it
+  stretches the flip catch times by the same factor: the game hurries any flip that would not
+  finish inside its catch time, so slowed flips used to snap back to full speed.
 - No comply and boneless heights now also apply to weak upward launches (riding downhill).
 - The menu tab is called PHYSICS.
 
