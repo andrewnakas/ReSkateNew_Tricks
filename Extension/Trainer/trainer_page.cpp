@@ -44,6 +44,7 @@ struct Page {
 };
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words);
 void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View &view);
+void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view);
 Page &page() {
     static auto *value = new Page;
     return *value;
@@ -223,15 +224,17 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         return;
     }
     if (!view.editable) warn(view.blocked.c_str());
-    // Two short lists and the whole table.
+    // Two short lists, the trick line section and the whole table (modes 0, 1, 3 and 2).
     {
-        static constexpr const char *modes[]{"REALISTIC", "FUN", "EVERYTHING"};
-        const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3;
-        for (int i = 0; i < 3; ++i) {
-            if (i) ImGui::SameLine();
-            const bool on = p.mode == i;
+        static constexpr std::pair<const char *, int> modes[]{{"REALISTIC", 0}, {"FUN", 1}, {"TRICK LINES", 3}, {"EVERYTHING", 2}};
+        const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 3) / 4;
+        bool first = true;
+        for (const auto &[label, mode] : modes) {
+            if (!first) ImGui::SameLine();
+            first = false;
+            const bool on = p.mode == mode;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
-            if (ImGui::Button(modes[i], ImVec2(width, 0))) p.mode = i;
+            if (ImGui::Button(label, ImVec2(width, 0))) p.mode = mode;
             if (on) ImGui::PopStyleColor();
         }
     }
@@ -252,6 +255,10 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         feel_buttons(menu, callbacks, view);
         ImGui::EndDisabled();
         end_card();
+    }
+    if (p.mode == 3 && !searching) {
+        trickline_section(menu, callbacks, p, view);
+        return;
     }
     begin_card(menu, "dials", p.mode == 0 ? "FEEL: TONE IT DOWN" : p.mode == 1 ? "FEEL: TURN IT UP" : "FEEL",
                "1 is the game's own. A dial moves every value its preset moves.");
@@ -602,24 +609,15 @@ void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::
 
 // Everything that makes a trick line, in one place: the same values and sliders as the Tune tab,
 // gathered, with one button for Skate 3's and one for the game's own.
-void trickline_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
-    if (!view.ready) {
-        begin_card(menu, "trickline-wait", "TRICK LINES");
-        note("The values appear once a level is loaded.");
-        end_card();
-        return;
-    }
-    if (!view.editable) warn(view.blocked.c_str());
+void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     const bool can_edit = view.editable && callbacks.queue_console_command != nullptr;
     ImGui::BeginDisabled(!can_edit);
-    begin_card(menu, "trickline", "TRICK LINES", "Play like one game, then tune");
-    feel_buttons(menu, callbacks, view);
-    if (ImGui::Button("Add Skate 3's trick line extras")) trainer_command(menu, callbacks, "trickline extras on");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("On top of the tuning: speed back out of reverts (the revert boost below at x 1) and heavier revert and\npowerslide friction (x 3 and x 1.5, a first guess: tune them below).");
-    ImGui::SameLine();
-    if (ImGui::Button("Remove them")) trainer_command(menu, callbacks, "trickline extras off");
-    note("Everything here is also on the Tune tab: this is the trick line part of it. Blue = changed. Type in a box to go past a slider's end.");
+    begin_card(menu, "trickline", "TRICK LINE EXTRAS", "What Skate 3's trick lines had beyond its tuning");
+    bool extras = view.revert_boost > 0;
+    if (toggle_row(menu, "Skate 3's trick line extras",
+            "Speed back out of reverts (the revert boost below, at x 1) and heavier revert and powerslide friction (x 3 and x 1.5: a first guess, tune them below).", extras))
+        trainer_command(menu, callbacks, extras ? "trickline extras on" : "trickline extras off");
+    note("Pick the game to play like above, then tune the trick line part of it here. Blue = changed; Reset puts one value back. Type in a box to go past a slider's end.");
     end_card();
 
     // Rows of the value table by id, looked up once per snapshot.
@@ -688,6 +686,8 @@ void trickline_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         const auto &r = view.revert;
         number_row("Revert speed boost", "option revert_boost", view.revert_boost, 0.0f, 5.0f, view.revert_boost <= 0 ? "off" : "x %.2f",
                    "Speed back on a landing the game has to swing round. 0 is off, the game's own. From AutoRevertBoost by Sivaes, jaq and OVM.");
+        ImGui::Spacing();
+        if (ImGui::TreeNodeEx("What counts as a revert, and what it is worth", ImGuiTreeNodeFlags_SpanAvailWidth)) {
         number_row("Spin needed", "revert spin", r.min_spin, 0.0f, 180.0f, "%.0f deg", "How far you must have turned in the air. Lower it and smaller turns count as reverts.");
         number_row("Board off the travel", "revert slip", r.min_slip, 0.0f, 90.0f, "%.0f deg",
                    "The board must land at least this far out of line with where you are going (0 = lined up, 90 = sideways).");
@@ -699,6 +699,9 @@ void trickline_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         number_row("Time between boosts", "revert cooldown", r.cooldown, 0.0f, 3.0f, "%.2f s", "How soon the next revert can boost again.");
         number_row("Shortest flight", "revert min_air", r.min_air, 0.0f, 2.0f, "%.2f s", "A hop shorter than this never boosts.");
         if (ImGui::Button("Reset revert rules")) trainer_command(menu, callbacks, "revert reset");
+        ImGui::TreePop();
+        }
+        ImGui::Spacing();
     }
     rows(0);
     end_card();
@@ -881,7 +884,8 @@ bool trainer_take_open() {
     if (view->open_serial == p.open_serial) return false;
     p.open_serial = view->open_serial;
     // `trainer open` still takes "presets": they live on the Tune tab now.
-    p.tab = view->open_tab == 8 ? 1 : view->open_tab == 7 ? 3 : view->open_tab >= 4 ? 0 : view->open_tab == 3 ? 4 : view->open_tab == 2 ? 2 : 0; // by name, see `trainer open`
+    p.tab = view->open_tab == 7 ? 2 : view->open_tab == 3 ? 3 : view->open_tab == 2 ? 1 : 0; // by name, see `trainer open`
+    if (view->open_tab == 8) p.mode = 3; // the trick line section of the Tune tab
     if (view->open_tab >= 4 && view->open_tab < 7) p.mode = std::clamp(view->open_tab - 4, 0, 2);
     p.show_page = true;
     return true;
@@ -914,14 +918,13 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
         p.share_serial = view->share_serial;
         ImGui::SetClipboardText(view->share_text.c_str());
     }
-    category_tabs(menu, p.tab, {"TUNE", "TRICK LINES", "PRACTICE", "CAMERA", "MAP & HUD"}, "trainer-tabs");
+    category_tabs(menu, p.tab, {"TUNE", "PRACTICE", "CAMERA", "MAP & HUD"}, "trainer-tabs");
     ImGui::PushID(p.tab);
     ImGui::BeginChild("trainer-tab", ImVec2(0, page_body_height(menu)));
     switch (p.tab) {
     case 0: tune_tab(menu, model, callbacks, p, *view); break;
-    case 1: trickline_tab(menu, callbacks, p, *view); break;
-    case 2: practice_tab(menu, model, callbacks, p, *view); break;
-    case 3: camera_tab(menu, callbacks, p, *view); break;
+    case 1: practice_tab(menu, model, callbacks, p, *view); break;
+    case 2: camera_tab(menu, callbacks, p, *view); break;
     default: map_tab(menu, callbacks, *view); break;
     }
     ImGui::EndChild();

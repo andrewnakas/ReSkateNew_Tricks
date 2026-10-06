@@ -32,9 +32,9 @@ can be tried: tell us what it does.
   curves it used to leave alone, which is why x0.4 only slowed a flip by a third. And below 1 it
   stretches the flip catch times by the same factor: the game hurries any flip that would not
   finish inside its catch time, so slowed flips used to snap back to full speed.
-- **Trick lines tab.** Everything that makes a trick line in one place (reverts and powerslides,
+- **Trick lines** (a fourth list on the Tune tab). Everything that makes a trick line in one place (reverts and powerslides,
   pumping, pops, spins and flips, manuals and grinds), under a "play like" choice:
-  skate., Skate 3 Easy, Skate 3 or Skate 3 Hardcore (the same choice heads the Tune tab), plus
+  skate., Skate 3 Easy, Skate 3 or Skate 3 Hardcore (the choice heads every list of the Tune tab), plus
   Skate 3's trick line extras. The revert boost's rules are yours to change there: how much spin
   counts, how far out of line the board must land, what each kind of revert is worth.
 - **Revert speed boost** (TRICKS). Land a spin the game has to auto revert and get speed back, as
