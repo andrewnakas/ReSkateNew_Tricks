@@ -1009,6 +1009,26 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
             dingosdk::multiplayer::tick_native_party_actions(r.base, client,
                 r.spectate_ready && r.spectate_client == client && (state == 13 || state == 21), camera_phase);
         }
+        {
+            // The player's own camera (the trainer's Camera tab) takes the same camera lease as
+            // Spectate, which goes first.
+            DINGO_PROFILE_ZONE("tick/own camera");
+            static bool owned = false;
+            static std::string last_detail;
+            const bool in_play = state == 13 || state == 21;
+            float fov{};
+            std::optional<std::array<float, 16>> camera;
+            if (in_play && !dingosdk::multiplayer::spectating_party_member()) camera = dingosdk::multiplayer::custom_camera(fov);
+            if (camera || owned) {
+                std::string detail;
+                const bool applied = dingosdk::update_party_camera(r.base, client, in_play, camera_phase, camera ? &*camera : nullptr, detail, fov);
+                owned = applied ? camera.has_value() : owned || camera.has_value();
+                if (!detail.empty() && detail != last_detail) {
+                    last_detail = detail;
+                    dingosdk::logging::log(dingosdk::logging::Level::info, dingosdk::logging::Channel::ui, "Own camera: {}", detail);
+                }
+            }
+        }
         if (state == 13 || state == 21) {
             DINGO_PROFILE_ZONE("tick/camera view");
             // The camera ReSkate's nametags start from, and the spectate camera's lesson in how

@@ -34,6 +34,8 @@ void update_party_position(const Pose *pose) noexcept;
 // Points the party Spectate camera at a session player's skater from code (the
 // throwdown turn camera). 0 stops a spectate this function started. Game thread.
 void spectate_party_member(std::uint64_t id) noexcept;
+// Whether the Spectate camera is in use (it and the trainer's camera share one camera lease).
+bool spectating_party_member() noexcept;
 // Returns only a record owned by this adapter, validated against this manager.
 std::uint64_t native_party_player_info(std::uintptr_t manager, std::size_t slot) noexcept;
 std::string native_party_status();

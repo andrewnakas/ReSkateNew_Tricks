@@ -531,6 +531,97 @@ void jump_lines(SkateMenu &menu, const trainer::Jump &jump) {
                                       jump.landing[2]));
     info(menu, "Rotation", std::format("spin {:.0f} degrees (peak {:.0f} per second), flip {:.0f} degrees", jump.spin, jump.spin_rate, jump.flip));
 }
+// The player's own follow camera, in place of the game's: one framing on the board, one on foot.
+void camera_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
+    begin_card(menu, "rigs", "THE GAME'S CAMERAS", "Move the game's own cameras: they keep their smoothing and stay out of walls");
+    if (ImGui::Button("SunJay's Low Cam")) trainer_command(menu, callbacks, "camera rig sunjay");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Both on-board cameras low and close, the numbers of SunJay's Low Cam mod.");
+    ImGui::SameLine();
+    if (ImGui::Button("Low, a little higher")) trainer_command(menu, callbacks, "camera rig low+");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The low camera lower and closer, but with more of the skater in view.");
+    ImGui::SameLine();
+    if (ImGui::Button("The game's own")) trainer_command(menu, callbacks, "camera rig stock");
+    static constexpr const char *rig_ids[]{"low", "high", "foot"};
+    static constexpr const char *rig_titles[]{"Low camera (on board)", "High camera (on board)", "On foot"};
+    for (std::size_t i = 0; i < trainer::camera_rigs; ++i) {
+        ImGui::SeparatorText(rig_titles[i]);
+        const auto &rig = view.rigs[i];
+        const auto slider = [&](const char *label, const char *field, float value, float low, float high, const char *format, const char *tip) {
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::PushID(field);
+            menu::field(menu, label);
+            const auto key = std::string("rig:") + rig_ids[i] + field;
+            float shown = p.active == key ? static_cast<float>(p.active_value) : value;
+            if (ImGui::SliderFloat("##value", &shown, low, high, format)) trainer_command(menu, callbacks, std::format("camera rig {} {} {:.3f}", rig_ids[i], field, shown));
+            if (ImGui::IsItemActive()) {
+                p.active = key;
+                p.active_value = shown;
+            } else if (p.active == key) {
+                p.active.clear();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nCtrl + click to type a number.", tip);
+            ImGui::PopID();
+            ImGui::PopID();
+        };
+        slider("Distance", "distance", rig.distance, 0.3f, 3.0f, "x %.2f", "How far behind you the camera sits. 1 is the game's own.");
+        slider("Height", "height", rig.height, -1.0f, 2.0f, "%+.2f m", "Moves the camera and the point it looks at up or down together.");
+        slider("Camera only", "raise", rig.raise, -1.0f, 2.0f, "%+.2f m", "Moves the camera alone, so it looks more down at you (or up from below).");
+        if (i == 2) slider("Shoulder", "side", rig.side, 0.0f, 2.0f, "%.2f", "Over the shoulder: 1 is the game's own (centred), above 1 moves right, below 1 moves left, by that many metres.");
+        else slider("Side", "side", rig.side, -2.0f, 2.0f, "x %.2f", "The camera's sideways offset. 1 is the game's own, 0 is dead centre, negative is the other shoulder.");
+    }
+    note(("Found: " + view.rigs_found + ". A change shows at once, or the next time that camera starts.").c_str());
+    end_card();
+    begin_card(menu, "camera", "A CAMERA OF YOUR OWN (EXPERIMENTAL)", "Replaces the game's camera altogether");
+    bool on = view.camera_on;
+    if (toggle_row(menu, "Use my camera", "Replaces the game's camera with the one set below. It stays behind the way you travel and does not avoid walls.", on))
+        trainer_command(menu, callbacks, std::format("camera {}", on ? "on" : "off"));
+    static constexpr const char *presets[]{"Low", "Low plus", "Skate 3", "High", "Shoulder", "Shoulder left"};
+    static constexpr const char *notes[]{
+        "Close to the ground behind the board, looking slightly up: the Skate 1 feel.", "The low camera raised a little, so more of the skater shows.",
+        "Close chase camera with a wide lens.", "Further back and above, for lines and big gaps.",
+        "On foot: over the right shoulder.", "On foot: over the left shoulder."};
+    for (std::size_t i = 0; i < std::size(presets); ++i) {
+        if (i) ImGui::SameLine();
+        if (ImGui::Button(presets[i])) trainer_command(menu, callbacks, std::string("camera preset ") + presets[i]);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", notes[i]);
+    }
+    if (view.camera_game.empty()) note("Skate a few seconds with the game's own camera and its framing is measured here.");
+    else {
+        info(menu, "The game frames you from", view.camera_game);
+        if (ImGui::Button("Start from the game's framing")) trainer_command(menu, callbacks, "camera game");
+    }
+    end_card();
+    const auto set_card = [&](const char *id, const char *title, const char *which, const trainer::CameraSet &set) {
+        begin_card(menu, id, title);
+        const auto slider = [&](const char *label, const char *field, float value, float low, float high, const char *format, const char *tip) {
+            ImGui::PushID(field);
+            ImGui::PushID(which);
+            menu::field(menu, label);
+            const auto key = std::string("camera:") + which + field;
+            float shown = p.active == key ? static_cast<float>(p.active_value) : value;
+            if (ImGui::SliderFloat("##value", &shown, low, high, format)) trainer_command(menu, callbacks, std::format("camera set {} {} {:.3f}", which, field, shown));
+            if (ImGui::IsItemActive()) {
+                p.active = key;
+                p.active_value = shown;
+            } else if (p.active == key) {
+                p.active.clear();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nCtrl + click to type a number.", tip);
+            ImGui::PopID();
+            ImGui::PopID();
+        };
+        slider("Distance", "distance", set.distance, 0.5f, 10.0f, "%.2f m", "How far behind the skater the camera sits.");
+        slider("Height", "height", set.height, -0.5f, 5.0f, "%.2f m", "How far above the skater's feet. Low numbers give the classic low camera.");
+        slider("Tilt", "pitch", set.pitch, -60.0f, 30.0f, "%.0f deg", "Negative looks down at the skater, positive looks up.");
+        slider("Shoulder", "side", set.side, -1.5f, 1.5f, "%.2f m", "Sideways offset: positive is over the right shoulder.");
+        slider("Field of view", "fov", set.fov, 0.0f, 120.0f, set.fov < 20.0f ? "the game's" : "%.0f deg", "How wide the lens is. All the way left keeps the game's own.");
+        slider("Follow lag", "lag", set.lag, 0.0f, 0.5f, "%.2f s", "How far the camera trails behind your movement. 0 is rigid.");
+        end_card();
+    };
+    set_card("camera-board", "ON THE BOARD", "board", view.camera_board);
+    set_card("camera-foot", "ON FOOT", "foot", view.camera_foot);
+}
+
 void map_tab(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View &view) {
     const auto telemetry = trainer::telemetry();
     begin_card(menu, "hud", "HUD");
@@ -593,8 +684,8 @@ bool trainer_take_open() {
     if (view->open_serial == p.open_serial) return false;
     p.open_serial = view->open_serial;
     // `trainer open` still takes "presets": they live on the Tune tab now.
-    p.tab = view->open_tab >= 4 ? 0 : std::clamp(view->open_tab - 1, 0, 2);
-    if (view->open_tab >= 4) p.mode = std::clamp(view->open_tab - 4, 0, 2);
+    p.tab = view->open_tab == 7 ? 2 : view->open_tab >= 4 ? 0 : view->open_tab == 3 ? 3 : std::clamp(view->open_tab - 1, 0, 1); // 3 was "map" before the Camera tab
+    if (view->open_tab >= 4 && view->open_tab < 7) p.mode = std::clamp(view->open_tab - 4, 0, 2);
     p.show_page = true;
     return true;
 }
@@ -626,12 +717,13 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
         p.share_serial = view->share_serial;
         ImGui::SetClipboardText(view->share_text.c_str());
     }
-    category_tabs(menu, p.tab, {"TUNE", "PRACTICE", "MAP & HUD"}, "trainer-tabs");
+    category_tabs(menu, p.tab, {"TUNE", "PRACTICE", "CAMERA", "MAP & HUD"}, "trainer-tabs");
     ImGui::PushID(p.tab);
     ImGui::BeginChild("trainer-tab", ImVec2(0, page_body_height(menu)));
     switch (p.tab) {
     case 0: tune_tab(menu, model, callbacks, p, *view); break;
     case 1: practice_tab(menu, model, callbacks, p, *view); break;
+    case 2: camera_tab(menu, callbacks, p, *view); break;
     default: map_tab(menu, callbacks, *view); break;
     }
     ImGui::EndChild();
