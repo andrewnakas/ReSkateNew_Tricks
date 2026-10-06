@@ -300,6 +300,7 @@ BOOL WINAPI captured_cursor_position(LPPOINT output) {
     if (result && output && !overlay_input_access) { last = *output; sampled = true; }
     return result;
 }
+// <dev>
 // A scripted controller (the trainer's `pad` command): while on, the game's polls of the
 // first controller read this state, whether or not a real one is connected.
 struct ScriptedPad {
@@ -310,6 +311,7 @@ struct ScriptedPad {
     std::atomic<std::uint64_t> polls{}, served{}, blanked{};
 };
 ScriptedPad& scripted_pad() { static auto* value = new ScriptedPad; return *value; }
+// </dev>
 template<std::size_t I, bool Extended = false>
 DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
     const auto& hook = Extended ? input_hooks().xinput_extended[I] : input_hooks().xinput_state[I];
@@ -319,6 +321,7 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
         OverlayInputAccess access;
         result = original<DWORD(WINAPI*)(DWORD, XINPUT_STATE*)>(hook)(user, output);
     }
+// <dev>
     // The overlay's own reads see the scripted state too, so the trainer's pad shortcuts can be tested.
     if (auto& scripted = scripted_pad(); user == 0 && output) {
         if (!overlay_input_access) scripted.polls.fetch_add(1, std::memory_order_relaxed);
@@ -333,6 +336,7 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
             result = ERROR_SUCCESS;
         }
     }
+// </dev>
     if (result == ERROR_SUCCESS && output && capture) {
         output->Gamepad = {};
         // The game must notice a neutral state even if the physical packet did
@@ -341,6 +345,7 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
     }
     return result;
 }
+// <dev>
 }
 // `gamepad`: twelve bytes laid out as XINPUT_GAMEPAD, or null to hand the controller back.
 extern "C" void DingoSDKOverlayScriptController(const void* gamepad) {
@@ -365,6 +370,7 @@ extern "C" std::uint64_t DingoSDKOverlayScriptControllerBlanked() {
     return dingosdk::overlay::detail::scripted_pad().blanked.exchange(0, std::memory_order_relaxed);
 }
 namespace dingosdk::overlay::detail {
+// </dev>
 template<std::size_t I>
 DWORD WINAPI captured_keystroke(DWORD user, DWORD reserved, PXINPUT_KEYSTROKE output) {
     const auto result = original<DWORD(WINAPI*)(DWORD, DWORD, PXINPUT_KEYSTROKE)>(

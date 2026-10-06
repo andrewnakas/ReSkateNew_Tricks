@@ -14,5 +14,8 @@ namespace dingosdk::overlay {
 bool trainer_hud_pending();
 // True once per `trainer open`: the overlay should show the menu.
 bool trainer_open_requested();
+// True once per press of the controller's menu combo (LB + RB + R3): the overlay should show
+// the menu on the trainer's page if `menu_visible` is false, and hide it otherwise.
+bool trainer_pad_menu_pressed(bool menu_visible);
 void draw_trainer_hud();
 } // namespace dingosdk::overlay

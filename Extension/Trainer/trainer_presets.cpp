@@ -44,6 +44,11 @@ std::string_view essential_name(std::string_view key, int *rank, std::uint8_t *m
         {"physicsmode.jumpmaxheight", "Ollie height (max)", both},
         {"physicsmode.jumpminheight", "Ollie height (min, light pop)", both},
         {"physicsmode.grindjumpcommonmax", "Pop out of grinds (max)", both},
+        {"physicsmode.grindjumpcommonmin", "Pop out of grinds (min, a quick pop)", both},
+        {"physicsmode.grindjumpboardslidemax", "Pop out of board slides (max)", both},
+        {"physicsmode.grindjumpboardslidemin", "Pop out of board slides (min, a quick pop)", both},
+        {"physicsmode.grindjumptipslidemax", "Pop out of nose and tail slides (max)", both},
+        {"physicsmode.grindjumptipslidemin", "Pop out of nose and tail slides (min, a quick pop)", both},
         {"physicsjump.jumpybonusmax", "Jump bonus (max)", f},
         {"physicspush.maxpushablespeed", "Push speed (9.25 = the game's; scales every push)", both},
         {"push.maxpushspeedlight", "Push: a tapped push settles at (m/s)", r},
@@ -105,6 +110,7 @@ PresetDial preset_dial(std::string_view name) {
     constexpr std::uint8_t r = mode_realistic, f = mode_fun, both = mode_realistic | mode_fun;
     static constexpr Dial dials[]{
         {"Super Ollie", "Ollie height", both},
+        {"Grind Pop", "Pop out of grinds and slides", both},
         {"Fast", "Push speed", both},
         {"Fast Flips", "Body flip speed", both},
         {"Fast Spins", "Body spin speed", both},
@@ -141,6 +147,8 @@ const std::vector<BuiltinPreset> &builtin_presets() {
          {{"physicsmode.jumpmaxheight", true, 3.0}, {"physicsmode.jumpminheight", true, 3.0},
           {"physicsjump.absoluteminheight", true, 2.0}, {"physicsjump.jumpybonusmax", true, 3.0},
           {"physicsmode.grindjump", true, 2.5}}},
+        {"Grind Pop", "Pops out of grinds, board slides and nose and tail slides go twice as high, quick pops included.",
+         {{"physicsmode.grindjump", true, 2.0}}},
         {"Fast Flips", "Front flips and back flips rotate three times as fast.",
          {{"physicsreckoning.flipscalar", true, 3.0}, {"physicsreckoning.flipmaxspeed", true, 3.0},
           {"physicsmode.perfectbodyflips", false, 0.0}}},

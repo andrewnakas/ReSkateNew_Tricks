@@ -145,6 +145,7 @@ struct State {
     MapFile map_file;
     int slot{};
     bool auto_return{}, pad_shortcuts{}, hud{}, hud_jump{}, logging{};
+    bool pad_menu{true}; // LB + RB + R3 opens and closes the menu
     // The hippy jump's height is set by the game's trick scripts, not by tuning: the trainer
     // scales the upward velocity when it sees one start.
     float hippy_height{1};
@@ -267,6 +268,7 @@ void load_store() {
             const auto &o = json->at("options");
             s.auto_return = o.value("auto_return", false);
             s.pad_shortcuts = o.value("pad_shortcuts", false);
+            s.pad_menu = o.value("pad_menu", true);
             s.hud = o.value("hud", false);
             s.hud_jump = o.value("hud_jump", false);
             s.return_delay = std::clamp(o.value("return_delay", 1.5f), 0.0f, 10.0f);
@@ -313,6 +315,7 @@ void save_store() {
         Json options = Json::object();
         options["auto_return"] = s.auto_return;
         options["pad_shortcuts"] = s.pad_shortcuts;
+        options["pad_menu"] = s.pad_menu;
         options["hud"] = s.hud;
         options["hud_jump"] = s.hud_jump;
         options["return_delay"] = s.return_delay;
@@ -1765,6 +1768,7 @@ void build_view() {
     next->boneless_height = s.boneless_height;
     next->return_delay = s.return_delay;
     next->pad_shortcuts = s.pad_shortcuts;
+    next->pad_menu = s.pad_menu;
     next->hud = s.hud;
     next->hud_jump = s.hud_jump;
     next->logging = s.logging;
@@ -2061,11 +2065,12 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             if (!value) return "error: return_delay needs seconds.";
             s.return_delay = std::clamp(static_cast<float>(*value), 0.0f, 10.0f);
         } else if (!flag(arg(1), on)) {
-            return "error: usage: trainer option hud|hud_jump|auto_return|pad|log 0|1";
+            return "error: usage: trainer option hud|hud_jump|auto_return|pad|pad_menu|log 0|1";
         } else if (name == "hud") s.hud = on;
         else if (name == "hud_jump") s.hud_jump = on;
         else if (name == "auto_return") s.auto_return = on;
         else if (name == "pad") s.pad_shortcuts = on;
+        else if (name == "pad_menu") s.pad_menu = on;
         // <dev>
         else if (name == "statelog") s.state_log = on;
         // </dev>

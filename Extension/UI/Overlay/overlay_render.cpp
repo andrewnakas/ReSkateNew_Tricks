@@ -280,7 +280,7 @@ bool setup_graphics() {
     ImGui::SetCurrentContext(s.context);
     ImGui::GetIO().IniFilename = nullptr;
     ImGui::GetIO().LogFilename = nullptr;
-    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     ImGui::StyleColorsDark();
     dingosdk::overlay::load_skate_fonts(s.menu);
     // Thumbnails are read from the game's own data at startup; the read is
@@ -455,6 +455,7 @@ void render(IDXGISwapChain* presented, UINT flags) {
     const bool nametag_frame = nametags_pending();
     const bool perf_frame = perf_hud_pending() || trainer_hud_pending();
     if (trainer_open_requested()) s.visible.store(true);
+    if (trainer_pad_menu_pressed(s.visible.load())) s.visible.store(!s.visible.load());
     const bool menu_frame = interactive_visible(s);
     if (!menu_frame) {
         if (s.ui_was_interactive) {

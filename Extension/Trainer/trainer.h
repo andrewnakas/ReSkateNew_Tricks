@@ -69,6 +69,7 @@ struct View {
     bool auto_return{};
     float return_delay{1.5f};
     bool pad_shortcuts{};
+    bool pad_menu{true};
     // Height of the hippy jump, which the game scripts instead of tuning (x of its own height).
     float hippy_height{1};
     // The same for the no comply and the boneless.
