@@ -49,4 +49,7 @@ struct PointerRun {
 // exactly (0: any run of two or more), `histogram[n]` with how many runs have n pointers.
 std::size_t pointer_runs(std::uintptr_t type, std::uint32_t wanted, PointerRun *runs, std::size_t capacity, std::size_t &found,
                          std::array<std::uint32_t, 24> &histogram) noexcept;
+// Every copy in memory of the number that keeps a flip trick ahead of the landing (see the .cpp).
+std::size_t flick_warp_limits(std::uintptr_t *out, std::size_t capacity) noexcept;
+bool poke_float(std::uintptr_t address, float value) noexcept;
 } // namespace dingosdk::trainer

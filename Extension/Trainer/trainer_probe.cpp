@@ -322,6 +322,44 @@ std::size_t scan_floats(const float *wanted, std::size_t count, std::size_t wind
     megabytes = bytes >> 20;
     return found;
 }
+// The flick warp limit: the expression that sets Float.Anim.MaxTrickFlickWarpTime from the time
+// to land holds one number, 1/6 s (as shipped), between fixed words of its kernel.
+namespace {
+std::size_t warp_region(const std::uint8_t *start, std::size_t size, std::uintptr_t *out, std::size_t capacity, std::size_t found) noexcept {
+    __try {
+        const auto *words = reinterpret_cast<const std::uint32_t *>(start);
+        const std::size_t total = size / 4;
+        for (std::size_t i = 3; i + 3 < total; ++i) {
+            if (words[i + 2] != 0x2419u || words[i - 3] != 0x00010300u) continue;
+            if (words[i - 2] || words[i - 1] || words[i + 1] || words[i + 3]) continue;
+            if (found < capacity) out[found] = reinterpret_cast<std::uintptr_t>(words + i);
+            ++found;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return found;
+}
+} // namespace
+std::size_t flick_warp_limits(std::uintptr_t *out, std::size_t capacity) noexcept {
+    std::size_t found{};
+    MEMORY_BASIC_INFORMATION info{};
+    for (std::uintptr_t at = 0x10000; at < 0x7fffffff0000ull && VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info)) == sizeof(info);
+         at = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize) {
+        if (info.State != MEM_COMMIT || (info.Protect != PAGE_READWRITE && info.Protect != PAGE_READONLY) || info.Type == MEM_IMAGE) continue;
+        found = warp_region(static_cast<const std::uint8_t *>(info.BaseAddress), info.RegionSize, out, capacity, found);
+    }
+    return found;
+}
+bool poke_float(std::uintptr_t address, float value) noexcept {
+    __try {
+        DWORD old{};
+        const bool changed = VirtualProtect(reinterpret_cast<void *>(address), 4, PAGE_READWRITE, &old) != 0;
+        *reinterpret_cast<volatile float *>(address) = value;
+        if (changed && old != PAGE_READWRITE) VirtualProtect(reinterpret_cast<void *>(address), 4, old, &old);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 std::size_t watch_four(const std::uintptr_t *addresses, std::uintptr_t image, std::size_t image_size) noexcept {
     auto &w = watch();
     if (!w.handler) w.handler = AddVectoredExceptionHandler(1, watch_handler);

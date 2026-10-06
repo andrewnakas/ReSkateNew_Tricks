@@ -2749,6 +2749,22 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         }
         return result;
     }
+    if (v == "flipgate") {
+        // trainer flipgate [seconds]: the copies of the flick warp limit's number, and a new value for them.
+        std::array<std::uintptr_t, 32> at{};
+        const auto count = flick_warp_limits(at.data(), at.size());
+        const auto value = number(arg(0));
+        std::string result = std::format("{} copies:", count);
+        for (std::size_t i = 0; i < std::min(count, at.size()); ++i) {
+            float now{};
+            (void)memory::peek(at[i], now);
+            MEMORY_BASIC_INFORMATION info{};
+            (void)VirtualQuery(reinterpret_cast<void *>(at[i]), &info, sizeof(info));
+            result += std::format(" {:x}={:.4f}{}", at[i], now, info.Protect == PAGE_READONLY ? "(ro)" : "");
+            if (value) result += poke_float(at[i], static_cast<float>(*value)) ? std::format("->{:.4f}", *value) : std::string("->failed");
+        }
+        return result;
+    }
     if (v == "setters") {
         std::array<Writer, 32> found{};
         const auto count = velocity_setters(found.data(), found.size());

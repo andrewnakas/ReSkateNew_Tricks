@@ -5,6 +5,7 @@
 #include "Engine/Vfs/game_bundles.h"
 #include <algorithm>
 #include <fstream>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -15,6 +16,7 @@
 #include <variant>
 #include <vector>
 
+#pragma warning(disable : 4996) // std::getenv in a command line tool
 namespace ebx = dingosdk::frostbite::ebx;
 namespace {
 std::string lower(std::string_view text) {
@@ -116,8 +118,15 @@ int main(int argc, char **argv) {
     try {
         const std::filesystem::path game_root(argv[1]);
         const dingosdk::vfs::GameData data(game_root);
-        const auto found = data.read_bundle(data.read_toc("Win32/levels/game/bam_levelroot/bam_levelroot.toc"),
-                                            "win32/levels/game/bam_levelroot/bam_levelroot");
+        // ASSET_TOC / ASSET_BUNDLE: another superbundle and bundle than the level root; ASSET_BUNDLE=? lists the names.
+        const auto *toc_name = std::getenv("ASSET_TOC");
+        const auto *bundle_name = std::getenv("ASSET_BUNDLE");
+        const auto toc = data.read_toc(toc_name ? toc_name : "Win32/levels/game/bam_levelroot/bam_levelroot.toc");
+        if (bundle_name && std::string_view(bundle_name) == "?") {
+            for (const auto &entry : toc.bundles) std::cout << entry.name << std::endl;
+            return 0;
+        }
+        const auto found = data.read_bundle(toc, bundle_name ? bundle_name : "win32/levels/game/bam_levelroot/bam_levelroot");
         if (!found) throw std::runtime_error("the level root bundle was not found");
         const auto &bundle = *found;
         const std::string mode = argv[2];
