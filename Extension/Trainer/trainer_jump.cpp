@@ -51,7 +51,9 @@ void set_trajectory_hook(std::uintptr_t trajectory, float *parameters) {
                  watch.previous_seconds >= no_comply_crouch)
             trick = Trick::no_comply;
         const float up = parameters[velocity_y];
-        if (trick != Trick::none && std::isfinite(up) && up > 0.5f) {
+        // Any launch that still goes up: riding downhill takes most of the upward speed away, and
+        // those launches were being left alone.
+        if (trick != Trick::none && std::isfinite(up) && up > 0.05f) {
             const float factor = (trick == Trick::boneless ? h.boneless : h.no_comply).load(std::memory_order_relaxed);
             if (factor != 1 && up * factor < 200.0f) parameters[velocity_y] = up * factor;
             std::uint32_t bits[2];

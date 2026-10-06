@@ -1749,6 +1749,7 @@ void build_view() {
         const auto friendly = essential_name(e.key, &rank, &modes);
         next->rows.push_back({e.id, e.label, e.group, e.kind, e.value, e.stock, e.touched, e.frozen, e.detail, std::string(friendly), rank, modes,
                               e.used});
+        next->rows.back().help = essential_help(e.key);
         if (e.touched) ++next->touched;
         if (std::ranges::find(next->groups, e.group) == next->groups.end()) next->groups.push_back(e.group);
     }

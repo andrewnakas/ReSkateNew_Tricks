@@ -22,6 +22,8 @@ struct BuiltinPreset {
 // The plain name of a value on the Tune tab's short lists, by its lower-case id; empty for the
 // rest. `modes`: which lists it is on (mode_realistic, mode_fun).
 std::string_view essential_name(std::string_view key, int *rank = nullptr, std::uint8_t *modes = nullptr);
+// What a named value does, in a plain sentence with its unit; empty when there is none.
+std::string_view essential_help(std::string_view key);
 // Whether the game's code was found to read the tuning value at this offset of the asset.
 // False means "no use found": changing it will probably do nothing.
 bool value_used(std::uint16_t offset);

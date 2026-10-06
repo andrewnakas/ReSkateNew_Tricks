@@ -17,6 +17,8 @@ namespace dingosdk::trainer {
 enum class Kind : std::uint8_t { real, integer, flag, curve, graph };
 // The Tune tab's two short lists: which of them a value is on (Row::modes).
 inline constexpr std::uint8_t mode_realistic = 1, mode_fun = 2;
+// On a short list although the game was not seen reading it: named for players to try out.
+inline constexpr std::uint8_t mode_trial = 4;
 
 // One editable value of Gameplay/SkatePhysicsTuning. `id` is the name the game's data gives
 // it ("PhysicsMode.JumpMaxHeight").
@@ -30,6 +32,7 @@ struct Row {
     int rank{};           // its place on that list, from 1; 0: not on it
     std::uint8_t modes{}; // which short lists it is on (trainer_presets.h: mode_realistic, mode_fun)
     bool used{};          // the game's code was found to read it
+    std::string help;     // what the value does, in a sentence; empty for most
 };
 struct PresetRow {
     std::string name, note;

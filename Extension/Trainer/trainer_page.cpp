@@ -78,7 +78,7 @@ void filter_rows(Page &p, const trainer::View &view) {
         const auto &row = view.rows[i];
         if (essentials) {
             // Only what the game was found or seen to read: a short list has no room for maybes.
-            if (!row.friendly.empty() && (row.modes & list) && row.used) p.shown.push_back(i);
+            if (!row.friendly.empty() && (row.modes & list) && (row.used || (row.modes & trainer::mode_trial))) p.shown.push_back(i);
             continue;
         }
         if (row.detail && !p.graph_points && !row.touched) continue;
@@ -111,7 +111,7 @@ void value_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tra
     ImGui::TextUnformatted(row.used ? label.c_str() : (label + "  (no use found)").c_str());
     if (tinted) ImGui::PopStyleColor();
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s\nStock: %s%s", row.id.c_str(), number(row.stock).c_str(),
+        ImGui::SetTooltip("%s%s%s\nStock: %s%s", row.help.c_str(), row.help.empty() ? "" : "\n", row.id.c_str(), number(row.stock).c_str(),
             row.used ? "" : "\nThe game was not found (or seen) reading this value, so changing it may do nothing.");
     ImGui::SameLine(column);
     const float reset = ImGui::CalcTextSize("Reset").x + ImGui::GetStyle().FramePadding.x * 2;
