@@ -33,8 +33,9 @@ can be tried: tell us what it does.
   stretches the flip catch times by the same factor: the game hurries any flip that would not
   finish inside its catch time, so slowed flips used to snap back to full speed.
 - **Trick lines tab.** Everything that makes a trick line in one place (reverts and powerslides,
-  pumping, pops, spins and flips, manuals and grinds), with one button for Skate 3's settings and
-  one for the game's own. The revert boost's rules are yours to change there: how much spin
+  pumping, pops, spins and flips, manuals and grinds), under a "play like" choice:
+  skate., Skate 3 Easy, Skate 3 or Skate 3 Hardcore (the same choice heads the Tune tab), plus
+  Skate 3's trick line extras. The revert boost's rules are yours to change there: how much spin
   counts, how far out of line the board must land, what each kind of revert is worth.
 - **Revert speed boost** (TRICKS). Land a spin the game has to auto revert and get speed back, as
   earlier builds of the game did; chain reverts to build speed. 0 is off. The measuring and the

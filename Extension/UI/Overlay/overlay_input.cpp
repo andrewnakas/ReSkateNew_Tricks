@@ -5,9 +5,6 @@
 #include "playstation_input.h"
 #include "cursor.h"
 
-// <dev>
-extern "C" bool DingoSDKOverlayScriptControllerOn();
-// </dev>
 using namespace dingosdk::overlay::detail;
 namespace dingosdk::overlay::detail {
 
@@ -137,12 +134,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     } noted_raw_input_scope;
     if (message == WM_ACTIVATEAPP || message == WM_ACTIVATE || message == WM_KILLFOCUS || message == WM_SETFOCUS)
         log_focus_change(window, message, wp, lp);
-    // <dev>
-    // A scripted controller run goes on in the background: the game is not told it lost the desktop.
-    if (DingoSDKOverlayScriptControllerOn() &&
-        ((message == WM_ACTIVATEAPP && !wp) || (message == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE) || message == WM_KILLFOCUS))
-        return DefWindowProcW(window, message, wp, lp);
-    // </dev>
     if ((message >= WM_KEYFIRST && message <= WM_KEYLAST && message != WM_CHAR) ||
         (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST))
         note_input_message(message, wp);

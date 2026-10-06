@@ -43,6 +43,7 @@ struct Page {
     bool show_page{};
 };
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words);
+void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View &view);
 Page &page() {
     static auto *value = new Page;
     return *value;
@@ -245,6 +246,13 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         return searching ? contains_words(lower(preset.title + " " + preset.name + " " + preset.note), words) : p.mode == 2 || (preset.modes & list) != 0;
     };
 
+    if (!searching) {
+        begin_card(menu, "feel", "PLAY LIKE", "The game's own tuning, or Skate 3's on one of its difficulties");
+        ImGui::BeginDisabled(!can_edit);
+        feel_buttons(menu, callbacks, view);
+        ImGui::EndDisabled();
+        end_card();
+    }
     begin_card(menu, "dials", p.mode == 0 ? "FEEL: TONE IT DOWN" : p.mode == 1 ? "FEEL: TURN IT UP" : "FEEL",
                "1 is the game's own. A dial moves every value its preset moves.");
     ImGui::BeginDisabled(!can_edit);
@@ -253,7 +261,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
     // The presets that are plain switches, and the ones that set several dials at once.
     bool first = true;
     for (const auto &preset : view.presets) {
-        if (!preset.builtin || preset.dial || preset.name == "Stock" || !listed(preset)) continue;
+        if (!preset.builtin || preset.dial || preset.name == "Stock" || preset.name.starts_with("Skate 3") || !listed(preset)) continue;
         if (!first && ImGui::GetItemRectMax().x + ImGui::CalcTextSize(preset.name.c_str()).x + ImGui::GetStyle().FramePadding.x * 4 <
                           ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x)
             ImGui::SameLine();
@@ -565,6 +573,33 @@ void jump_lines(SkateMenu &menu, const trainer::Jump &jump) {
                                       jump.landing[2]));
     info(menu, "Rotation", std::format("spin {:.0f} degrees (peak {:.0f} per second), flip {:.0f} degrees", jump.spin, jump.spin_rate, jump.flip));
 }
+// Which game the skating plays like: the game's own, or Skate 3 on one of its three difficulties.
+// One is always lit; a Skate 3 one goes out again as soon as one of its values is changed by hand.
+void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View &view) {
+    struct Choice {
+        const char *label, *preset, *command, *tip;
+    };
+    static constexpr Choice choices[]{
+        {"skate.", "", "feel stock", "The game's own tuning."},
+        {"Skate 3 Easy", "Skate 3 Easy", "feel easy", "Skate 3 on Easy: full-height pops every time, strong pushes, generous grind lock-on, easy spins."},
+        {"Skate 3", "Skate 3", "feel normal", "Skate 3 on Normal: its pop, grind pops, pushing, pumping, steering, manuals, spins, flips and bails."},
+        {"Skate 3 Hardcore", "Skate 3 Hardcore", "feel hardcore", "Skate 3 on Hardcore: lower pops, weaker pushes, tight grind lock-on, slow auto spins."},
+    };
+    const auto active = [&](const char *preset) {
+        return std::ranges::any_of(view.presets, [&](const trainer::PresetRow &row) { return row.builtin && row.active && row.name == preset; });
+    };
+    const bool any = active("Skate 3 Easy") || active("Skate 3") || active("Skate 3 Hardcore");
+    const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 3) / 4;
+    for (std::size_t i = 0; i < std::size(choices); ++i) {
+        if (i) ImGui::SameLine();
+        const bool on = i == 0 ? !any : active(choices[i].preset);
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
+        if (ImGui::Button(choices[i].label, ImVec2(width, 0))) trainer_command(menu, callbacks, choices[i].command);
+        if (on) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choices[i].tip);
+    }
+}
+
 // Everything that makes a trick line, in one place: the same values and sliders as the Tune tab,
 // gathered, with one button for Skate 3's and one for the game's own.
 void trickline_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
@@ -577,12 +612,13 @@ void trickline_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
     if (!view.editable) warn(view.blocked.c_str());
     const bool can_edit = view.editable && callbacks.queue_console_command != nullptr;
     ImGui::BeginDisabled(!can_edit);
-    begin_card(menu, "trickline", "TRICK LINES", "Start from one game, then tune");
-    if (ImGui::Button("Skate 3")) trainer_command(menu, callbacks, "trickline skate3");
+    begin_card(menu, "trickline", "TRICK LINES", "Play like one game, then tune");
+    feel_buttons(menu, callbacks, view);
+    if (ImGui::Button("Add Skate 3's trick line extras")) trainer_command(menu, callbacks, "trickline extras on");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Skate 3's own numbers for pop, grind pops, pumping, spins, steering and manuals, speed back out of reverts,\nand heavier revert and powerslide friction (the friction is a first guess: tune it below).");
+        ImGui::SetTooltip("On top of the tuning: speed back out of reverts (the revert boost below at x 1) and heavier revert and\npowerslide friction (x 3 and x 1.5, a first guess: tune them below).");
     ImGui::SameLine();
-    if (ImGui::Button("skate. (the game's own)")) trainer_command(menu, callbacks, "trickline stock");
+    if (ImGui::Button("Remove them")) trainer_command(menu, callbacks, "trickline extras off");
     note("Everything here is also on the Tune tab: this is the trick line part of it. Blue = changed. Type in a box to go past a slider's end.");
     end_card();
 
@@ -652,10 +688,10 @@ void trickline_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         const auto &r = view.revert;
         number_row("Revert speed boost", "option revert_boost", view.revert_boost, 0.0f, 5.0f, view.revert_boost <= 0 ? "off" : "x %.2f",
                    "Speed back on a landing the game has to swing round. 0 is off, the game's own. From AutoRevertBoost by Sivaes, jaq and OVM.");
-        number_row("Counts from this much spin", "revert spin", r.min_spin, 0.0f, 180.0f, "%.0f deg", "How far you must have turned in the air. Lower it and smaller turns count as reverts.");
-        number_row("Board off your travel by", "revert slip", r.min_slip, 0.0f, 90.0f, "%.0f deg",
+        number_row("Spin needed", "revert spin", r.min_spin, 0.0f, 180.0f, "%.0f deg", "How far you must have turned in the air. Lower it and smaller turns count as reverts.");
+        number_row("Board off the travel", "revert slip", r.min_slip, 0.0f, 90.0f, "%.0f deg",
                    "The board must land at least this far out of line with where you are going (0 = lined up, 90 = sideways).");
-        number_row("or board off your body by", "revert twist", r.min_twist, 0.0f, 90.0f, "%.0f deg", "A board bend: the board twisted this far off your body at touchdown also counts.");
+        number_row("or off your body", "revert twist", r.min_twist, 0.0f, 90.0f, "%.0f deg", "A board bend: the board twisted this far off your body at touchdown also counts.");
         number_row("Boost: a small bend", "revert bend", r.bend_boost, 0.0f, 10.0f, "+%.1f m/s", "Speed added when the board turned 40 degrees past the body over the flight (times the boost strength).");
         number_row("Boost: a full bend", "revert full", r.full_boost, 0.0f, 10.0f, "+%.1f m/s", "The same at 360 degrees; in between it rises in a straight line up to 140 degrees.");
         number_row("Boost: an auto revert", "revert auto", r.auto_boost, 0.0f, 10.0f, "+%.1f m/s", "Speed added when the board turned more than 140 degrees past the body.");
