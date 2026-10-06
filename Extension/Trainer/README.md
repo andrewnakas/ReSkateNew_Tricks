@@ -8,18 +8,20 @@ telemetry HUD. It ships no game data: the list of values is built at run time fr
 
 | Tab | What you get |
 |---|---|
-| **TUNE** | Three lists: REALISTIC, FUN and EVERYTHING. Each opens on the dials: every built-in preset as one slider (Ollie height, Push speed, Body flip and spin speed, Bail resistance, Grind lock-on and friction, on-foot jump and sprint, glide, torpedo), where 1 is the game's own and the preset's button jumps to the preset; then the switches (Auto Push, No Speed Wobble, Smooth Surfaces, Long Wheelbase, Never bail), the trick sliders (flip trick speed, no comply, boneless, hippy and off-board jump height) and the values themselves: a short plainly named list, or under EVERYTHING the whole table (the physics tuning's values, one multiplier per curve and graph, and the 314 values of the game's other tuning classes) with search, groups, "only what I changed", locks, your own saved presets and a preset a map applies every time it loads. Changes apply while you skate. Values the game was never found or seen reading are hidden unless you ask for them. **Reset everything**, above the tabs, puts the game back as it shipped. |
+| **TUNE** | Three lists: REALISTIC, FUN and EVERYTHING. Each opens on the dials: every built-in preset as one slider (Ollie height, pop out of grinds, on-board gravity, landings, revert friction, pumping, Push speed, Body flip and spin speed, Bail resistance, Grind lock-on and friction, on-foot jump and sprint, glide, torpedo), where 1 is the game's own and the preset's button jumps to the preset; then the switches (Auto Push, No Speed Wobble, Smooth Surfaces, Long Wheelbase, Never bail), the trick sliders (flip trick speed, no comply, boneless, hippy and off-board jump height) and the values themselves: a short plainly named list, or under EVERYTHING the whole table (the physics tuning's values, one multiplier per curve and graph, and the 314 values of the game's other tuning classes) with groups, "only what I changed", locks, your own saved presets and a preset a map applies every time it loads. One search box finds dials, trick sliders and values on every list; pointing at a named value says what it does. The built-in presets include Skate 3 (and its Hardcore and Easy): Skate 3's numbers for every value this game still shares with it. "Share" copies one of your presets as a line of text and "Import from clipboard" adds one you were sent. Changes apply while you skate. Values the game was never found or seen reading are hidden unless you ask for them. **Reset everything**, above the tabs, puts the game back as it shipped. |
 | **PRACTICE** | Game speed and pause, five marker slots per map (save / go / clear), return to the marker after a bail, teleport to coordinates, copy your position (game or Blender axes). |
+| **CAMERA** | Move the game's own cameras: distance, height, camera-only height and side for the low camera, the high camera and the on-foot camera, with buttons for SunJay's Low Cam numbers and a low camera that shows more of the skater. The cameras keep their smoothing and stay out of walls. Below it, an experimental camera of your own that replaces the game's (it does not avoid walls). |
 | **MAP & HUD** | Speed and air-time HUD, a read-out after every jump (takeoff speed and angle, height, distance, drop, landing speed, spin and flip), telemetry recording to CSV, and whatever the map's author ships for the trainer. |
 
 The HUD, the jump read-out and the controller shortcuts are off until you switch them on (MAP & HUD,
 PRACTICE): a player who never opens the trainer sees and feels nothing of it.
 
-Controller, once switched on: hold **LB + RB**, then D-pad **up** saves the marker, **down** goes to it,
-**left / right** pick the slot.
+Controller: **LB + RB + click the right stick** opens and closes the menu (D-pad or left stick moves, A presses, B goes back);
+it can be switched off on PRACTICE. With the marker shortcuts switched on: hold **LB + RB**, then D-pad **up** saves the marker,
+**down** goes to it, **left / right** pick the slot.
 
-Everything is also a console command (`~`): `trainer open [tune|practice|map|realistic|fun|everything]`, `trainer status`, `trainer set <id> <value>`,
-`trainer find <words>`, `trainer preset apply|remove <name>`, `trainer dial <multiplier> <preset name>`,
+Everything is also a console command (`~`): `trainer open [tune|practice|camera|map|realistic|fun|everything]`, `trainer status`, `trainer set <id> <value>`,
+`trainer find <words>`, `trainer preset apply|remove|export <name>`, `trainer preset import`, `trainer camera rig low|high|foot distance|height|raise|side <number>`, `trainer dial <multiplier> <preset name>`,
 `trainer reset <id>|all|tricks|presets|everything`, `trainer marker save|go|clear [slot]`,
 `trainer tp <x> <y> <z>`, `trainer where`, `trainer jumps`, `trainer dump`, `trainer selftest`.
 

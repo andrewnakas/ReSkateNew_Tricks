@@ -1,5 +1,32 @@
 # Changelog
 
+## Next (0.4.0, in progress)
+
+From what players asked for in the ReSkate Discord. Everything marked "untested" is in so that it
+can be tried: tell us what it does.
+
+- **Camera tab.** Move the game's own cameras: distance, height and side for the low camera, the
+  high camera and the on-foot camera, with a "SunJay's Low Cam" button (the numbers of SunJay's
+  mod, which showed where the game keeps them). The cameras keep their smoothing and stay out of
+  walls. Also an experimental camera of your own that replaces the game's.
+- **Skate 3 presets.** Skate 3, Skate 3 Hardcore and Skate 3 Easy set every value this game still
+  shares with Skate 3 by name (77 of them differ) to Skate 3's number: pop, grind pops, pushing,
+  pumping, steering, manuals, body spins and flips, bails. Not yet measured against Skate 3.
+- **Pop out of grinds, finished.** All six values are named (grinds, board slides, nose and tail
+  slides; the highest pop and the quick-pop minimum) and one dial moves them together.
+- **More dials:** on-board gravity, get-on-board speed (untested), body flip air time (untested),
+  landing speed you can take, landing compression (untested), revert friction, pumping strength.
+  Manual pop, the stick boost when popping, and the bad-landing strictness are named values.
+- **Search finds everything:** dials, switches, trick sliders and every value, on all three lists.
+- **The menu works from the controller.** LB + RB + click the right stick opens and closes it;
+  D-pad or left stick moves, A presses, B goes back. It can be switched off on the Practice tab.
+- **Share presets.** "Share" copies a preset as one line of text; "Import from clipboard" adds
+  one someone sent you. Your own presets now carry the trick sliders too.
+- **You can see when you are stock:** a line beside Reset everything says STOCK or MODIFIED.
+- **Plainer words:** named values explain themselves, with units, when you point at them.
+- No comply and boneless heights now also apply to weak upward launches (riding downhill).
+- The menu tab is called PHYSICS.
+
 ## In ReSkate
 
 Changes made when the trainer moved into ReSkate itself.
