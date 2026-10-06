@@ -13,6 +13,7 @@ struct PresetRule {
     bool multiply{true};
     double amount{1};
     bool curves{}; // the rule is for curve and graph multipliers instead of plain values
+    bool exact{};  // `pattern` is one whole id, and it may be a single graph point
 };
 struct BuiltinPreset {
     std::string_view name, note;

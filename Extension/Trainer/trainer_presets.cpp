@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <iterator>
+#include <map>
+#include <span>
 #include <string_view>
 #include <utility>
 
@@ -128,10 +130,32 @@ PresetDial preset_dial(std::string_view name) {
         {"Auto Push", "", f},
         {"Smooth Surfaces", "", f},
         {"Long Wheelbase", "", both},
+        {"Skate 3", "", both},
+        {"Skate 3 Hardcore", "", both},
+        {"Skate 3 Easy", "", both},
     };
     const auto found = std::ranges::find(dials, name, &Dial::name);
     return found == std::end(dials) ? PresetDial{} : PresetDial{found->title, found->modes};
 }
+
+// Skate 3's own tuning, for the values this game still has under the same class and field name
+// and that differ: this game's tuning grew out of Skate 3's. Hardcore and Easy are Skate 3's
+// difficulty settings on top of the same set.
+namespace {
+struct Skate3Value {
+    std::string_view id;
+    double value;
+};
+#include "trainer_skate3.inc"
+std::vector<PresetRule> skate3_rules(std::span<const Skate3Value> difficulty) {
+    std::map<std::string_view, double> values;
+    for (const auto &row : skate3_normal) values[row.id] = row.value;
+    for (const auto &row : difficulty) values[row.id] = row.value;
+    std::vector<PresetRule> rules;
+    for (const auto &[id, value] : values) rules.push_back({id, false, value, false, true});
+    return rules;
+}
+} // namespace
 
 // Patterns are matched against the lower-case ids the game's own data gives its tuning
 // (run `trainer dump` for the list), so a preset reaches every value a pattern names in
@@ -193,6 +217,12 @@ const std::vector<BuiltinPreset> &builtin_presets() {
         {"Smooth Surfaces", "Rough ground rides like polished concrete.", {{"physicsmode.makesurfacessmooth", false, 1.0}}},
         {"Long Wheelbase", "Trucks 10 cm further out at both ends. Takes effect on the next respawn.",
          {{"physicstrucks.truckzposfront", false, 0.0143}, {"physicstrucks.truckzposback", false, 0.0143}}},
+        {"Skate 3", "Skate 3's own numbers for everything this game still shares with it: pop, grind pops, pushing, pumping, "
+                    "steering, manuals, body spins and flips, bails. Normal difficulty.",
+         skate3_rules({})},
+        {"Skate 3 Hardcore", "Skate 3 on Hardcore: lower pops, weaker pushes, tight grind lock-on, slow auto spins.",
+         skate3_rules(skate3_hardcore)},
+        {"Skate 3 Easy", "Skate 3 on Easy: full-height pops, strong pushes, generous grind lock-on.", skate3_rules(skate3_easy)},
     };
     return presets;
 }

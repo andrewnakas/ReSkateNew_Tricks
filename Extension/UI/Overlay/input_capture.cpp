@@ -29,6 +29,9 @@ HeldInput& held_input() { static auto* value = new HeldInput; return *value; }
 
 struct InputCaptureHooks {
     Hook register_raw;
+    // <dev>
+    Hook foreground, active, focus;
+    // </dev>
     Hook async_key, key, keyboard, raw_data, raw_buffer, capture, release_capture, cursor, show_cursor, physical_cursor, cursor_position;
     std::array<Hook, 5> xinput_state, xinput_extended, xinput_keystroke;
     Hook direct_create;
@@ -311,6 +314,26 @@ struct ScriptedPad {
     std::atomic<std::uint64_t> polls{}, served{}, blanked{};
 };
 ScriptedPad& scripted_pad() { static auto* value = new ScriptedPad; return *value; }
+// While a script owns the controller the game is the foreground window as far as it can tell,
+// so a scripted run does not need the desktop (the game reads no input in the background).
+HWND scripted_window(bool root) {
+    if (!scripted_pad().on.load(std::memory_order_acquire)) return nullptr;
+    const HWND window = state().window.load();
+    const HWND top = window && root ? GetAncestor(window, GA_ROOT) : nullptr;
+    return top ? top : window;
+}
+HWND WINAPI scripted_foreground() {
+    const HWND window = scripted_window(true);
+    return window ? window : original<HWND(WINAPI*)()>(input_hooks().foreground)();
+}
+HWND WINAPI scripted_active() {
+    const HWND window = scripted_window(true);
+    return window ? window : original<HWND(WINAPI*)()>(input_hooks().active)();
+}
+HWND WINAPI scripted_focus() {
+    const HWND window = scripted_window(false);
+    return window ? window : original<HWND(WINAPI*)()>(input_hooks().focus)();
+}
 // </dev>
 template<std::size_t I, bool Extended = false>
 DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
@@ -356,6 +379,14 @@ extern "C" void DingoSDKOverlayScriptController(const void* gamepad) {
     std::memcpy(&low, gamepad, 8);
     std::memcpy(&high, static_cast<const std::byte*>(gamepad) + 8, 4);
     if (low != scripted.low.load() || high != scripted.high.load() || !scripted.on.load()) scripted.packet.fetch_add(1);
+    // A scripted run must not need the desktop: the game is told it is the active window and,
+    // while the script owns the controller, is not told when it stops being so (overlay_input.cpp).
+    if (!scripted.on.load())
+        if (const HWND window = dingosdk::overlay::detail::state().window.load()) {
+            PostMessageW(window, WM_ACTIVATEAPP, TRUE, 0);
+            PostMessageW(window, WM_ACTIVATE, WA_ACTIVE, 0);
+            PostMessageW(window, WM_SETFOCUS, 0, 0);
+        }
     scripted.low.store(low, std::memory_order_relaxed);
     scripted.high.store(high, std::memory_order_relaxed);
     scripted.on.store(true, std::memory_order_release);
@@ -365,6 +396,9 @@ extern "C" void DingoSDKOverlayScriptControllerPolls(std::uint64_t* polls, std::
     auto& scripted = dingosdk::overlay::detail::scripted_pad();
     if (polls) *polls = scripted.polls.load(std::memory_order_relaxed);
     if (served) *served = scripted.served.load(std::memory_order_relaxed);
+}
+extern "C" bool DingoSDKOverlayScriptControllerOn() {
+    return dingosdk::overlay::detail::scripted_pad().on.load(std::memory_order_acquire);
 }
 extern "C" std::uint64_t DingoSDKOverlayScriptControllerBlanked() {
     return dingosdk::overlay::detail::scripted_pad().blanked.exchange(0, std::memory_order_relaxed);
@@ -594,6 +628,11 @@ bool install_input_capture() {
         !add(h.cursor, "SetCursor", reinterpret_cast<void*>(captured_cursor)) ||
         !add(h.cursor_position, "GetCursorPos", reinterpret_cast<void*>(captured_cursor_position)) ||
         !add(h.show_cursor, "ShowCursor", reinterpret_cast<void*>(captured_show_cursor))) return false;
+    // <dev>
+    add(h.foreground, "GetForegroundWindow", reinterpret_cast<void*>(scripted_foreground));
+    add(h.active, "GetActiveWindow", reinterpret_cast<void*>(scripted_active));
+    add(h.focus, "GetFocus", reinterpret_cast<void*>(scripted_focus));
+    // </dev>
     // Some Windows builds alias both cursor-position exports to one function,
     // which is already intercepted by the overlay's SetCursorPos hook.
     const auto physical = GetProcAddress(user32, "SetPhysicalCursorPos");

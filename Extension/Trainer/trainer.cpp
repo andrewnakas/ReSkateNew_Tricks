@@ -763,6 +763,11 @@ bool matches(const std::string &key, std::string_view pattern) {
 }
 // What each built-in preset's rules reach in the running game: (entry, rule) pairs, worked out
 // once per table of entries.
+// Whether a preset rule is about this value (`scale`: it is a curve or graph multiplier).
+bool rule_matches(const Entry &e, bool scale, const PresetRule &rule) {
+    if (rule.exact) return !scale && e.key == rule.pattern;
+    return !e.detail && scale == rule.curves && matches(e.key, rule.pattern);
+}
 const std::vector<std::vector<std::pair<std::size_t, std::size_t>>> &preset_targets() {
     static std::vector<std::vector<std::pair<std::size_t, std::size_t>>> cache;
     static const Entry *cached_for{};
@@ -779,7 +784,7 @@ const std::vector<std::vector<std::pair<std::size_t, std::size_t>>> &preset_targ
             for (std::size_t i = 0; i < s.entries.size(); ++i) {
                 const auto &e = s.entries[i];
                 const bool scale = e.kind == Kind::curve || e.kind == Kind::graph;
-                if (e.detail || scale != rule.curves || !matches(e.key, rule.pattern)) continue;
+                if (!rule_matches(e, scale, rule)) continue;
                 if (e.kind == Kind::flag && rule.multiply) continue;
                 cache[p].emplace_back(i, r);
             }
@@ -867,7 +872,7 @@ std::string remove_preset(std::string_view name) {
             for (const auto &rule : preset.rules)
                 for (auto &e : s.entries) {
                     const bool scale = e.kind == Kind::curve || e.kind == Kind::graph;
-                    if (e.detail || scale != rule.curves || !matches(e.key, rule.pattern)) continue;
+                    if (!rule_matches(e, scale, rule)) continue;
                     put_back(e);
                 }
             removed = preset.name;
@@ -924,7 +929,7 @@ std::string apply_preset(std::string_view name) {
             for (const auto &rule : preset.rules)
                 for (auto &e : s.entries) {
                     const bool scale = e.kind == Kind::curve || e.kind == Kind::graph;
-                    if (e.detail || scale != rule.curves || !matches(e.key, rule.pattern)) continue;
+                    if (!rule_matches(e, scale, rule)) continue;
                     if (e.kind == Kind::flag && rule.multiply) continue;
                     if (is_locked(e)) {
                         ++locked;
