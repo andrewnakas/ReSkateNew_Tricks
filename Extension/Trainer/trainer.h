@@ -90,6 +90,8 @@ struct View {
     RevertTuning revert;  // what counts as a revert and what it is worth
     float offboard_height{1}; // a jump on foot
     float flip_speed{1};      // board flip tricks: x of the game's own speed
+    bool flip_gate{true};     // the game brings a flip round before the landing; false: slow flips stay slow
+    bool flip_gate_found{};   // the rule's number was found in memory (the switch can act)
     // HUD
     bool hud{}, hud_jump{}, logging{};
     // The loaded map and what its author ships for the trainer (Mods/<mod>/trainer.json).

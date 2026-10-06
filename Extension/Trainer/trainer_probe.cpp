@@ -360,6 +360,35 @@ bool poke_float(std::uintptr_t address, float value) noexcept {
         return false;
     }
 }
+// Every place in committed, readable memory outside the modules where `pattern` sits, at a
+// multiple of `align` bytes. Read-only and copy-on-write pages are searched too.
+namespace {
+std::size_t bytes_region(const std::uint8_t *start, std::size_t size, const std::uint8_t *pattern, std::size_t length, std::size_t align,
+                         std::uintptr_t *out, std::size_t capacity, std::size_t found) noexcept {
+    __try {
+        if (size < length) return found;
+        for (std::size_t i = 0; i + length <= size; i += align) {
+            if (start[i] != pattern[0] || std::memcmp(start + i, pattern, length) != 0) continue;
+            if (start + i == pattern) continue;
+            if (found < capacity) out[found] = reinterpret_cast<std::uintptr_t>(start + i);
+            ++found;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return found;
+}
+} // namespace
+std::size_t scan_bytes(const std::uint8_t *pattern, std::size_t length, std::size_t align, std::uintptr_t *out, std::size_t capacity) noexcept {
+    std::size_t found{};
+    MEMORY_BASIC_INFORMATION info{};
+    for (std::uintptr_t at = 0x10000; at < 0x7fffffff0000ull && VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info)) == sizeof(info);
+         at = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize) {
+        // Exactly these: a page with a modifier (write-combined video memory, guard pages) is skipped.
+        const bool readable = info.Protect == PAGE_READWRITE || info.Protect == PAGE_READONLY || info.Protect == PAGE_WRITECOPY;
+        if (info.State != MEM_COMMIT || !readable || info.Type != MEM_PRIVATE) continue; // mapped files are the game archives: far too much to read
+        found = bytes_region(static_cast<const std::uint8_t *>(info.BaseAddress), info.RegionSize, pattern, length, align ? align : 1, out, capacity, found);
+    }
+    return found;
+}
 std::size_t watch_four(const std::uintptr_t *addresses, std::uintptr_t image, std::size_t image_size) noexcept {
     auto &w = watch();
     if (!w.handler) w.handler = AddVectoredExceptionHandler(1, watch_handler);

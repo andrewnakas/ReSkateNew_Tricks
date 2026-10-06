@@ -52,4 +52,6 @@ std::size_t pointer_runs(std::uintptr_t type, std::uint32_t wanted, PointerRun *
 // Every copy in memory of the number that keeps a flip trick ahead of the landing (see the .cpp).
 std::size_t flick_warp_limits(std::uintptr_t *out, std::size_t capacity) noexcept;
 bool poke_float(std::uintptr_t address, float value) noexcept;
+// Where `pattern` sits in readable memory outside the modules (read-only pages included).
+std::size_t scan_bytes(const std::uint8_t *pattern, std::size_t length, std::size_t align, std::uintptr_t *out, std::size_t capacity) noexcept;
 } // namespace dingosdk::trainer

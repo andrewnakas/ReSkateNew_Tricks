@@ -407,7 +407,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
 }
 
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words) {
-    static constexpr const char *labels[]{"Flip trick speed", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
+    static constexpr const char *labels[]{"Flip trick speed", "Let slow flips stay slow (no finish before landing)", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
                                            "Board bending boost (revert speed)"};
     const auto wanted = [&](const char *label) { return words.empty() || contains_words(lower(std::string(label) + " tricks"), words); };
     if (std::ranges::none_of(labels, wanted)) return;
@@ -439,6 +439,14 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         return true;
     };
     if (slider("Flip trick speed", "flip_speed", view.flip_speed, p.flip_edit, p.flip_editing, 3.0f) && ImGui::IsItemHovered()) ImGui::SetTooltip("Slows board flips (and gives them that much longer to come round). Above 1 the game's own limit on how fast a board turns takes over.");
+    if (wanted("Let slow flips stay slow (no finish before landing)")) {
+        bool slow = !view.flip_gate;
+        if (ImGui::Checkbox("Let slow flips stay slow", &slow)) trainer_command(menu, callbacks, std::format("option flip_gate {}", slow ? 0 : 1));
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The game speeds a flip up so the board is round 1/6 s before the landing it predicts, however slow the flip speed is set. "
+                              "On: that rule is off, the board turns as slowly as set and lands however far round it got.");
+        if (slow && !view.flip_gate_found) ImGui::TextDisabled("Not found in the game yet: it takes effect a few seconds after a level loads.");
+    }
     slider("No comply height", "nocomply_height", view.nocomply_height, p.nocomply_edit, p.nocomply_editing);
     slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing);
     slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing);
