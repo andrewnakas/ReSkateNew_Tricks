@@ -53,6 +53,9 @@ std::string classes_summary();
 void want_flip_speed(float factor) noexcept;
 // How many flip trick speed curves were found (0: the multiplier does nothing yet).
 std::size_t flip_curves() noexcept;
+// <dev>
+std::size_t dev_undo_classes() noexcept;
+// </dev>
 // Where field `field` (an index into class_fields) lives: each copy's address and kind ('c' the
 // class's own layout, 's' the eight-byte slots, 'n' native code's copy). Returns how many.
 struct FieldCopy {

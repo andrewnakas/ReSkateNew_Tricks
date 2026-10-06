@@ -577,6 +577,27 @@ void want_flip_speed(float factor) noexcept {
         f.dirty = true;
     }
 }
+// <dev>
+// What the game does when it builds its tuning again: every flip curve and class copy back to
+// the game's own numbers, behind the trainer's back (`trainer undo`, to test refresh_classes).
+std::size_t dev_undo_classes() noexcept {
+    auto &f = found();
+    std::lock_guard lock(f.mutex);
+    std::size_t count{};
+    for (const auto &curve : f.flip) {
+        write_flip_curve(curve, 1.0f);
+        ++count;
+    }
+    for (std::size_t c = 0; c < class_count; ++c)
+        for (const auto copy : f.copies[c])
+            for (std::size_t i = 0; i < class_specs[c].count; ++i)
+                if (const auto index = class_specs[c].first + i; f.written[index] != class_fields[index].stock) {
+                    (void)put(copy.base + field_offset(class_specs[c], i, copy.slots), class_fields[index].stock);
+                    ++count;
+                }
+    return count;
+}
+// </dev>
 std::size_t flip_curves() noexcept {
     auto &f = found();
     std::lock_guard lock(f.mutex);

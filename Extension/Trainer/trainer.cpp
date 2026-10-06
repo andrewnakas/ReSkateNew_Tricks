@@ -4,6 +4,9 @@
 #include "trainer_presets.h"
 #include "trainer_session.h"
 #include "Extension/Multiplayer/Hud/follow_camera.h"
+// <dev>
+#include "trainer_probe.h"
+// </dev>
 #include "Engine/Core/Json/json.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Game/Build/addresses.h"
@@ -30,6 +33,11 @@
 #include <numbers>
 #include <optional>
 
+// <dev>
+extern "C" void DingoSDKOverlayScriptController(const void *gamepad);
+extern "C" void DingoSDKOverlayScriptControllerPolls(std::uint64_t *polls, std::uint64_t *served);
+extern "C" std::uint64_t DingoSDKOverlayScriptControllerBlanked();
+// </dev>
 
 // Game thread only. See trainer.h for how the menu reaches this.
 namespace dingosdk::trainer {
@@ -94,8 +102,40 @@ struct Motion {
 struct Boosts {
     float flip{1}, hippy{1}, nocomply{1}, boneless{1}, offboard{1}, cruise{};
 };
+// <dev>
+// A scripted controller: each step holds one controller state for a time (`trainer pad`).
+struct PadStep {
+    std::array<std::uint8_t, 12> pad{}; // XINPUT_GAMEPAD
+    double seconds{};
+};
+struct PadScript {
+    std::vector<PadStep> steps;
+    std::size_t index{};
+    std::int64_t step_start{};
+    bool running{};
+    std::uint64_t served_before{};
+    int mount_tries{}; // `pad mount`: play again until the skater is on the board
+    bool loop{};       // `pad loop`: play again until `pad off`
+};
+// </dev>
 struct State {
     bool loaded{}; // the store was read
+    // <dev>
+    PadScript pad;
+    bool state_log{};
+    std::int64_t state_since{};
+    std::uintptr_t client{};
+    std::array<std::array<float, 4>, 9> body_peaks{};
+    // One sample of the board in the air, for the flip trace (trainer option fliptrace 1).
+    struct FlipSample {
+        float time{}, turn[3]{}, up_speed{}, height{};
+        std::uint32_t state{};
+    };
+    bool flip_trace{};
+    std::vector<FlipSample> flip_samples;
+    int flip_serial{};
+    float flip_takeoff_up{};
+    // </dev>
     std::shared_ptr<const tuning::Model> model;
     std::vector<Entry> entries;
     std::map<std::string, std::size_t, std::less<>> index;
@@ -1219,6 +1259,13 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     // A hippy jump leaves the board (504) straight from riding (100): measured. A plain
     // dismount does the same but is not rising, so it is left alone.
     if (watch.valid && watch.state != s.last_state) {
+        // <dev>
+        if (s.state_log)
+            say(logging::Level::info, std::format("Trainer state: {} -> {} after {:.3f} s; y {:.3f}, up {:.2f} m/s, {:.1f} km/h.", s.last_state,
+                                                  watch.state, clock_seconds(stamp - s.state_since), position[1], s.telemetry.vertical,
+                                                  s.telemetry.speed * 3.6f));
+        s.state_since = stamp;
+        // </dev>
         if (watch.state == addr::no_bail::offboard_physics_state && s.last_state == 100 && s.boosts.hippy != 1.0f) {
             s.boost_factor = std::sqrt(s.boosts.hippy); // height goes with the square of the speed
             s.boost_until = now + 250;
@@ -1315,6 +1362,9 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     // is measured or telemetry is recorded.
     float board_turn = 0;
     bool turning = m.airborne || (s.logging && s.log);
+    // <dev>
+    turning = turning || s.state_log || s.flip_trace;
+    // </dev>
     if (turning) {
         try {
             const auto bodies = client_source::detail::debug_noclip_bodies(base, client, s.entity);
@@ -1325,6 +1375,79 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
             }
         } catch (...) {}
         if (m.airborne) m.board_turn = std::max(m.board_turn, board_turn);
+        // <dev>
+        // The flip trace: how the board turned through one flight, summed up when it lands.
+        if (s.flip_trace && m.airborne) {
+            try {
+                const auto bodies = client_source::detail::debug_noclip_bodies(base, client, s.entity);
+                std::array<float, 3> spin{};
+                if (!bodies.parts.empty() && memory::peek(bodies.parts[0] + 0x90, spin)) {
+                    if (s.flip_samples.empty()) s.flip_takeoff_up = m.takeoff_velocity[1];
+                    State::FlipSample sample;
+                    sample.time = t.air_time;
+                    for (std::size_t k = 0; k < 3; ++k) sample.turn[k] = spin[k] * 180.0f / std::numbers::pi_v<float>;
+                    sample.up_speed = velocity[1];
+                    sample.height = position[1] - m.takeoff[1];
+                    sample.state = watch.valid ? static_cast<std::uint32_t>(watch.state) : 0;
+                    if (s.flip_samples.size() < 4000) s.flip_samples.push_back(sample);
+                }
+            } catch (...) {}
+        } else if (!m.airborne && !s.flip_samples.empty()) {
+            const auto rate = [](const State::FlipSample &x) { return std::sqrt(x.turn[0] * x.turn[0] + x.turn[1] * x.turn[1] + x.turn[2] * x.turn[2]); };
+            const auto &f = s.flip_samples;
+            std::size_t first = f.size(), last = 0;
+            float peak = 0;
+            for (std::size_t i = 0; i < f.size(); ++i) {
+                peak = std::max(peak, rate(f[i]));
+                if (rate(f[i]) > 200.0f) {
+                    if (first == f.size()) first = i;
+                    last = i;
+                }
+            }
+            ++s.flip_serial;
+            const float air = f.back().time;
+            if (first < f.size() && last > first) {
+                float turned = 0;
+                for (std::size_t i = first + 1; i <= last; ++i) turned += 0.5f * (rate(f[i]) + rate(f[i - 1])) * (f[i].time - f[i - 1].time);
+                const float took = f[last].time - f[first].time;
+                say(logging::Level::info,
+                    std::format("Trainer flip #{}: air {:.3f} s, up {:.2f} m/s, turning from {:.3f} to {:.3f} s ({:.3f} s), turned {:.0f} deg, mean {:.0f} peak {:.0f} "
+                                "deg/s, air left at start {:.3f} s, {} samples.",
+                                s.flip_serial, air, s.flip_takeoff_up, f[first].time, f[last].time, took, turned, took > 0 ? turned / took : 0.0f, peak,
+                                air - f[first].time, f.size()));
+            } else {
+                say(logging::Level::info, std::format("Trainer flip #{}: air {:.3f} s, up {:.2f} m/s, no board turn (peak {:.0f} deg/s).", s.flip_serial, air,
+                                                      s.flip_takeoff_up, peak));
+            }
+            try {
+                std::ofstream out(data_directory() / "flips.csv", std::ios::app);
+                for (const auto &x : f)
+                    out << std::format("{},{:.4f},{:.1f},{:.1f},{:.1f},{:.3f},{:.3f},{}", s.flip_serial, x.time, x.turn[0], x.turn[1], x.turn[2], x.up_speed,
+                                       x.height, x.state)
+                        << '\n';
+            } catch (...) {}
+            s.flip_samples.clear();
+        }
+        if (m.airborne && s.state_log) {
+            try {
+                const auto bodies = client_source::detail::debug_noclip_bodies(base, client, s.entity);
+                for (std::size_t i = 0; i < std::min<std::size_t>(bodies.parts.size(), 9); ++i)
+                    for (std::size_t k = 0; k < 4; ++k) {
+                        std::array<float, 3> v{};
+                        if (memory::peek(bodies.parts[i] + 0x80 + k * 0x10, v)) {
+                            const float size = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                            if (std::isfinite(size)) s.body_peaks[i][k] = std::max(s.body_peaks[i][k], size);
+                        }
+                    }
+            } catch (...) {}
+        } else if (!m.airborne && s.state_log && s.body_peaks[0][0] + s.body_peaks[0][1] + s.body_peaks[1][0] > 0) {
+            std::string line = "Trainer bodies (peak size of the vectors at +80 +90 +a0 +b0):";
+            for (std::size_t i = 0; i < 9; ++i)
+                line += std::format(" {}:[{:.1f} {:.1f} {:.1f} {:.1f}]", i, s.body_peaks[i][0], s.body_peaks[i][1], s.body_peaks[i][2], s.body_peaks[i][3]);
+            say(logging::Level::info, line);
+            s.body_peaks = {};
+        }
+        // </dev>
     }
     if (s.logging && s.log) {
         s.log << std::format("{:.4f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.1f},{},{},{:.0f}\n", clock_seconds(stamp - s.log_start), position[0],
@@ -1379,6 +1502,349 @@ void shortcuts() {
     if (!result.empty()) overlay::notify(overlay::NoticeLevel::info, "TRAINER", result);
 }
 
+// <dev>
+
+// ---- read sweep: which class values does the game's code read? ---------------------------------
+struct Sweep {
+    bool running{};
+    std::size_t field{}, end{};
+    std::vector<std::string> only; // class keys, empty: all
+    std::array<FieldCopy, 16> copies{};
+    std::size_t copy_count{}, round{}; // copies of the field, and which four are watched now
+    bool armed{};
+    std::string line;
+    std::uint64_t field_reads{};
+    std::uint64_t until{};
+    std::ofstream file;
+    std::size_t read{}, total{};
+    std::uintptr_t image_size{};
+    int dwell{450};
+    // Live: someone is playing. Passes repeat over the values not read yet until `sweep stop`.
+    bool live{}, unseen{};
+    std::string tag;
+    std::size_t passes{};
+    std::uintptr_t field_reader{};
+    std::vector<std::uint64_t> game, other;
+    std::vector<std::uintptr_t> reader;
+    std::vector<std::uint8_t> found; // 1: copies were found at least once
+    // The game reads one copy of a class (the local skater's): once a read shows which, only
+    // that copy is watched, so a pass over what is left takes a second or two and the short
+    // bursts of reads a move causes are not missed.
+    struct Unit {
+        std::size_t field;
+        std::uintptr_t address;
+        int copy;
+    };
+    std::vector<Unit> queue;
+    std::size_t at{};
+    std::vector<int> live_copy; // per class, -1: not known yet
+};
+Sweep &sweep() {
+    static auto *value = new Sweep;
+    return *value;
+}
+std::size_t sweep_class(std::size_t field) {
+    std::size_t c = 0;
+    while (c + 1 < class_count && field >= static_cast<std::size_t>(class_specs[c].first) + class_specs[c].count) ++c;
+    return c;
+}
+bool sweep_listed(std::size_t field) {
+    auto &w = sweep();
+    if (w.unseen && class_fields[field].seen) return false;
+    return w.only.empty() || std::ranges::find(w.only, std::string(class_specs[sweep_class(field)].key)) != w.only.end();
+}
+bool sweep_wants(std::size_t field) {
+    auto &w = sweep();
+    return sweep_listed(field) && !(w.live && w.game[field] + w.other[field]);
+}
+std::string sweep_reader(std::uintptr_t rip, std::uintptr_t base, std::uintptr_t image_size) {
+    if (!rip) return "@-";
+    return rip >= base && rip < base + image_size ? std::format("@{:x}", rip - base) : std::format("@script:{:x}", rip);
+}
+// The live sweep's file, whole, after every pass: value, reads by the game + by other code, first reader.
+std::string write_live_sweep() {
+    auto &w = sweep();
+    auto &s = state();
+    std::ofstream file(data_directory() / ("sweep-" + w.tag + ".tsv"), std::ios::binary | std::ios::trunc);
+    std::size_t listed{}, read{};
+    std::string missing;
+    for (std::size_t f = 0; f < class_field_count; ++f) {
+        if (!sweep_listed(f)) continue;
+        ++listed;
+        const auto name = std::format("{}.{}", class_specs[sweep_class(f)].key, class_fields[f].name);
+        if (w.game[f] + w.other[f]) ++read;
+        else missing += (missing.empty() ? "" : " ") + name;
+        if (!w.found[f]) file << name << "\tnot found\n";
+        else file << name << "\tc:" << w.game[f] << "+" << w.other[f] << "\t" << sweep_reader(w.reader[f], s.base, w.image_size) << "\n";
+    }
+    return std::format("{} of {} read after {} passes{}", read, listed, w.passes, missing.empty() ? "." : "; not read: " + missing);
+}
+void run_live_sweep(std::uint64_t now) {
+    auto &w = sweep();
+    auto &s = state();
+    if (w.armed) { // collect the four just watched
+        std::array<std::uint64_t, 4> counts{}, others{};
+        std::array<std::uintptr_t, 4> readers{};
+        watch_four_counts(counts.data(), others.data());
+        watch_four_readers(readers.data());
+        for (std::size_t i = 0; i < 4 && w.at + i < w.queue.size(); ++i) {
+            const auto &unit = w.queue[w.at + i];
+            if (!(counts[i] + others[i])) continue;
+            const bool first = !(w.game[unit.field] + w.other[unit.field]);
+            w.game[unit.field] += counts[i];
+            w.other[unit.field] += others[i];
+            if (!first) continue;
+            w.reader[unit.field] = readers[i];
+            w.live_copy[sweep_class(unit.field)] = unit.copy;
+            const auto text = std::format("{}.{} is read ({} reads, copy {}, {})", class_specs[sweep_class(unit.field)].key, class_fields[unit.field].name,
+                                          counts[i] + others[i], unit.copy, sweep_reader(readers[i], s.base, w.image_size));
+            say(logging::Level::info, "Trainer sweep: " + text);
+            overlay::notify(overlay::NoticeLevel::info, "SWEEP", text);
+        }
+        w.at += 4;
+    }
+    if (w.at >= w.queue.size()) { // the next pass
+        if (w.armed) {
+            ++w.passes;
+            const auto summary = write_live_sweep();
+            if (w.passes % 60 == 1) say(logging::Level::info, "Trainer sweep: " + summary);
+        }
+        w.queue.clear();
+        w.at = 0;
+        const bool every_copy = w.passes % 10 == 9; // now and then, in case a second copy is read as well
+        std::size_t wanted{};
+        for (std::size_t f = 0; f < w.end; ++f) {
+            if (!sweep_wants(f)) continue;
+            ++wanted;
+            const auto count = class_field_copies(f, w.copies.data(), w.copies.size());
+            if (count) w.found[f] = 1;
+            const auto live = w.live_copy[sweep_class(f)];
+            for (std::size_t i = 0; i < count; ++i)
+                if (every_copy || live < 0 || live >= static_cast<int>(count) || live == static_cast<int>(i))
+                    w.queue.push_back({f, w.copies[i].address, static_cast<int>(i)});
+        }
+        if (w.queue.empty()) {
+            std::array<std::uintptr_t, 4> none{};
+            (void)watch_four(none.data(), s.base, w.image_size);
+            w.armed = false;
+            if (!wanted) {
+                w.running = false;
+                say(logging::Level::info, "Trainer sweep: finished; " + write_live_sweep());
+            }
+            w.until = now + 1000; // no copies yet: the classes are still being found
+            return;
+        }
+    }
+    std::array<std::uintptr_t, 4> addresses{};
+    for (std::size_t i = 0; i < 4 && w.at + i < w.queue.size(); ++i) addresses[i] = w.queue[w.at + i].address;
+    (void)watch_four(addresses.data(), s.base, w.image_size);
+    w.armed = true;
+    w.until = now + static_cast<std::uint64_t>(w.dwell);
+}
+void run_sweep(std::uint64_t now) {
+    auto &w = sweep();
+    auto &s = state();
+    if (!w.running || now < w.until) return;
+    if (w.live) {
+        run_live_sweep(now);
+        return;
+    }
+    if (w.armed) { // collect the round just watched
+        std::array<std::uint64_t, 4> counts{}, others{};
+        std::array<std::uintptr_t, 4> readers{};
+        watch_four_counts(counts.data(), others.data());
+        watch_four_readers(readers.data());
+        for (std::size_t i = 0; i < 4 && w.round * 4 + i < w.copy_count; ++i) {
+            w.line += std::format("\t{}:{}", w.copies[w.round * 4 + i].kind, counts[i]);
+            if (others[i]) w.line += std::format("+{}", others[i]);
+            w.field_reads += counts[i] + others[i];
+            if (w.live) {
+                w.game[w.field] += counts[i];
+                w.other[w.field] += others[i];
+                if (!w.field_reader) w.field_reader = readers[i];
+            }
+        }
+        ++w.round;
+        if (w.round * 4 >= w.copy_count) { // the field is done
+            if (w.live) {
+                w.found[w.field] = 1;
+                if (w.field_reads) {
+                    w.reader[w.field] = w.field_reader;
+                    const auto text = std::format("{}.{} is read ({} reads, {})", class_specs[sweep_class(w.field)].key, class_fields[w.field].name,
+                                                  w.field_reads, sweep_reader(w.field_reader, s.base, w.image_size));
+                    say(logging::Level::info, "Trainer sweep: " + text);
+                    overlay::notify(overlay::NoticeLevel::info, "SWEEP", text);
+                }
+            } else {
+                w.file << w.line << "\n";
+                w.file.flush();
+            }
+            ++w.total;
+            w.read += w.field_reads != 0;
+            ++w.field;
+            w.copy_count = 0;
+        }
+    }
+    if (!w.copy_count) { // the next field
+        while (w.field < w.end && !sweep_wants(w.field)) ++w.field;
+        if (w.live && w.field >= w.end) { // a pass is over: write it down and go round again
+            ++w.passes;
+            const auto summary = write_live_sweep();
+            if (w.passes % 5 == 1) say(logging::Level::info, "Trainer sweep: " + summary);
+            w.field = 0;
+            while (w.field < w.end && !sweep_wants(w.field)) ++w.field;
+            if (w.field >= w.end) say(logging::Level::info, "Trainer sweep: every listed value has been read.");
+        }
+        if (w.field < w.end) {
+            w.copy_count = class_field_copies(w.field, w.copies.data(), w.copies.size());
+            w.round = 0;
+            w.field_reads = 0;
+            w.field_reader = 0;
+            w.line = std::format("{}.{}", class_specs[sweep_class(w.field)].key, class_fields[w.field].name);
+            if (!w.copy_count) {
+                if (!w.live) w.file << w.line << "\tnot found\n";
+                ++w.field;
+                w.armed = false;
+                if (w.live) w.until = now + 20; // a class with no copies must not spin the pass loop
+                return; // next tick
+            }
+        }
+    }
+    std::array<std::uintptr_t, 4> addresses{};
+    if (w.field < w.end)
+        for (std::size_t i = 0; i < 4 && w.round * 4 + i < w.copy_count; ++i) addresses[i] = w.copies[w.round * 4 + i].address;
+    (void)watch_four(addresses.data(), s.base, w.image_size);
+    w.armed = w.field < w.end;
+    if (!w.armed) {
+        w.running = false;
+        w.file.close();
+        say(logging::Level::info, w.live ? "Trainer sweep: finished; " + write_live_sweep()
+                                         : std::format("Trainer sweep: finished; the game read {} of {} values.", w.read, w.total));
+        return;
+    }
+    w.until = now + static_cast<std::uint64_t>(w.dwell);
+}
+// Commands from outside while someone plays: each line of devcmd.txt in the data folder is a
+// trainer command; the answers go to the log.
+void run_dev_commands(std::uint64_t now) {
+    static std::uint64_t next = 0;
+    if (now < next) return;
+    next = now + 300;
+    const auto path = data_directory() / "devcmd.txt";
+    std::error_code error;
+    if (!std::filesystem::exists(path, error)) return;
+    std::vector<std::string> lines;
+    {
+        std::ifstream file(path);
+        for (std::string line; std::getline(file, line);) lines.push_back(line);
+    }
+    if (!std::filesystem::remove(path, error)) return; // still being written: next time
+    for (const auto &line : lines) {
+        std::vector<std::string> words;
+        for (std::size_t start = 0; start < line.size();) {
+            const auto first = line.find_first_not_of(" \t\r", start);
+            if (first == std::string::npos) break;
+            auto last = line.find_first_of(" \t\r", first);
+            if (last == std::string::npos) last = line.size();
+            words.push_back(line.substr(first, last - first));
+            start = last;
+        }
+        if (!words.empty() && lower(words[0]) == "trainer") words.erase(words.begin());
+        if (words.empty()) continue;
+        const std::vector<std::string> arguments(words.begin() + 1, words.end());
+        say(logging::Level::info, std::format("Trainer dev> {} => {}", line, command(words[0], arguments)));
+    }
+}
+void __try_poke(std::uintptr_t address, float value) noexcept {
+    __try {
+        *reinterpret_cast<volatile float *>(address) = value;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+// ---- scripted controller ---------------------------------------------------------------
+// "a+ry=-1:300" -> hold A with the right stick down for 300 ms. "n:500" -> nothing held.
+std::optional<PadStep> pad_step(std::string_view text) {
+    const auto colon = text.rfind(':');
+    if (colon == std::string_view::npos) return std::nullopt;
+    const auto time = number(text.substr(colon + 1));
+    if (!time || *time < 0 || *time > 60000) return std::nullopt;
+    PadStep step;
+    step.seconds = *time / 1000.0;
+    std::uint16_t buttons{};
+    std::array<std::int16_t, 4> sticks{};
+    std::array<std::uint8_t, 2> triggers{};
+    static constexpr std::pair<std::string_view, std::uint16_t> names[]{
+        {"up", 0x1}, {"down", 0x2}, {"left", 0x4}, {"right", 0x8}, {"start", 0x10}, {"back", 0x20}, {"ls", 0x40},
+        {"rs", 0x80}, {"lb", 0x100}, {"rb", 0x200}, {"a", 0x1000}, {"b", 0x2000}, {"x", 0x4000}, {"y", 0x8000}};
+    static constexpr std::string_view axes[]{"lx", "ly", "rx", "ry"};
+    auto rest = text.substr(0, colon);
+    while (!rest.empty()) {
+        const auto plus = rest.find('+');
+        const auto word = lower(rest.substr(0, plus));
+        rest = plus == std::string_view::npos ? std::string_view{} : rest.substr(plus + 1);
+        const auto equals = word.find('=');
+        const auto name = word.substr(0, equals);
+        const auto amount = equals == std::string::npos ? std::optional<double>(1.0) : number(std::string_view(word).substr(equals + 1));
+        if (!amount || std::abs(*amount) > 1) return std::nullopt;
+        if (name == "n" || name.empty()) continue;
+        bool known = false;
+        for (const auto &[button, bit] : names)
+            if (name == button) { buttons |= bit; known = true; }
+        for (std::size_t i = 0; i < 4; ++i)
+            if (name == axes[i]) { sticks[i] = static_cast<std::int16_t>(std::lround(*amount * 32767.0)); known = true; }
+        if (name == "lt" || name == "rt") {
+            triggers[name == "rt"] = static_cast<std::uint8_t>(std::lround(std::abs(*amount) * 255.0));
+            known = true;
+        }
+        if (!known) return std::nullopt;
+    }
+    std::memcpy(step.pad.data(), &buttons, 2);
+    step.pad[2] = triggers[0];
+    step.pad[3] = triggers[1];
+    std::memcpy(step.pad.data() + 4, sticks.data(), 8);
+    return step;
+}
+bool game_in_front() {
+    DWORD process{};
+    GetWindowThreadProcessId(GetForegroundWindow(), &process);
+    return process == GetCurrentProcessId();
+}
+void run_pad() {
+    auto &p = state().pad;
+    if (!p.running) return;
+    const auto stamp = clock_now();
+    while (p.index < p.steps.size() && clock_seconds(stamp - p.step_start) >= p.steps[p.index].seconds) {
+        p.step_start += static_cast<std::int64_t>(p.steps[p.index].seconds / clock_seconds(1));
+        ++p.index;
+    }
+    if (p.index < p.steps.size()) {
+        DingoSDKOverlayScriptController(p.steps[p.index].pad.data());
+        return;
+    }
+    // The pad stays connected, with nothing held, until `trainer pad off`: a pad that comes and
+    // goes drops the game to keyboard mode, and it takes a while to notice the pad again.
+    if (p.loop && !p.steps.empty()) {
+        p.index = 0;
+        p.step_start = stamp;
+        return;
+    }
+    static constexpr std::array<std::uint8_t, 12> neutral{};
+    DingoSDKOverlayScriptController(neutral.data());
+    if (p.mount_tries > 0 && state().telemetry.physics_state == addr::no_bail::offboard_physics_state) {
+        --p.mount_tries; // still on foot: the hub menu or a card was in the way
+        p.index = 0;
+        p.step_start = stamp;
+        return;
+    }
+    if (p.mount_tries) say(logging::Level::info, std::format("Trainer pad: mounted (state {}).", state().telemetry.physics_state));
+    p.mount_tries = 0;
+    p.running = false;
+    std::uint64_t polls{}, served{};
+    DingoSDKOverlayScriptControllerPolls(&polls, &served);
+    say(logging::Level::info, std::format("Trainer pad: script finished; the game read it {} times ({} blanked by the open menu); game window in front: {}.",
+                                          served - p.served_before, DingoSDKOverlayScriptControllerBlanked(), game_in_front() ? "yes" : "no"));
+}
+
+// </dev>
 // ---- self test -------------------------------------------------------------------------
 void test_line(bool ok, const std::string &text) {
     auto &s = state();
@@ -1711,6 +2177,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         sync_session();
         s.boosts = boosts_in_force();
         drive_camera(playing);
+        // <dev>
+        s.client = client;
+        // </dev>
         if (const auto key = lower(playing ? level : std::string{}); key != s.map) enter_map(key);
         if (playing) {
             observe(base, client, now);
@@ -1788,6 +2257,25 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             if (launch.factor != 1.0f)
                 say(logging::Level::info, std::format("Trainer trick: {} launched at {:.2f} m/s up, x{:.2f}.",
                                                       launch.trick == Trick::boneless ? "boneless" : "no comply", launch.up_speed, launch.factor));
+        // <dev>
+        run_sweep(now);
+        run_dev_commands(now);
+        (void)start_push_probe(base);
+        if (s.state_log) {
+            static std::uint64_t seen = 0, next = 0;
+            PushSample p;
+            if (const auto calls = push_sample(p); calls != seen && now >= next) {
+                next = now + 300;
+                say(logging::Level::info,
+                    std::format("Trainer push ({} calls): target {:.2f} (default {:.2f}), current {:.2f}, speed {:.2f}, cap {:.2f}, dv {:.2f}..{:.2f}, "
+                                "mass {:.2f}, step {:.4f}, impulse {:.3f}, animated {}, cc={:x} dc={:x}.",
+                                calls - seen, p.target, p.target_default, p.current, p.speed, p.cap, p.start, p.end, p.mass, p.step,
+                                std::sqrt(p.impulse), p.animated ? 1 : 0, p.cc, p.dc));
+                seen = calls;
+            }
+        }
+        run_pad();
+        // </dev>
         hold(now);
         if (s.extras_due) publish_extras();
         run_selftest(now);
@@ -2163,6 +2651,10 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         else if (name == "auto_return") s.auto_return = on;
         else if (name == "pad") s.pad_shortcuts = on;
         else if (name == "pad_menu") s.pad_menu = on;
+        // <dev>
+        else if (name == "statelog") s.state_log = on;
+        else if (name == "fliptrace") s.flip_trace = on;
+        // </dev>
         else if (name == "log") {
             set_logging(on);
             if (on && !s.logging) return "error: the telemetry file could not be created.";
@@ -2208,6 +2700,325 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         return std::format("({:.2f}, {:.2f}, {:.2f}) heading {:.0f}, {:.1f} km/h. Blender: ({:.2f}, {:.2f}, {:.2f})", p[0], p[1], p[2],
                            s.telemetry.heading, s.telemetry.speed * 3.6f, p[0], -p[2], p[1]);
     }
+    // <dev>
+    if (v == "watchw") {
+        // trainer watchw <hex offset in the skater context> | off: which code writes that field?
+        if (lower(arg(0)) == "spin") {
+            // The board's angular velocity (body 0, +0x90): who turns the board in a flip trick?
+            try {
+                const auto bodies = client_source::detail::debug_noclip_bodies(s.base, s.client, s.entity);
+                if (bodies.parts.empty()) return "error: no bodies.";
+                std::uintptr_t axis{};
+                const auto text = arg(1);
+                if (!text.empty()) (void)std::from_chars(text.data(), text.data() + text.size(), axis, 16);
+                return std::format("Watching writes of the board's turn rate (+0x{:x}) in {} threads.", 0x90 + axis,
+                                   watch_writes(bodies.parts[0] + 0x90 + axis, s.base));
+            } catch (...) { return "error: the skater's bodies could not be read."; }
+        }
+        if (lower(arg(0)) == "body") {
+            try {
+                const auto bodies = client_source::detail::debug_noclip_bodies(s.base, s.client, s.entity);
+                if (bodies.parts.empty()) return "error: no bodies.";
+                return std::format("Watching writes of body velocity z ({} parts, off board {}) in {} threads.", bodies.parts.size(),
+                                   bodies.offboard ? 1 : 0, watch_writes(bodies.parts[0] + 0x78, s.base));
+            } catch (...) { return "error: the skater's bodies could not be read."; }
+        }
+        if (lower(arg(0)) != "off") {
+            std::uintptr_t context{}, offset{};
+            try {
+                context = client_source::detail::debug_noclip_bodies(s.base, s.client, s.entity).context;
+            } catch (...) {}
+            const auto text = arg(0);
+            if (!context || std::from_chars(text.data(), text.data() + text.size(), offset, 16).ec != std::errc{}) return "error: no skater, or not a hex offset.";
+            return std::format("Watching writes of context+0x{:x} in {} threads.", offset, watch_writes((context + offset) | (arg(1) == "r" ? 1u : 0u), s.base));
+        }
+        (void)watch_writes(0, s.base);
+        std::array<Writer, 32> found{};
+        const auto count = writers(found.data(), found.size());
+        std::string result = std::format("{} writers:", count);
+        for (std::size_t i = 0; i < count; ++i) {
+            result += std::format(" {:x} x{} ({:.3f})", found[i].rva, found[i].count, found[i].last);
+            for (std::size_t which = 0; which < 3; ++which) {
+                std::array<std::uintptr_t, 10> frames{};
+                const auto depth = writer_stack(i, which, frames.data(), frames.size());
+                if (!depth) break;
+                result += " [";
+                for (std::size_t f = 0; f < depth; ++f) result += std::format("{}{:x}", f ? " < " : "", frames[f]);
+                result += "]";
+            }
+        }
+        return result;
+    }
+    if (v == "setters") {
+        std::array<Writer, 32> found{};
+        const auto count = velocity_setters(found.data(), found.size());
+        std::string result = "velocity setters:";
+        for (std::size_t i = 0; i < count; ++i)
+            if (found[i].count) result += std::format(" {:x} x{} ({:.2f})", found[i].rva, found[i].count, found[i].last);
+        return result;
+    }
+    if (v == "ctx") {
+        std::string result;
+        try {
+            const auto context = client_source::detail::debug_noclip_bodies(s.base, s.client, s.entity).context;
+            for (const auto &text : a) {
+                std::uintptr_t offset{};
+                if (std::from_chars(text.data(), text.data() + text.size(), offset, 16).ec != std::errc{} || offset > 0x4000) return "error: hex offsets.";
+                std::uint32_t bits{};
+                float real{};
+                std::memcpy(&bits, reinterpret_cast<const void *>(context + offset), 4);
+                std::memcpy(&real, &bits, 4);
+                result += std::format("{}+{:x} = {:08x} ({:.4g})", result.empty() ? "ctx: " : ", ", offset, bits, real);
+            }
+        } catch (...) { return "error: the skater's context could not be read."; }
+        return result;
+    }
+    if (v == "scanf") {
+        // trainer scanf <window hex> <number> ...: the first number is the anchor.
+        std::uintptr_t window{};
+        std::array<float, 24> wanted{};
+        const bool again = lower(arg(0)) == "hits" || lower(arg(0)) == "deref" || lower(arg(0)) == "pokeall";
+        if (!again && (a.size() < 2 || a.size() > wanted.size() + 1 || std::from_chars(a[0].data(), a[0].data() + a[0].size(), window, 16).ec != std::errc{}))
+            return "error: usage: trainer scanf <window hex> <number> ...";
+        for (std::size_t i = 1; i < a.size() && !again; ++i) {
+            const auto value = number(a[i]);
+            if (!value) return "error: \"" + a[i] + "\" is not a number.";
+            wanted[i - 1] = static_cast<float>(*value);
+        }
+        static std::array<FloatHit, 12> hits{};
+        static std::size_t last_found{};
+        if (lower(arg(0)) == "deref") {
+            const auto hit = number(arg(1)), offset = number(arg(2)), count = number(arg(3));
+            if (!hit || !offset || !count || *hit >= static_cast<double>(std::min(last_found, hits.size()))) return "error: usage: trainer scanf deref <hit> <byte offset> <count>";
+            std::uintptr_t target{};
+            const auto slot = hits[static_cast<std::size_t>(*hit)].address + static_cast<std::intptr_t>(*offset);
+            if (!memory::peek(slot, target)) return "error: unreadable slot.";
+            std::string result = std::format("[{:x}] -> {:x}:", slot, target);
+            for (std::size_t i = 0; i < static_cast<std::size_t>(std::min(*count, 96.0)); ++i) {
+                std::uint32_t bits{};
+                if (!memory::peek(target + i * 4, bits)) { result += " ?"; break; }
+                float real;
+                std::memcpy(&real, &bits, 4);
+                const float size = std::abs(real);
+                result += bits == 0 ? " 0" : size > 1.0e-4f && size < 1.0e6f ? std::format(" {:.4g}", real) : std::format(" #{:x}", bits);
+            }
+            return result;
+        }
+        if (lower(arg(0)) == "pokeall") {
+            // trainer scanf pokeall <byte offset> <number> [first hit] [hits]: write one float beside each hit of the last search.
+            const auto offset = number(arg(1)), value = number(arg(2)), first = number(arg(3)), many = number(arg(4));
+            if (!offset || !value) return "error: usage: trainer scanf pokeall <byte offset> <number> [first hit] [hits]";
+            std::size_t written{};
+            const auto begin = first ? static_cast<std::size_t>(*first) : 0, end = many ? begin + static_cast<std::size_t>(*many) : hits.size();
+            for (std::size_t i = begin; i < std::min({last_found, hits.size(), end}); ++i) {
+                __try_poke(hits[i].address + static_cast<std::intptr_t>(*offset), static_cast<float>(*value));
+                ++written;
+            }
+            return std::format("{} hits written.", written);
+        }
+        if (lower(arg(0)) == "hits") {
+            // trainer scanf hits <words before> <count> [skip]: memory around each hit of the last search.
+            const auto before = number(arg(1)), count = number(arg(2)), skip = number(arg(3));
+            if (!before || !count) return "error: usage: trainer scanf hits <words before> <count> [skip]";
+            std::string result;
+            for (std::size_t h = static_cast<std::size_t>(skip ? *skip : 0); h < std::min(last_found, hits.size()); ++h) {
+                result += std::format(" [{:x}:", hits[h].address);
+                for (std::size_t i = 0; i < static_cast<std::size_t>(std::min(*count, 64.0)); ++i) {
+                    std::uint32_t bits{};
+                    if (!memory::peek(hits[h].address - static_cast<std::size_t>(*before) * 4 + i * 4, bits)) { result += " ?"; break; }
+                    float real;
+                    std::memcpy(&real, &bits, 4);
+                    const float size = std::abs(real);
+                    result += bits == 0 ? " 0" : size > 1.0e-4f && size < 1.0e6f ? std::format(" {:.4g}", real) : std::format(" #{:x}", bits);
+                }
+                result += "]";
+            }
+            return result;
+        }
+        std::size_t megabytes{};
+        const auto started = GetTickCount64();
+        const auto found = scan_floats(wanted.data(), a.size() - 1, window, hits.data(), hits.size(), megabytes);
+        last_found = found;
+        std::string result = std::format("{} hits in {} MB, {} ms:", found, megabytes, GetTickCount64() - started);
+        for (std::size_t h = 0; h < std::min(found, hits.size()); ++h) {
+            result += std::format(" [{:x}:", hits[h].address);
+            for (std::size_t i = 1; i + 1 < a.size(); ++i) result += std::format(" {:+x}", hits[h].offsets[i]);
+            result += "]";
+        }
+        return result;
+    }
+    if (v == "peek") {
+        // trainer peek <address hex> <count>: that many four-byte values as numbers.
+        std::uintptr_t address{}, count{16};
+        if (a.empty() || std::from_chars(a[0].data(), a[0].data() + a[0].size(), address, 16).ec != std::errc{}) return "error: usage: trainer peek <address hex> [count]";
+        if (a.size() > 1) (void)std::from_chars(a[1].data(), a[1].data() + a[1].size(), count, 10);
+        std::string result;
+        for (std::size_t i = 0; i < std::min<std::size_t>(count, 96); ++i) {
+            std::uint32_t bits{};
+            if (!memory::peek(address + i * 4, bits)) return result + " (unreadable)";
+            float real;
+            std::memcpy(&real, &bits, 4);
+            const float size = std::abs(real);
+            result += size > 1.0e-4f && size < 1.0e6f ? std::format(" {:.4g}", real) : std::format(" #{:x}", bits);
+        }
+        return result;
+    }
+    if (v == "undo") return std::format("{} numbers put back to the game's own behind the trainer's back.", dev_undo_classes());
+    if (v == "poke") {
+        // trainer poke <address hex> <number>: write one float (diagnostic).
+        std::uintptr_t address{};
+        const auto value = number(arg(1));
+        if (!value || std::from_chars(a[0].data(), a[0].data() + a[0].size(), address, 16).ec != std::errc{}) return "error: usage: trainer poke <address hex> <number>";
+        std::uint32_t before{};
+        if (!memory::peek(address, before)) return "error: unreadable.";
+        const auto real = static_cast<float>(*value);
+        __try_poke(address, real);
+        return std::format("{:x} = {}", address, real);
+    }
+    if (v == "sweep") {
+        auto &w = sweep();
+        if (!a.empty() && lower(a[0]) == "stop") {
+            if (!w.running) return "No sweep is running.";
+            std::array<std::uintptr_t, 4> none{};
+            (void)watch_four(none.data(), s.base, w.image_size);
+            w.running = false;
+            w.file.close();
+            return w.live ? "Sweep stopped: " + write_live_sweep() : "Sweep stopped.";
+        }
+        if (!a.empty() && lower(a[0]) == "status") return w.running && w.live ? write_live_sweep() : "No live sweep is running.";
+        if (w.running) return "The sweep is already running.";
+        if (a.empty()) return "error: usage: trainer sweep <tag> [live] [unseen] [ms] [class key ...] | stop | status";
+        w = {};
+        w.tag = a[0];
+        std::vector<std::string> earlier; // after:<tag>: what that sweep's file shows as read is not asked for again
+        for (std::size_t i = 1; i < a.size(); ++i) {
+            if (lower(a[i]).starts_with("after:")) {
+                earlier.push_back(a[i].substr(6));
+                continue;
+            }
+            if (const auto ms = number(a[i]); ms && *ms >= 50 && *ms <= 10000) w.dwell = static_cast<int>(*ms); // a number: milliseconds per round
+            else if (lower(a[i]) == "live") w.live = true;
+            else if (lower(a[i]) == "unseen") w.unseen = true;
+            else w.only.push_back(lower(a[i]));
+        }
+        if (w.live) {
+            w.game.assign(class_field_count, 0);
+            w.other.assign(class_field_count, 0);
+            w.reader.assign(class_field_count, 0);
+            w.found.assign(class_field_count, 0);
+            w.live_copy.assign(class_count, -1);
+            for (const auto &tag : earlier) {
+                std::ifstream file(data_directory() / ("sweep-" + tag + ".tsv"));
+                for (std::string line; std::getline(file, line);) {
+                    const auto tab = line.find('\t');
+                    if (tab == std::string::npos || line.compare(tab + 1, 2, "c:") != 0) continue;
+                    const auto plus = line.find('+', tab);
+                    if (plus == std::string::npos) continue;
+                    const auto reads = std::strtoull(line.c_str() + tab + 3, nullptr, 10) + std::strtoull(line.c_str() + plus + 1, nullptr, 10);
+                    if (!reads) continue;
+                    for (std::size_t f = 0; f < class_field_count; ++f)
+                        if (line.compare(0, tab, std::format("{}.{}", class_specs[sweep_class(f)].key, class_fields[f].name)) == 0) w.other[f] += reads;
+                }
+            }
+        } else {
+            w.file.open(data_directory() / ("sweep-" + a[0] + ".tsv"), std::ios::binary | std::ios::trunc);
+            if (!w.file) return "error: the sweep file could not be created.";
+        }
+        const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(s.base);
+        w.image_size = reinterpret_cast<const IMAGE_NT_HEADERS *>(s.base + static_cast<std::uintptr_t>(dos->e_lfanew))->OptionalHeader.SizeOfImage;
+        w.end = class_field_count;
+        w.running = true;
+        return "Sweeping the game's reads of the class values.";
+    }
+    if (v == "curves") {
+        // trainer curves [run length]: the type word comes from the push class's first curve.
+        std::array<FieldCopy, 16> copies{};
+        std::size_t push_first{};
+        for (std::size_t c = 0; c < class_count; ++c)
+            if (std::string_view(class_specs[c].key) == "push") push_first = class_specs[c].first;
+        const auto count = class_field_copies(push_first, copies.data(), copies.size());
+        std::uintptr_t type{};
+        for (std::size_t i = 0; i < count && !type; ++i) {
+            if (copies[i].kind != 'c') continue;
+            std::uintptr_t curve{};
+            // MaxPushSpeedLight is the class's first field; PushingAngleCurve sits 0x10 after it.
+            if (memory::peek(copies[i].address + 0x10, curve) && curve) (void)memory::peek(curve, type);
+        }
+        if (!type) return "error: no curve to take the type from (is the push class found?).";
+        static std::array<PointerRun, 24> runs{};
+        static std::size_t found{};
+        std::array<std::uint32_t, 24> histogram{};
+        const auto wanted = number(arg(0));
+        const auto started = GetTickCount64();
+        const auto objects = pointer_runs(type, wanted ? static_cast<std::uint32_t>(*wanted) : 0, runs.data(), runs.size(), found, histogram);
+        std::string result = std::format("type {:x}: {} curves, {} runs in {} ms; by length:", type - s.base, objects, found, GetTickCount64() - started);
+        for (std::size_t n = 2; n < histogram.size(); ++n)
+            if (histogram[n]) result += std::format(" {}x{}", histogram[n], n);
+        for (std::size_t r = 0; r < std::min(found, runs.size()) && r < 6; ++r) {
+            result += std::format(" | run at {:x}:", runs[r].address);
+            for (std::uint32_t k = 0; k < runs[r].length && k < 10; ++k) {
+                std::uintptr_t curve{}, points{};
+                float low{}, high{};
+                std::uint32_t n{};
+                if (!memory::peek(runs[r].address + k * 8, curve) || !memory::peek(curve + 0x18, points) || !memory::peek(curve + 0x20, low) ||
+                    !memory::peek(curve + 0x24, high)) break;
+                (void)memory::peek(points - 4, n);
+                n &= 0x7fffffffu;
+                float x0{}, y0{}, x1{}, y1{};
+                if (n && n < 64) {
+                    (void)memory::peek(points + 0xc, x0);
+                    (void)memory::peek(points + 0x14, y0);
+                    (void)memory::peek(points + (n - 1) * 0x1c + 0xc, x1);
+                    (void)memory::peek(points + (n - 1) * 0x1c + 0x14, y1);
+                }
+                result += std::format(" [{} pts {:.3g},{:.3g}..{:.3g},{:.3g}]", n, x0, y0, x1, y1);
+            }
+        }
+        return result;
+    }
+    if (v == "watchx") {
+        std::uintptr_t rva{};
+        const auto text = arg(0);
+        if (std::from_chars(text.data(), text.data() + text.size(), rva, 16).ec != std::errc{} || (rva & 3)) return "error: usage: trainer watchx <rva hex, 4-aligned>";
+        return std::format("Watching calls of {:x} in {} threads.", rva, watch_writes((s.base + rva) | 2u, s.base));
+    }
+    if (v == "topspeed") {
+        const auto top = s.telemetry.top_speed;
+        s.telemetry.top_speed = 0;
+        return std::format("Top speed since last asked: {:.2f} m/s ({:.1f} km/h); now {:.2f} m/s.", top, top * 3.6f, s.telemetry.speed);
+    }
+    if (v == "pad") {
+        // trainer pad <controls:ms> ... | off: a scripted controller, for tests nobody has to play.
+        auto &p = s.pad;
+        if (lower(arg(0)) == "off" || a.empty()) {
+            p = {};
+            DingoSDKOverlayScriptController(nullptr);
+            return "The controller is the player's again.";
+        }
+        std::vector<PadStep> steps;
+        const bool mount = lower(arg(0)) == "mount", loop = lower(arg(0)) == "loop";
+        for (const auto &word : mount ? std::vector<std::string>{"b:150", "n:1200", "y:200", "n:2500"}
+                                : loop ? std::vector<std::string>(a.begin() + 1, a.end()) : a) {
+            const auto step = pad_step(word);
+            if (!step) return "error: \"" + word + "\" is not a step. Example: trainer pad ry=-1:300 ry=1:60 n:500 (buttons a b x y lb rb "
+                                                   "ls rs up down left right start back, lt rt, sticks lx ly rx ry from -1 to 1)";
+            steps.push_back(*step);
+        }
+        // Appended to a script still running, so one command line need not hold a whole run.
+        if (p.running && !p.loop && !loop) {
+            p.steps.insert(p.steps.end(), steps.begin(), steps.end());
+            return std::format("{} steps added.", steps.size());
+        }
+        p = {};
+        p.steps = std::move(steps);
+        p.step_start = clock_now();
+        p.running = true;
+        p.mount_tries = mount ? 8 : 0;
+        p.loop = loop;
+        DingoSDKOverlayScriptControllerPolls(nullptr, &p.served_before);
+        return std::format("Playing {} controller steps.", p.steps.size());
+    }
+    // </dev>
     if (v == "classes") {
         if (lower(arg(0)) == "find") {
             find_classes();

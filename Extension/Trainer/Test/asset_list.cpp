@@ -4,6 +4,7 @@
 #include "Engine/Resource/ebx_document.h"
 #include "Engine/Vfs/game_bundles.h"
 #include <algorithm>
+#include <fstream>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -175,6 +176,39 @@ int main(int argc, char **argv) {
                 return 0;
             }
             return 1;
+        }
+        if (mode == "--export" && argc >= 5) {
+            // The raw bytes of every asset whose name contains a word, as <folder>/<number>.ebx,
+            // with one line each: number, name, file id as hex, the ids it imports.
+            const std::filesystem::path folder(argv[3]);
+            std::filesystem::create_directories(folder);
+            std::vector<std::string> wanted;
+            for (int i = 4; i < argc; ++i) wanted.push_back(lower(argv[i]));
+            const auto hex = [](const dingosdk::frostbite::Guid &guid) {
+                static const char digits[] = "0123456789abcdef";
+                std::string text;
+                for (const auto byte : guid.bytes) {
+                    text += digits[static_cast<unsigned>(byte) >> 4];
+                    text += digits[static_cast<unsigned>(byte) & 15];
+                }
+                return text;
+            };
+            for (std::size_t i = 0; i < bundle.manifest.ebx.size(); ++i) {
+                const auto name = lower(bundle.manifest.ebx[i].name);
+                if (std::ranges::none_of(wanted, [&](const std::string &w) { return name.find(w) != std::string::npos; })) continue;
+                try {
+                    const auto *payload = bundle.payload(dingosdk::frostbite::AssetKind::ebx, i);
+                    if (!payload) continue;
+                    const auto bytes = data.read(*payload);
+                    const auto document = ebx::read_document(bytes);
+                    std::ofstream(folder / (std::to_string(i) + ".ebx"), std::ios::binary)
+                        .write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                    std::cout << i << '\t' << name << '\t' << hex(document.fileGuid) << '\t' << document.rootType << '\t';
+                    for (const auto &import : document.imports) std::cout << hex(import.fileGuid) << ' ';
+                    std::cout << '\n';
+                } catch (const std::exception &) {}
+            }
+            return 0;
         }
         if (mode == "--dump" && argc >= 4) {
             const auto wanted = lower(argv[3]);
