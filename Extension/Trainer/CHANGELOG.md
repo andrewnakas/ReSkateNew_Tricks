@@ -41,6 +41,15 @@
   with the level, and the trainer has to find them in memory again; until it has, the main
   slider falls back to the old, weaker way and the per-trick speeds do nothing. The TRICKS card
   says so while it is looking.
+- **Catch flips at a set point of the jump** (TRICKS, for realism): a switch and a percent. Every
+  flip trick is round and caught at that part of the air time, on a small ollie and a big one
+  alike (options catch_at, catch_percent; presets carry them). The useful range is about 55 to 100.
+- **A banner when the host controls physics.** In a multiplayer game whose host enforces physics a
+  card above the tabs says the menu will not work there; another says so when the host has turned
+  boosts off. The rules are unchanged.
+- **Push speed goes past the game's ceiling.** The push class speeds never lifted the speed model's
+  top speed (about 11 m/s whatever they were set to). A push is now carried on to the dialled
+  speed on the physics step and held there for as long as the game holds a pushed speed.
 - **Board bending boost: no more speed from ordinary 180s.** 0.4.1 also counted a landing whose
   board and body were together 12 degrees or more out of line with the travel. The game
   straightens plain short or crooked 180s (flip trick 180s too) that way, so they got a boost,
