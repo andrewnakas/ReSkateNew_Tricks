@@ -1473,7 +1473,7 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
                         }
                     }
                     say(logging::Level::info,
-                        std::format("Trainer flip #{} axes: flip {:.0f} deg (peak {:.0f}, ends {:.0f}% of air), shuv {:.0f} deg (peak {:.0f}, ends {:.0f}%), "
+                        std::format("Trainer flipaxes #{}: flip {:.0f} deg (peak {:.0f}, ends {:.0f}% of air), shuv {:.0f} deg (peak {:.0f}, ends {:.0f}%), "
                                     "pitch {:.0f} deg (peak {:.0f}); all turning ends at {:.0f}% of air.",
                                     s.flip_serial, degrees[0], peaks[0], air > 0 ? 100 * ends[0] / air : 0.0f, degrees[1], peaks[1],
                                     air > 0 ? 100 * ends[1] / air : 0.0f, degrees[2], peaks[2], air > 0 ? 100 * f[last].time / air : 0.0f));
@@ -2342,7 +2342,11 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         // The speeds pushes aim for are the push class's (value_links ties them to the tuning's top
         // pushing speed, which only gates whether a push may start).
         const auto *top_speed = find_entry("physicspush.maxpushablespeed");
-        set_push_speed(client, s.entity, 1.0f, top_speed ? static_cast<float>(top_speed->stock) : 0.0f, s.boosts.cruise);
+        // Past the game's own ceiling the push is carried by the trainer (see trainer_push_speed):
+        // the player's own setting only, like the other speed the trainer adds.
+        const float push_factor = top_speed && top_speed->touched && top_speed->stock > 0 && !extras_blocked()
+                                      ? std::max(1.0f, static_cast<float>(top_speed->value / top_speed->stock)) : 1.0f;
+        set_push_speed(client, s.entity, push_factor, top_speed ? static_cast<float>(top_speed->stock) : 0.0f, s.boosts.cruise);
         // The revert boost adds speed, so it keeps to the session's rule for boosts and to a host's physics.
         set_revert_boost(client, s.entity, s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 0.0f : s.revert_boost, s.revert);
         if (const auto report = revert_boost_report(); report.sequence != s.revert_boosts_seen) {

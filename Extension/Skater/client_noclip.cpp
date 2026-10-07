@@ -239,6 +239,7 @@ struct PushSpeed {
     // Physics thread only.
     int pushing{}, since_push{hold_steps};
     bool carried{}; // a held push is being carried past the game's last step
+    float reached{}; // the speed pushing has been carried to past the game's own ceiling (0: none)
 };
 PushSpeed& push_speed() { static auto* value = new PushSpeed; return *value; }
 void trainer_push_speed(std::uintptr_t core) noexcept {
@@ -282,11 +283,19 @@ void trainer_push_speed(std::uintptr_t core) noexcept {
         if (braking || !at_last_step) p.carried = false;
         else if (p.pushing >= held_steps) p.carried = true;
         float change = 0;
+        // The push class's speeds (the trainer raises those) are what a push aims for, but the
+        // game's speed model settles near 10 to 11 m/s however high they are (measured with them at
+        // 360 to 860 m/s: its own target stayed at 9.6 to 10 m/s). Past the stock ceiling a push is
+        // carried on here, at the game's own gain, to the stock ceiling x factor, and that speed
+        // is kept for as long as the game keeps a pushed speed.
+        const float ceiling = stock * factor;
+        if (braking || factor <= 1 || p.since_push >= hold_steps || speed < stock * 0.85f) p.reached = 0;
         if (braking) {
-        } else if (pushed && factor > 1 && p.carried) {
-            change = std::min(push_gain, target * factor - speed);
-        } else if (pushed && factor > 1 && speed >= tap_speed * 0.85f && speed < tap_speed * factor) {
-            change = std::min(push_gain, tap_speed * factor - speed);
+        } else if (factor > 1 && p.pushing > 0 && speed >= stock * 0.85f && speed < ceiling) {
+            change = std::min(push_gain, ceiling - speed);
+            p.reached = std::max(p.reached, speed + change);
+        } else if (factor > 1 && p.reached > speed && p.since_push < hold_steps) {
+            change = std::min(push_gain, p.reached - speed);
         } else if (pushed && factor < 1 && speed > target * factor && speed <= target * 1.1f) {
             change = -std::min(push_gain, speed - target * factor); // pushed speed only: a hill's is faster than the target
         } else if (cruise > 0 && speed >= 1.0f && speed < cruise) {
@@ -515,7 +524,7 @@ void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, 
     p.entity = entity;
     p.cruise.store(cruise > 0 && cruise < 100 ? cruise : 0.0f, std::memory_order_relaxed);
     p.stock.store(stock > 1 && stock < 100 ? stock : 9.25f, std::memory_order_relaxed);
-    p.factor.store(factor > 0.02f && factor <= 50 ? factor : 1.0f, std::memory_order_relaxed);
+    p.factor.store(factor > 0.02f && factor <= 1.0e6f ? factor : 1.0f, std::memory_order_relaxed);
     p.expires.store(GetTickCount64() + 500, std::memory_order_release);
 }
 void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float strength, const RevertTuning &tuning) noexcept {
