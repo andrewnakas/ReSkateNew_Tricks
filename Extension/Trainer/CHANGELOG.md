@@ -14,11 +14,14 @@
   off by itself, so the board is not hurried round: with too little air you land on a board that
   is still turning. The switch "Let slow flips stay slow" of 0.4.1 is gone: this does its job
   (a preset that carries it still loads).
-- **Pump power.** A new slider under TRICKS sizes what pumping a transition gives: x 2 doubles
-  what each pump gains, x 0.5 halves it, 1 is the game's own. The game's own pumping state says
-  when you are pumping; the trainer measures what the pump gained on each physics step and adds
-  or takes its share (`trainer option pump_power <x>`, preset key `trick.pump_power`). Off under a
-  host's enforced physics or with boosts off.
+- **Pump power.** A new slider under TRICKS sizes what pumping a transition gives: 1 is the
+  game's own, x 2 is about one more of the game's pumps on top of each of yours, x 10 and up is
+  a rocket, under 1 takes speed away. The game's own pumping state (Bool.Intent.Pumping) says
+  when you are pumping, and for every physics step it does the trainer adds speed along your
+  travel (`trainer option pump_power <x>`, preset key `trick.pump_power`). Like the flip speed
+  it is found about 15 seconds after a level loads. Off under a host's enforced physics or with
+  boosts off. It replaces the dial "Pumping strength" (Pump Power), which changed nothing: the
+  game's own gain is small (0.3 to 1 m/s a pump, measured) and fades the faster you already go.
 - **The camera tab is gone.** The camera controls did not work reliably, so they are out of this
   version: the CAMERA tab, `trainer camera` and the saved camera numbers (ignored if present).
 - **The dial "On foot: flip and roll speed" is gone.** It changed nothing in the game. The three

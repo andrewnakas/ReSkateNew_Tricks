@@ -315,12 +315,18 @@ void trainer_push_speed(std::uintptr_t core) noexcept {
 // ---- pump power --------------------------------------------------------------------------------
 // What a pump gains, times a factor. The game's trick scripts decide when the skater is pumping
 // (Bool.Intent.Pumping, read by the trainer) and the game's physics then speeds the skater up;
-// which numbers size that has not been found, so the gain itself is measured: the skater's energy
-// (speed and height) after each physics step against the step before. Over a pump the game's
-// gain adds up; the trainer adds (factor - 1) times that, a little each step, or takes that share
-// away under 1. It works on the sum, so a step that jitters up and down again gives nothing.
+// which numbers size that has not been found. Measured on a 12 m ramp (the skater's energy, speed
+// and height, after each physics step against the step before): a pump of the game's own gains
+// about 0.3 to 1 m/s over at most 28 steps, and the game gives less the faster the skater already
+// is, so a share of the game's gain fades to nothing at speed (x 100 felt like x 1). The trainer's
+// share is therefore its own: for every physics step of a pump it adds pump_rate x (factor - 1)
+// along the direction of travel, and under 1 takes that much away. The game takes about half of
+// an addition back while the pump lasts (measured at x 10 and x 100; PumpMaxDeceleration is not
+// what does it), so the rate is twice what one more of the game's pumps would need at x 2.
+// Owner, 2026-10-07: x 100 is strong on a small quarter and on a 12 m half pipe.
 constexpr float pump_gravity = 9.81f; // m/s2, as flights measure it
-constexpr float pump_step = 0.25f;    // m/s the trainer may add or take in one physics step
+constexpr float pump_rate = 0.03f;    // m/s each physics step
+constexpr float pump_step = 3.0f;     // m/s the trainer may add or take in one physics step
 struct PumpPower {
     std::atomic<float> factor{1};
     std::atomic<bool> pumping{}, measure{};
@@ -328,7 +334,9 @@ struct PumpPower {
     std::atomic<ULONGLONG> expires{};
     std::atomic<std::uint32_t> pumps{};
     std::atomic<float> gained{}, given{}, speed{};
+    std::atomic<std::uint32_t> steps{};
     // Physics thread only.
+    std::uint32_t count{};
     bool primed{}, running{};
     float energy{}, sum{}, credit{};
 };
@@ -370,6 +378,7 @@ void trainer_pump_power(std::uintptr_t core) noexcept {
         if (!p.running) {
             p.running = true;
             p.sum = p.credit = 0;
+            p.count = 0;
             p.pumps.fetch_add(1, std::memory_order_relaxed);
         }
         const float step = energy - p.energy;
@@ -377,8 +386,9 @@ void trainer_pump_power(std::uintptr_t core) noexcept {
         if (std::abs(step) > speed * 2.0f + 2.0f) return; // a teleport or a hit, not a pump
         p.sum += step;
         float change = 0;
-        if (factor != 1) change = std::clamp(((factor - 1) * std::max(p.sum, 0.0f) - p.credit) / speed, -pump_step, pump_step);
-        if (speed + change < 0.5f) change = 0;
+        if (factor != 1) change = std::clamp((factor - 1) * pump_rate, -pump_step, pump_step);
+        if (speed + change < 1.0f || speed + change > 300.0f) change = 0;
+        ++p.count;
         if (std::abs(change) >= 0.002f) {
             const float scale = (speed + change) / speed;
             // Like the native velocity writers: XYZ at +70 and the dirty bit 8 at +60.
@@ -394,6 +404,7 @@ void trainer_pump_power(std::uintptr_t core) noexcept {
         p.gained.store(p.sum, std::memory_order_relaxed);
         p.given.store(p.credit, std::memory_order_relaxed);
         p.speed.store(speed, std::memory_order_relaxed);
+        p.steps.store(p.count, std::memory_order_relaxed);
     } catch (...) {}
 }
 // ---- revert boost ------------------------------------------------------------------------------
@@ -624,7 +635,7 @@ void set_pump_power(std::uintptr_t client, std::uintptr_t entity, float factor, 
 PumpPowerReport pump_power_report() noexcept {
     auto& p = pump_power();
     return {p.pumps.load(std::memory_order_relaxed), p.gained.load(std::memory_order_relaxed), p.given.load(std::memory_order_relaxed),
-            p.speed.load(std::memory_order_relaxed)};
+            p.speed.load(std::memory_order_relaxed), p.steps.load(std::memory_order_relaxed)};
 }
 void set_revert_boost(std::uintptr_t client, std::uintptr_t entity, float strength, const RevertTuning &tuning) noexcept {
     auto& r = revert_boost();

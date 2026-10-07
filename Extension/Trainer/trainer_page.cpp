@@ -524,9 +524,9 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
     slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing, "How high you jump off the board in a hippy jump. 1 is the game's own.");
     slider("Off-board jump height", "offboard_height", view.offboard_height, p.offboard_edit, p.offboard_editing, "How high you jump on foot. 1 is the game's own.");
     if (slider("Pump power (pumping transitions)", "pump_power", view.pump_power, p.pump_edit, p.pump_editing,
-               "How much speed pumping a transition gives: 2 doubles what each pump gains, 0.5 halves it, 0 takes the pump's gain away. 1 is the "
-               "game's own. The game still decides when you are pumping; this only sizes what it gives. It is found in the game about 15 "
-               "seconds after a level loads.")) {
+               "How much speed pumping a transition gives. 1 is the game's own; 2 gives about one more of the game's pumps on top of each "
+               "of yours, 10 about nine more, and under 1 takes speed away. The game still decides when you are pumping: the extra comes "
+               "for as long as it counts you as pumping. It is found in the game about 15 seconds after a level loads.")) {
         if (view.pump_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here.");
         else if (view.pump_power != 1.0f && !view.pump_live) ImGui::TextDisabled("Finding the game's pumping in memory: it acts about 15 seconds after a level loads.");
     }

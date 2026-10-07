@@ -266,6 +266,7 @@ struct State {
     std::uint32_t pump_seen{};       // pump log: the pumps told so far
     bool pump_was{};
     float pump_strength{}, pump_gained{}, pump_given{}, pump_speed{};
+    std::uint32_t pump_steps{};
     // </dev>
     RevertTuning revert;
     std::uint64_t revert_boosts_seen{};
@@ -443,8 +444,8 @@ void load_store() {
             }
         if (json->contains("active") && json->at("active").is_array())
             for (const auto &name : json->at("active"))
-                // (Fast Parkour Flips was a preset of earlier versions that changed nothing.)
-                if (name.is_string() && name.string() != "Fast Parkour Flips") s.active.push_back(name.string());
+                // (Fast Parkour Flips and Pump Power were presets of earlier versions that changed nothing.)
+                if (name.is_string() && name.string() != "Fast Parkour Flips" && name.string() != "Pump Power") s.active.push_back(name.string());
         if (json->contains("revert") && json->at("revert").is_object()) {
             for (const auto &field : revert_fields)
                 if (const auto name = std::string(field.name); json->at("revert").contains(name) && json->at("revert").at(name).is_number())
@@ -2539,12 +2540,13 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
                     s.pump_gained = report.gained;
                     s.pump_given = report.given;
                     s.pump_speed = report.speed;
+                    s.pump_steps = report.steps;
                 } else if (s.pump_was) {
                     const float speed = std::max(s.pump_speed, 1.0f);
                     say(logging::Level::info, std::format("Trainer pumped #{}: the game's pump gained {:+.2f} J/kg ({:+.2f} m/s at {:.1f} m/s), the trainer added {:+.2f} J/kg "
-                                                          "({:+.2f} m/s); strength {:.2f}, assist {:.2f}, power x{:.2f}.",
-                                                          report.pumps, s.pump_gained, s.pump_gained / speed, speed, s.pump_given, s.pump_given / speed, s.pump_strength,
-                                                          pump.assist, s.pump_power));
+                                                          "({:+.2f} m/s) over {} steps; power x{:.2f}.",
+                                                          report.pumps, s.pump_gained, s.pump_gained / speed, speed, s.pump_given, s.pump_given / speed, s.pump_steps,
+                                                          s.pump_power));
                 }
                 s.pump_was = on;
                 if (!pump.found && report.pumps == s.pump_seen) {

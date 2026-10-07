@@ -25,8 +25,9 @@ JumpScaleResult take_jump_scale_result() noexcept;
 // rolling skater that is not braking gains speed up to it (m/s). Publish every client tick: it
 // expires after 500 ms.
 void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, float stock, float cruise) noexcept;
-// The trainer's pump power: what pumping a transition gains, times `factor` (1 leaves the game
-// alone). `pumping` is the game's own word on whether the skater is pumping this tick; with
+// The trainer's pump power: speed added for as long as the skater pumps a transition, sized so
+// that `factor` 2 is about one more of the game's own pumps (1 leaves the game alone, under 1
+// takes speed away). `pumping` is the game's own word on whether the skater is pumping this tick; with
 // `measure` the gain is measured even at factor 1. Publish every client tick: it expires after
 // 500 ms.
 void set_pump_power(std::uintptr_t client, std::uintptr_t entity, float factor, bool pumping, bool measure) noexcept;
@@ -35,6 +36,7 @@ void set_pump_power(std::uintptr_t client, std::uintptr_t entity, float factor, 
 struct PumpPowerReport {
     std::uint32_t pumps{}; // one more per pump
     float gained{}, given{}, speed{};
+    std::uint32_t steps{}; // physics steps it has lasted
 };
 PumpPowerReport pump_power_report() noexcept;
 // The trainer's revert boost: speed given back on a landing the game auto reverts (client_noclip.cpp).
