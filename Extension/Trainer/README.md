@@ -6,6 +6,8 @@ telemetry HUD. It ships no game data: the list of values is built at run time fr
 
 ## What it does
 
+**Flip trick speed, for all tricks or one by one.** "Flip trick speed" (TUNE > TRICKS) makes every flip trick turn slower or faster without changing your pop; "Advanced trick speed" under it gives each of 16 tricks a speed of its own. Below 1 a flip is slow from the start and is not hurried round before you land. **Give it about 15 seconds after every level load**: the trainer has to find the game's flip animations again before the speeds take hold, and the card says so while it looks.
+
 **Slow flips that stay slow.** The game hurries a flip trick so the board is round 1/6 s before the landing it predicts. "Let slow flips stay slow" (TUNE > TRICKS, under Flip trick speed) switches that off: the board turns as slowly as you set it and lands however far round it got.
 
 | Tab | What you get |

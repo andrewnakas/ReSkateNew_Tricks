@@ -1,4 +1,5 @@
 #include "trainer_classes.h"
+#include "trainer_gamestate.h"
 #include "Engine/Core/Log/logging.h"
 #include <windows.h>
 #include <algorithm>
@@ -465,6 +466,8 @@ DWORD WINAPI search(void *) noexcept {
             flip_found = f.flip.size();
             f.dirty = true;
         }
+        // The flip states' objects (trainer_gamestate.cpp): the flip speed is driven through them.
+        each_region([](std::uintptr_t start, std::size_t size) { find_state_objects(start, size); });
         std::size_t gates_found{};
         {
             std::vector<std::uintptr_t> gates;
@@ -477,8 +480,8 @@ DWORD WINAPI search(void *) noexcept {
             gates_found = f.gates.size();
         }
         logging::write(logging::Level::info, logging::Channel::skater,
-                       std::format("Trainer: found {} of {} game tuning classes ({} copies, {} native), {} flip trick speed curves and {} flip landing limit in {} MB, {} ms.",
-                                   classes, class_count, copies, native, flip_found, gates_found, bytes >> 20, GetTickCount64() - started));
+                       std::format("Trainer: found {} of {} game tuning classes ({} copies, {} native), {} flip trick speed curves, {} flip landing limit and the flip states{} in {} MB, {} ms.",
+                                   classes, class_count, copies, native, flip_found, gates_found, flip_states_found() ? "" : " (not found)", bytes >> 20, GetTickCount64() - started));
     } catch (...) {}
     f.searches.fetch_add(1, std::memory_order_release);
     f.searching.store(false, std::memory_order_release);

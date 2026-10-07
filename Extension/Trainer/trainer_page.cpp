@@ -32,6 +32,8 @@ struct Page {
     std::array<float, 3> teleport{};
     double speed_edit{-1}, speed_until{};
     float hippy_edit{1}, nocomply_edit{1}, boneless_edit{1}, offboard_edit{1}, flip_edit{1};
+    std::array<float, trainer::flip_tricks.size()> trick_edit{}; // the speed of each flip trick
+    std::array<bool, trainer::flip_tricks.size()> trick_editing{};
     float revert_edit{};
     bool revert_editing{};
     // The Tricklining list: rows of the value table per group, for one snapshot.
@@ -440,14 +442,15 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
 }
 
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words) {
-    static constexpr const char *labels[]{"Flip trick speed", "Let slow flips stay slow (no finish before landing)", "Catch flips at a set point of the jump (realism, percent of air time)", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
+    static constexpr const char *advanced_label = "Advanced trick speed (a speed for each flip trick: kickflip, heelflip, 360 flip, varial, shuvit, hardflip, laser flip, impossible)";
+    static constexpr const char *labels[]{"Flip trick speed", advanced_label, "Let slow flips stay slow (no finish before landing)", "Catch flips at a set point of the jump (realism, percent of air time)", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
                                            "Board bending boost (revert speed)"};
     const auto wanted = [&](const char *label) { return words.empty() || contains_words(lower(std::string(label) + " tricks"), words); };
     if (std::ranges::none_of(labels, wanted)) return;
     begin_card(menu, "trick-heights", "TRICKS", "1.0 is the game's own");
     // `limited`: the game itself stops at the slider's end, so a typed number is held to it too.
-    const auto slider = [&](const char *label, const char *option, float value, float &edit, bool &editing, const char *help, float high = 50.0f, bool limited = false) {
-        if (!wanted(label)) return false;
+    const auto slider = [&](const char *label, const char *option, float value, float &edit, bool &editing, const char *help, float high = 50.0f, bool limited = false, bool always = false) {
+        if (!always && !wanted(label)) return false;
         field(menu, label);
         ImGui::PushID(option);
         float shown = editing ? edit : value;
@@ -473,10 +476,29 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         return true;
     };
     slider("Flip trick speed", "flip_speed", view.flip_speed, p.flip_edit, p.flip_editing,
-           "How fast the board turns in a flip trick. It does not change how high you pop. Below 1 a flip is slower. On its own the game still "
-           "hurries a slow flip so it is finished before you land: tick the switch below to stop that. Above 1 the game's own limit on how fast a "
-           "board turns takes over.",
+           "How fast the board turns in every flip trick. It does not change how high you pop. Below 1 flips are slower, above 1 faster. A slow "
+           "flip is slow from the start and is not hurried round before you land: with too little air you land on a board that is still turning. "
+           "It takes about 15 seconds to take hold after every level load: the trainer has to find the game's flip animations again first.",
            3.0f);
+    if (!view.flip_live && (view.flip_speed != 1.0f || view.flip_advanced) && wanted("Flip trick speed"))
+        ImGui::TextDisabled("Finding the flip animations: flip speeds take hold about 15 seconds after a level loads.");
+    if (wanted(advanced_label)) {
+        bool on = view.flip_advanced;
+        if (ImGui::Checkbox("Advanced trick speed", &on)) trainer_command(menu, callbacks, std::format("option flip_advanced {}", on ? 1 : 0));
+        tip("Gives every flip trick a speed of its own, on top of the flip trick speed above: a kickflip at 1.0 and a 360 flip at 0.6, say. "
+            "A trick turns at the speed above times its own. Nollie tricks use their regular trick's speed. Pop height is not changed. "
+            "Unticked, the speeds below are kept but not used. Like the speed above, they take hold about 15 seconds after every level load.");
+        if (view.flip_advanced_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here.");
+        if (on && ImGui::TreeNodeEx("Speed of each flip trick", ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (std::size_t i = 0; i < trainer::flip_tricks.size(); ++i) {
+                const auto &trick = trainer::flip_tricks[i];
+                const std::string label(trick.label), option(trick.key);
+                slider(label.c_str(), option.c_str(), view.flip_trick[i], p.trick_edit[i], p.trick_editing[i],
+                       "How fast the board turns in this trick, times the flip trick speed above. 1 leaves it at that speed.", 3.0f, false, true);
+            }
+            ImGui::TreePop();
+        }
+    }
     if (wanted("Let slow flips stay slow (no finish before landing)")) {
         bool slow = !view.flip_gate;
         if (ImGui::Checkbox("Let slow flips stay slow", &slow)) trainer_command(menu, callbacks, std::format("option flip_gate {}", slow ? 0 : 1));
@@ -542,6 +564,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
     if (ImGui::Button("Reset tricks")) {
         p.revert_editing = false;
         p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = false;
+        p.trick_editing = {};
         trainer_command(menu, callbacks, "reset tricks");
     }
     tip("Puts every slider and switch on this card back to the game's own.");
@@ -1020,6 +1043,7 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     ImGui::BeginDisabled(!callbacks.queue_console_command || view->session_enforced);
     if (ImGui::Button("RESET EVERYTHING")) {
         p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.revert_editing = false;
+        p.trick_editing = {};
         trainer_command(menu, callbacks, "reset everything");
     }
     tip("Puts back every value, lock, preset, dial, trick setting and camera: the game exactly as it shipped.");

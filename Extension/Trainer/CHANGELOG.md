@@ -1,7 +1,22 @@
 # Changelog
 
-## v0.4.2 - 2026-10-06
+## v0.4.2 - 2026-10-07
 
+- **Flip trick speed really sets the speed, both ways, and each trick can have its own.** The
+  slider now multiplies the speed the trick's animation plays at while the board is in the air
+  (the game state Float.Anim.TrickFlipSpeed), not the curves in front of it: x 0.5 is half
+  speed, x 2 is double (faster than the game's own never worked before), for every flip trick,
+  shuvits, 360 flips and varials included, and the pop is untouched. **Advanced trick speed**
+  adds a speed for each of 16 tricks (kickflip, heelflip, the shuvits, varials, 360 flip, laser
+  flip, hardflip, inward heelflip, impossibles; a nollie uses its regular trick's), multiplied
+  with the main one. Presets carry them (`trick.flip.<trick>`, `trick.flip_advanced`).
+- **A slow flip is slow from the start.** Below x 1 the game's finish-before-landing rule is held
+  off by itself, so the board is not hurried round: with too little air you land on a board that
+  is still turning. "Let slow flips stay slow" is no longer needed for that.
+- **It takes about 15 seconds after every level load.** The game loads its flip animation states
+  with the level, and the trainer has to find them in memory again; until it has, the main
+  slider falls back to the old, weaker way and the per-trick speeds do nothing. The TRICKS card
+  says so while it is looking.
 - **Board bending boost: no more speed from ordinary 180s.** 0.4.1 also counted a landing whose
   board and body were together 12 degrees or more out of line with the travel. The game
   straightens plain short or crooked 180s (flip trick 180s too) that way, so they got a boost,

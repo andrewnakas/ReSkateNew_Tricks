@@ -115,6 +115,7 @@ add_library(dingosdk_runtime SHARED
     Extension/Trainer/trainer_jump.cpp
     Extension/Trainer/trainer_camera.cpp
     Extension/Trainer/trainer_classes.cpp
+    Extension/Trainer/trainer_gamestate.cpp
     # <dev>
     Extension/Trainer/trainer_probe.cpp
     # </dev>

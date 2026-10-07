@@ -1,5 +1,6 @@
 #include "trainer.h"
 #include "trainer_classes.h"
+#include "trainer_gamestate.h"
 #include "trainer_jump.h"
 #include "trainer_presets.h"
 #include "trainer_session.h"
@@ -104,6 +105,68 @@ struct Boosts {
     float flip{1}, hippy{1}, nocomply{1}, boneless{1}, offboard{1}, cruise{};
 };
 // <dev>
+// `trainer narrow`: the floats that sit inside a range every time they are sampled, a set number of
+// ticks into a flight (a game state with a known value: which address is it?).
+struct Narrow {
+    std::vector<std::uintptr_t> at;
+    int pending{}; // 1 start, 2 keep
+    int tick{8}, air_ticks{};
+    float low{}, high{};
+    std::string last{"nothing sampled yet"};
+};
+Narrow dev_narrow;
+// `trainer hold`: one number written to a few addresses on every tick of a flight.
+std::vector<std::uintptr_t> dev_hold_at;
+float dev_hold_value{};
+void __try_poke(std::uintptr_t address, float value) noexcept;
+// `option footlog`: off the board, each burst of body rotation (a flip in the air, a roll on the ground).
+struct FootLog {
+    bool on{};
+    bool turning{};
+    int serial{};
+    std::int64_t last{}, since{}, quiet{};
+    float peak{}, turned{}, up_at_start{}, height_at_start{};
+    std::size_t part{};
+};
+FootLog dev_foot;
+// `trainer airdump`: the skater's game state blocks written to files on set ticks of the next flight.
+std::vector<int> dev_airdump_ticks;
+std::string dev_airdump_name;
+int dev_airdump_tick{};
+std::string narrow_run(Narrow &n) {
+    const auto started = GetTickCount64();
+    const auto inside = [&](float v) { return v >= n.low && v <= n.high; };
+    if (n.pending == 1) {
+        n.at.clear();
+        std::vector<float> chunk(1 << 18);
+        MEMORY_BASIC_INFORMATION info{};
+        for (std::uintptr_t at = 0x10000; at < 0x7fffffff0000ull && VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info)) == sizeof(info);
+             at = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize) {
+            if (info.State != MEM_COMMIT || info.Protect != PAGE_READWRITE || info.Type != MEM_PRIVATE) continue;
+            const auto begin = reinterpret_cast<std::uintptr_t>(info.BaseAddress), end = begin + info.RegionSize;
+            for (auto part = begin; part < end && n.at.size() < (8u << 20); part += chunk.size() * 4) {
+                const auto bytes = std::min<std::size_t>(end - part, chunk.size() * 4);
+                SIZE_T got{};
+                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void *>(part), chunk.data(), bytes, &got)) continue;
+                for (std::size_t i = 0; i < got / 4; ++i)
+                    if (inside(chunk[i])) n.at.push_back(part + i * 4);
+            }
+        }
+    } else {
+        std::erase_if(n.at, [&](std::uintptr_t address) {
+            float v{};
+            return !memory::peek(address, v) || !inside(v);
+        });
+    }
+    std::string result = std::format("{} floats in {:.4g}..{:.4g} ({} ms)", n.at.size(), n.low, n.high, GetTickCount64() - started);
+    for (std::size_t i = 0; i < std::min<std::size_t>(n.at.size(), 40); ++i) {
+        float v{};
+        (void)memory::peek(n.at[i], v);
+        result += std::format(" {:x}={:.5g}", n.at[i], v);
+    }
+    n.pending = 0;
+    return result;
+}
 // `trainer fakesession`: the menu's session messages without a session (1 host's physics, 2 boosts off).
 int dev_fake_session = 0;
 // A scripted controller: each step holds one controller state for a time (`trainer pad`).
@@ -138,8 +201,9 @@ struct State {
     // The pump log (trainer option pumplog 1): each time the skater's speed tops out and falls
     // away again (the bottom of a transition), that top speed is logged.
     bool pump_log{};
-    float pump_peak{}, pump_peak_height{};
-    bool pump_rising{};
+    // The swing being ridden: its lowest point so far and the speed there, then the highest point after it.
+    float pump_low{}, pump_low_speed{}, pump_high{}, pump_last_top{};
+    bool pump_rising{}, pump_started{};
     int pump_serial{};
     std::vector<FlipSample> flip_samples;
     int flip_serial{};
@@ -175,6 +239,21 @@ struct State {
     float offboard_height{1};
     // Board flip tricks: a multiplier on the game's flip speed curves (trainer_classes.h).
     float flip_speed{1};
+    // "Advanced trick speed": each flip trick also turns at a speed of its own (flip_tricks, trainer_gamestate.h).
+    bool flip_advanced{};
+    std::array<float, flip_tricks.size()> flip_trick = [] {
+        std::array<float, flip_tricks.size()> ones{};
+        ones.fill(1.0f);
+        return ones;
+    }();
+    // The flip speed in the air now: the game's own number, what the trainer made of it, and whether it can be reached at all.
+    struct FlipDrive {
+        bool active{};
+        float game{}, written{};
+        float factor{1}; // the flip speed times the turning trick's own
+    } flip_drive;
+    bool flip_live{};
+    std::uint32_t flip_trick_seen{}; // the last trick that turned (CurrentFlipTrick)
     bool flip_gate{true}; // false: the game's finish-before-landing rule for flip tricks is held off
     bool catch_at{};           // flips are caught at catch_percent of the jump's air time
     float catch_percent{70};
@@ -377,6 +456,9 @@ void load_store() {
             s.nocomply_height = std::clamp(o.value("nocomply_height", 1.0f), height_low, height_high);
             s.offboard_height = std::clamp(o.value("offboard_height", 1.0f), height_low, height_high);
             s.flip_speed = std::clamp(o.value("flip_speed", 1.0f), flip_low, flip_high);
+            s.flip_advanced = o.value("flip_advanced", false);
+            for (std::size_t i = 0; i < flip_tricks.size(); ++i)
+                s.flip_trick[i] = std::clamp(o.value(std::string(flip_tricks[i].key), 1.0f), flip_low, flip_high);
             s.flip_gate = o.value("flip_gate", true);
             s.catch_at = o.value("catch_at", false);
             s.catch_percent = std::clamp(o.value("catch_percent", 70.0f), catch_low, catch_high);
@@ -456,6 +538,9 @@ void save_store() {
         options["nocomply_height"] = s.nocomply_height;
         options["offboard_height"] = s.offboard_height;
         options["flip_speed"] = s.flip_speed;
+        options["flip_advanced"] = s.flip_advanced;
+        for (std::size_t i = 0; i < flip_tricks.size(); ++i)
+            if (s.flip_trick[i] != 1.0f) options[std::string(flip_tricks[i].key)] = s.flip_trick[i];
         options["flip_gate"] = s.flip_gate;
         options["catch_at"] = s.catch_at;
         options["catch_percent"] = s.catch_percent;
@@ -1002,13 +1087,25 @@ std::string apply_dial(std::string_view name, double factor) {
 }
 // A preset of the player's own also carries the trick sliders that are off 1, under these keys.
 constexpr std::string_view trick_prefix = "trick.";
-constexpr std::string_view trick_names[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height", "revert_boost"};
-// What a trick slider is when the game is left alone: the multipliers 1, the revert boost off.
-constexpr std::string_view flip_gate_name = "flip_gate", catch_at_name = "catch_at", catch_percent_name = "catch_percent";
-bool trick_switch(std::string_view name) { return name == flip_gate_name || name == catch_at_name || name == catch_percent_name; }
-constexpr float trick_stock(std::string_view name) { return name == "revert_boost" ? 0.0f : 1.0f; }
+constexpr std::string_view trick_sliders[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height", "revert_boost"};
+// Those and the speed of each flip trick.
+constexpr auto trick_names = [] {
+    std::array<std::string_view, std::size(trick_sliders) + flip_tricks.size()> names{};
+    std::size_t at{};
+    for (const auto name : trick_sliders) names[at++] = name;
+    for (const auto &trick : flip_tricks) names[at++] = trick.key;
+    return names;
+}();
+constexpr std::string_view flip_gate_name = "flip_gate", catch_at_name = "catch_at", catch_percent_name = "catch_percent", flip_advanced_name = "flip_advanced";
+bool trick_switch(std::string_view name) { return name == flip_gate_name || name == catch_at_name || name == catch_percent_name || name == flip_advanced_name; }
+// What a trick slider or switch is when the game is left alone: the multipliers 1, the revert boost and the switches off.
+constexpr float trick_stock(std::string_view name) {
+    return name == "revert_boost" || name == catch_at_name || name == flip_advanced_name ? 0.0f : name == catch_percent_name ? 70.0f : 1.0f;
+}
 float *trick_option(std::string_view name) {
     auto &s = state();
+    for (std::size_t i = 0; i < flip_tricks.size(); ++i)
+        if (name == flip_tricks[i].key) return &s.flip_trick[i];
     return name == "flip_speed" ? &s.flip_speed : name == "hippy_height" ? &s.hippy_height : name == "nocomply_height" ? &s.nocomply_height
          : name == "boneless_height" ? &s.boneless_height : name == "offboard_height" ? &s.offboard_height
          : name == "revert_boost" ? &s.revert_boost : nullptr;
@@ -1020,9 +1117,10 @@ bool set_trick_key(std::string_view key, double value) {
     // The slow-flip switch rides along as a number: 0 holds the game's finish-before-landing rule off.
     if (name == flip_gate_name) state().flip_gate = value != 0;
     if (name == catch_at_name) state().catch_at = value != 0;
+    if (name == flip_advanced_name) state().flip_advanced = value != 0;
     if (name == catch_percent_name) state().catch_percent = std::clamp(static_cast<float>(value), catch_low, catch_high);
     if (auto *option = trick_option(name))
-        *option = name == "flip_speed" ? std::clamp(static_cast<float>(value), flip_low, flip_high)
+        *option = name == "flip_speed" || name.starts_with("flip.") ? std::clamp(static_cast<float>(value), flip_low, flip_high)
                 : name == "revert_boost" ? std::clamp(static_cast<float>(value), 0.0f, revert_boost_high)
                 : std::clamp(static_cast<float>(value), height_low, height_high);
     return true;
@@ -1268,6 +1366,31 @@ void finish_jump(const Vec3 &landing, float landing_speed, std::int64_t landed_a
                     jump.landing_speed * 3.6f, landing[0], landing[1], landing[2], jump.spin, jump.spin_rate, jump.flip, jump.board_turn, m.ground_state,
                     m.air_state));
 }
+// Board flip tricks turn at the game's speed times the player's. The trick scripts set
+// Float.Anim.TrickFlipSpeed when the board is flicked; while the skater is in the air the
+// trainer keeps it at that number times the flip speed (and, with "Advanced trick speed", times
+// the speed of the trick that is turning). On the ground the game's own number is put back.
+void drive_flip_speed(std::uintptr_t base, bool airborne) {
+    auto &s = state();
+    auto &drive = s.flip_drive;
+    const auto now = read_flip_state(base, static_cast<std::uintptr_t>(s.entity));
+    s.flip_live = static_cast<bool>(now);
+    if (!now || !airborne) {
+        if (now && drive.active && now.speed == drive.written && drive.written != drive.game) (void)write_flip_speed(now, drive.game);
+        drive = {};
+        return;
+    }
+    if (now.trick) s.flip_trick_seen = now.trick;
+    float factor = s.boosts.flip;
+    if (s.flip_advanced && !extras_blocked())
+        if (const auto index = flip_trick_index(now.trick); index >= 0) factor *= s.flip_trick[static_cast<std::size_t>(index)];
+    // A number that is not the trainer's own is the game's: the flight's first, or a new trick's.
+    if (!drive.active || now.speed != drive.written) drive.game = now.speed;
+    drive.active = true;
+    drive.factor = factor;
+    drive.written = std::clamp(drive.game * factor, 0.0f, 1000.0f);
+    if (now.speed != drive.written) (void)write_flip_speed(now, drive.written);
+}
 void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     auto &s = state();
     auto &t = s.telemetry;
@@ -1388,6 +1511,7 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     }
     // On the ground the limit is the game's own: the number left by the last flight means nothing for the next.
     if (!m.airborne) state().catch_seconds = flip_gate_stock;
+    drive_flip_speed(base, m.airborne);
     if (m.airborne) {
         m.apex = std::max(m.apex, position[1]);
         t.air_time = static_cast<float>(clock_seconds(stamp - m.takeoff_stamp));
@@ -1420,18 +1544,32 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     // <dev>
     if (auto &own = state(); own.pump_log) {
         const float whole = std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]);
+        // One line a swing: the speed at the bottom, told once the skater has climbed 0.4 m out of it.
+        constexpr float climb = 0.4f;
         if (whole < 1000.0f) {
-            if (whole > own.pump_peak) {
-                own.pump_peak = whole;
-                own.pump_peak_height = position[1];
-                own.pump_rising = true;
-            } else if (own.pump_rising && whole < own.pump_peak - 1.0f) {
-                say(logging::Level::info, std::format("Trainer pump #{}: top {:.2f} m/s at height {:.2f} m{}.", ++own.pump_serial, own.pump_peak,
-                                                      own.pump_peak_height, m.airborne ? " (in the air)" : ""));
+            const float height = position[1];
+            if (!own.pump_started) {
+                own.pump_started = true;
+                own.pump_low = own.pump_high = own.pump_last_top = height;
+                own.pump_low_speed = whole;
+            } else if (!own.pump_rising) {
+                if (height < own.pump_low) {
+                    own.pump_low = height;
+                    own.pump_low_speed = whole;
+                } else if (height > own.pump_low + climb) {
+                    say(logging::Level::info, std::format("Trainer pump #{}: bottom {:.2f} m/s at height {:.2f} m, dropped {:.2f} m into it.", ++own.pump_serial,
+                                                          own.pump_low_speed, own.pump_low, own.pump_last_top - own.pump_low));
+                    own.pump_rising = true;
+                    own.pump_high = height;
+                }
+            } else if (height > own.pump_high) {
+                own.pump_high = height;
+            } else if (height < own.pump_high - climb) {
+                own.pump_last_top = own.pump_high;
                 own.pump_rising = false;
+                own.pump_low = height;
+                own.pump_low_speed = whole;
             }
-            // A new swing starts once the speed has fallen well away from the last top.
-            if (!own.pump_rising && whole < own.pump_peak - 1.0f) own.pump_peak = whole;
         }
     }
     // </dev>
@@ -1444,6 +1582,52 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     bool turning = m.airborne || (s.logging && s.log);
     // <dev>
     turning = turning || s.state_log || s.flip_trace;
+    if (m.airborne)
+        for (const auto address : dev_hold_at) __try_poke(address, dev_hold_value);
+    if (auto &foot = dev_foot; foot.on) {
+        float rate = 0;
+        std::size_t fastest = 0;
+        if (watch.valid && watch.state >= 500 && watch.state < 600) {
+            try {
+                const auto bodies = client_source::detail::debug_noclip_bodies(base, client, s.entity);
+                for (std::size_t i = 0; i < std::min<std::size_t>(bodies.parts.size(), 9); ++i) {
+                    std::array<float, 3> spin{};
+                    if (!memory::peek(bodies.parts[i] + 0x90, spin)) continue;
+                    const float size = std::sqrt(spin[0] * spin[0] + spin[1] * spin[1] + spin[2] * spin[2]) * 180.0f / std::numbers::pi_v<float>;
+                    if (std::isfinite(size) && size < 1.0e5f && size > rate) { rate = size; fastest = i; }
+                }
+            } catch (...) {}
+        }
+        if (rate > 120.0f) {
+            if (!foot.turning) {
+                foot = {.on = true, .turning = true, .serial = foot.serial + 1, .last = stamp, .since = stamp, .up_at_start = s.telemetry.vertical, .height_at_start = position[1]};
+            }
+            foot.quiet = stamp;
+            foot.turned += rate * static_cast<float>(dt);
+            if (rate > foot.peak) { foot.peak = rate; foot.part = fastest; }
+        } else if (foot.turning && clock_seconds(stamp - foot.quiet) > 0.3) {
+            say(logging::Level::info, std::format("Trainer foot #{}: turned {:.0f} deg in {:.2f} s, peak {:.0f} deg/s (body {}), started rising {:.1f} m/s at y {:.1f}.", foot.serial,
+                                                  foot.turned, clock_seconds(foot.quiet - foot.since), foot.peak, foot.part, foot.up_at_start, foot.height_at_start));
+            foot.turning = false;
+        }
+    }
+    if (!m.airborne) {
+        if (dev_airdump_tick) dev_airdump_ticks.clear();
+        dev_airdump_tick = 0;
+    } else if (!dev_airdump_ticks.empty() && std::ranges::find(dev_airdump_ticks, ++dev_airdump_tick) != dev_airdump_ticks.end()) {
+        const auto buffers = state_pages(base, static_cast<std::uintptr_t>(s.entity));
+        for (std::size_t k = 0; k < buffers.size(); ++k) {
+            std::vector<char> bytes(0x1800);
+            SIZE_T got{};
+            if (!buffers[k] || !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void *>(buffers[k]), bytes.data(), bytes.size(), &got)) continue;
+            std::ofstream(data_directory() / std::format("{}_t{}_{}.bin", dev_airdump_name, dev_airdump_tick, k), std::ios::binary | std::ios::trunc).write(bytes.data(), static_cast<std::streamsize>(got));
+        }
+    }
+    if (!m.airborne) dev_narrow.air_ticks = 0;
+    else if (dev_narrow.pending && ++dev_narrow.air_ticks == dev_narrow.tick) {
+        dev_narrow.last = narrow_run(dev_narrow);
+        say(logging::Level::info, "Trainer narrow: " + dev_narrow.last.substr(0, 400));
+    }
     // </dev>
     if (turning) {
         try {
@@ -1512,9 +1696,9 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
                 }
                 say(logging::Level::info,
                     std::format("Trainer flip #{}: air {:.3f} s, up {:.2f} m/s, turning from {:.3f} to {:.3f} s ({:.3f} s), turned {:.0f} deg, mean {:.0f} peak {:.0f} "
-                                "deg/s, air left at start {:.3f} s, {} samples.",
+                                "deg/s, air left at start {:.3f} s, {} samples, trick {} ({}).",
                                 s.flip_serial, air, s.flip_takeoff_up, f[first].time, f[last].time, took, turned, took > 0 ? turned / took : 0.0f, peak,
-                                air - f[first].time, f.size()));
+                                air - f[first].time, f.size(), s.flip_trick_seen, flip_trick_name(s.flip_trick_seen)));
             } else {
                 say(logging::Level::info, std::format("Trainer flip #{}: air {:.3f} s, up {:.2f} m/s, no board turn (peak {:.0f} deg/s).", s.flip_serial, air,
                                                       s.flip_takeoff_up, peak));
@@ -2106,6 +2290,10 @@ void build_view() {
     next->nocomply_height = s.nocomply_height;
     next->offboard_height = s.offboard_height;
     next->flip_speed = s.flip_speed;
+    next->flip_advanced = s.flip_advanced;
+    next->flip_trick = s.flip_trick;
+    next->flip_advanced_blocked = s.flip_advanced && extras_blocked();
+    next->flip_live = s.flip_live;
     next->flip_gate = s.flip_gate;
     next->flip_gate_found = flip_gates() != 0;
     next->flip_gate_blocked = (!s.flip_gate || s.catch_at) && extras_blocked();
@@ -2133,7 +2321,7 @@ void build_view() {
         next->camera_game = std::format("{:.1f} m behind, {:.1f} m up, tilt {:.0f} degrees, FOV {:.0f}", profile.distance, profile.height, profile.pitch, profile.fov);
     next->open_serial = s.open_serial;
     next->stock = s.revert == RevertTuning{} && !s.camera_on && s.rigs == std::array<RigSetting, camera_rigs>{} && !next->touched && s.active.empty() && std::ranges::none_of(s.entries, &Entry::frozen) &&
-                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); }) && s.flip_gate && !s.catch_at;
+                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); }) && s.flip_gate && !s.catch_at && !s.flip_advanced;
     next->share_text = s.share_text;
     next->share_serial = s.share_serial;
     next->open_tab = s.open_tab;
@@ -2191,6 +2379,7 @@ std::string export_preset(const std::string &name) {
         for (const auto trick : trick_names)
             if (const auto *option = trick_option(trick); *option != trick_stock(trick)) values[std::string(trick_prefix) + std::string(trick)] = *option;
         if (!s.flip_gate) values[std::string(trick_prefix) + std::string(flip_gate_name)] = 0;
+        if (s.flip_advanced) values[std::string(trick_prefix) + std::string(flip_advanced_name)] = 1;
         if (s.catch_at) {
             values[std::string(trick_prefix) + std::string(catch_at_name)] = 1;
             values[std::string(trick_prefix) + std::string(catch_percent_name)] = s.catch_percent;
@@ -2335,11 +2524,16 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
                 find_classes();
             }
         }
-        flip_speed_in_use(s.boosts.flip != 1.0f);
-        want_flip_speed(s.boosts.flip);
+        flip_speed_in_use(s.boosts.flip != 1.0f || s.flip_advanced);
+        // The speed itself goes straight to the trick in the air (drive_flip_speed); the flip curves
+        // are only scaled where that number cannot be reached.
+        want_flip_speed(s.flip_live ? 1.0f : s.boosts.flip);
         // The player's own choice, and only where their own trick settings count: not under a
         // host's enforced physics or in a session that has turned boosts off.
-        want_flip_gate(extras_blocked() ? flip_gate_stock : s.catch_at ? s.catch_seconds : s.flip_gate ? flip_gate_stock : flip_gate_off);
+        // A flip asked to be slow is slow from the start: the game's rule would hurry it round before
+        // the landing, so it is held off for as long as the speed in force is under the game's own.
+        const bool slow = s.flip_live && (s.flip_drive.active ? s.flip_drive.factor : s.boosts.flip) < 1.0f;
+        want_flip_gate(extras_blocked() ? flip_gate_stock : s.catch_at ? s.catch_seconds : s.flip_gate && !slow ? flip_gate_stock : flip_gate_off);
         if (s.boosts.flip != s.flip_applied) {
             // The catch times follow the flip speed (want_class).
             s.flip_applied = s.boosts.flip;
@@ -2610,6 +2804,8 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = 1.0f;
             s.flip_gate = true;
             s.catch_at = false;
+            s.flip_advanced = false;
+            s.flip_trick.fill(1.0f);
             s.revert_boost = 0.0f;
             changed();
             return "Trick heights and flip trick speed are the game's own again.";
@@ -2640,6 +2836,8 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = 1.0f;
             s.flip_gate = true;
             s.catch_at = false;
+            s.flip_advanced = false;
+            s.flip_trick.fill(1.0f);
             s.revert_boost = 0.0f;
             s.revert = {};
             changed();
@@ -2708,6 +2906,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             for (const auto trick : trick_names)
                 if (const auto *option = trick_option(trick); *option != trick_stock(trick)) values[std::string(trick_prefix) + std::string(trick)] = *option;
         if (!s.flip_gate) values[std::string(trick_prefix) + std::string(flip_gate_name)] = 0;
+        if (s.flip_advanced) values[std::string(trick_prefix) + std::string(flip_advanced_name)] = 1;
         if (s.catch_at) {
             values[std::string(trick_prefix) + std::string(catch_at_name)] = 1;
             values[std::string(trick_prefix) + std::string(catch_percent_name)] = s.catch_percent;
@@ -2775,11 +2974,13 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         const auto name = lower(arg(0));
         bool on{};
         std::string why;
-        if (name == "flip_speed") {
+        if (name == "flip_speed" || name.starts_with("flip.")) {
             const auto value = number(arg(1));
-            if (!value) return "error: flip_speed needs a multiplier, 1 = the game's own speed.";
+            auto *option = trick_option(name);
+            if (!option) return "error: no such flip trick. flip_speed is all of them; flip.kickflip, flip.360flip ... are one each.";
+            if (!value) return "error: " + name + " needs a multiplier, 1 = the game's own speed.";
             if (!editable(&why)) return "error: " + why;
-            s.flip_speed = std::clamp(static_cast<float>(*value), flip_low, flip_high);
+            *option = std::clamp(static_cast<float>(*value), flip_low, flip_high);
         } else if (name == "hippy_height" || name == "nocomply_height" || name == "boneless_height" || name == "offboard_height") {
             const auto value = number(arg(1));
             if (!value) return "error: " + name + " needs a multiplier, 1 = the game's own height.";
@@ -2801,7 +3002,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             if (!value) return "error: return_delay needs seconds.";
             s.return_delay = std::clamp(static_cast<float>(*value), 0.0f, 10.0f);
         } else if (!flag(arg(1), on)) {
-            return "error: usage: trainer option hud|hud_jump|auto_return|pad|pad_menu|flip_gate|catch_at|log 0|1";
+            return "error: usage: trainer option hud|hud_jump|auto_return|pad|pad_menu|flip_gate|flip_advanced|catch_at|log 0|1";
         } else if (name == "hud") s.hud = on;
         else if (name == "hud_jump") s.hud_jump = on;
         else if (name == "auto_return") s.auto_return = on;
@@ -2813,14 +3014,17 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         } else if (name == "catch_at") {
             if (on && !editable(&why)) return "error: " + why;
             s.catch_at = on;
+        } else if (name == "flip_advanced") {
+            if (on && !editable(&why)) return "error: " + why;
+            s.flip_advanced = on;
         }
         // <dev>
         else if (name == "statelog") s.state_log = on;
         else if (name == "fliptrace") s.flip_trace = on;
+        else if (name == "footlog") dev_foot = {.on = on};
         else if (name == "pumplog") {
             s.pump_log = on;
-            s.pump_peak = 0;
-            s.pump_rising = false;
+            s.pump_started = s.pump_rising = false;
             s.pump_serial = 0;
         }
         // </dev>
@@ -3284,6 +3488,133 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         return "Copies found: " + classes_summary();
     }
     if (v == "refresh") return tuning::refresh_skater(s.base, s.entity) ? "Skater copy refreshed." : "error: the skater has no cached copy right now.";
+    // <dev>
+    if (v == "ant") {
+        // trainer ant: the skater's components (address:vtable rva).
+        const auto entity = static_cast<std::uintptr_t>(s.entity);
+        std::uintptr_t collection{}, owner{};
+        if (!entity || !memory::peek(entity + 0x70, collection) || !memory::peek(collection, owner) || owner != entity) return "error: no component collection.";
+        std::uint8_t count{};
+        (void)memory::peek(collection + 8, count);
+        std::string result = std::format("entity {:x}, {} components:", entity, count);
+        for (unsigned i = 0; i < count && i < 128; ++i) {
+            std::uintptr_t component{}, type{};
+            if (!memory::peek(collection + 0x20 + i * 0x20, component) || !memory::peek(component, type)) continue;
+            result += std::format(" {:x}:{:x}", component, type - s.base);
+        }
+        return result;
+    }
+    if (v == "airdump") {
+        // trainer airdump <name> <tick> ...: the game state blocks as <name>_t<tick>_<block>.bin on those ticks of the next flight.
+        dev_airdump_ticks.clear();
+        dev_airdump_name = arg(0);
+        for (std::size_t i = 1; i < a.size(); ++i)
+            if (const auto tick = number(a[i])) dev_airdump_ticks.push_back(static_cast<int>(*tick));
+        return std::format("Dumping on {} ticks of the next flight.", dev_airdump_ticks.size());
+    }
+    if (v == "hold") {
+        // trainer hold <number> <address hex> ... | hold off: that number at those addresses on every tick in the air.
+        dev_hold_at.clear();
+        const auto value = number(arg(0));
+        if (!value) return "Holding nothing.";
+        dev_hold_value = static_cast<float>(*value);
+        for (std::size_t i = 1; i < a.size(); ++i) {
+            std::uintptr_t address{};
+            if (std::from_chars(a[i].data(), a[i].data() + a[i].size(), address, 16).ec != std::errc{}) return "error: hex addresses.";
+            dev_hold_at.push_back(address);
+        }
+        return std::format("Holding {} at {} addresses in the air.", dev_hold_value, dev_hold_at.size());
+    }
+    if (v == "narrow") {
+        // trainer narrow start|keep <low> <high> [tick] | now <low> <high> | list: sample on that tick of the next flight
+        // (or at once), keeping the floats inside the range.
+        const auto what = lower(arg(0));
+        const auto low = number(arg(1)), high = number(arg(2)), tick = number(arg(3));
+        if (what == "list") {
+            std::string result = std::format("{} kept:", dev_narrow.at.size());
+            for (std::size_t i = 0; i < std::min<std::size_t>(dev_narrow.at.size(), 60); ++i) {
+                float value{};
+                (void)memory::peek(dev_narrow.at[i], value);
+                result += std::format(" {:x}={:.5g}", dev_narrow.at[i], value);
+            }
+            return result;
+        }
+        if (what.empty()) return dev_narrow.last;
+        if (!low || !high || (what != "start" && what != "keep" && what != "now")) return "error: usage: trainer narrow start|keep|now <low> <high> [tick]";
+        dev_narrow.low = static_cast<float>(*low);
+        dev_narrow.high = static_cast<float>(*high);
+        if (what == "now") {
+            dev_narrow.pending = dev_narrow.at.empty() ? 1 : 2;
+            return dev_narrow.last = narrow_run(dev_narrow);
+        }
+        if (tick) dev_narrow.tick = static_cast<int>(*tick);
+        dev_narrow.pending = what == "start" ? 1 : 2;
+        return std::format("Sampling on tick {} of the next flight.", dev_narrow.tick);
+    }
+    if (v == "watchr") {
+        // trainer watchr <address hex> ... (up to four) | watchr: which code reads or writes those four bytes; then the counts.
+        static std::array<std::uintptr_t, 4> watched{};
+        if (!a.empty()) {
+            watched = {};
+            for (std::size_t i = 0; i < std::min<std::size_t>(a.size(), 4); ++i)
+                if (std::from_chars(a[i].data(), a[i].data() + a[i].size(), watched[i], 16).ec != std::errc{}) return "error: hex addresses.";
+            auto &w = sweep();
+            if (!w.image_size) {
+                const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(s.base);
+                w.image_size = reinterpret_cast<const IMAGE_NT_HEADERS *>(s.base + static_cast<std::uintptr_t>(dos->e_lfanew))->OptionalHeader.SizeOfImage;
+            }
+            return std::format("Watching in {} threads.", watch_four(watched.data(), s.base, w.image_size));
+        }
+        std::array<std::uint64_t, 4> counts{}, others{};
+        std::array<std::uintptr_t, 4> readers{};
+        watch_four_counts(counts.data(), others.data());
+        watch_four_readers(readers.data());
+        std::string result = "watch:";
+        for (std::size_t i = 0; i < 4; ++i)
+            if (watched[i]) result += std::format(" {:x}: {}+{} first {}", watched[i], counts[i], others[i], sweep_reader(readers[i], s.base, sweep().image_size));
+        return result;
+    }
+    if (v == "dumpwalk") {
+        // trainer dumpwalk <file> <root hex> <block bytes hex> <depth> [max blocks]: the block at the root and, to that
+        // depth, the blocks every pointer in them leads to (private read-write memory only), as records
+        // [u64 address][u32 depth][u32 size][bytes] in the trainer folder.
+        std::uintptr_t root{}, block{};
+        const auto depth = number(arg(3)), most = number(arg(4));
+        if (a.size() < 4 || !depth || std::from_chars(a[1].data(), a[1].data() + a[1].size(), root, 16).ec != std::errc{} ||
+            std::from_chars(a[2].data(), a[2].data() + a[2].size(), block, 16).ec != std::errc{} || block < 8 || block > 0x10000)
+            return "error: usage: trainer dumpwalk <file> <root hex> <block bytes hex> <depth> [max blocks]";
+        const std::size_t limit = most ? static_cast<std::size_t>(*most) : 20000;
+        std::ofstream file(data_directory() / a[0], std::ios::binary | std::ios::trunc);
+        if (!file) return "error: could not write the file.";
+        const auto heap = [](std::uintptr_t address, std::size_t size) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (address < 0x10000 || (address & 7) || !VirtualQuery(reinterpret_cast<void *>(address), &info, sizeof(info))) return false;
+            const auto end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+            return info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && info.Protect == PAGE_READWRITE && address + size <= end;
+        };
+        std::vector<std::pair<std::uintptr_t, std::uint32_t>> queue{{root, 0}};
+        std::map<std::uintptr_t, bool> seen{{root, true}};
+        std::vector<std::uint8_t> bytes(block);
+        std::size_t written{};
+        for (std::size_t i = 0; i < queue.size() && written < limit; ++i) {
+            const auto [address, level] = queue[i];
+            if (!heap(address, block)) continue;
+            std::memcpy(bytes.data(), reinterpret_cast<const void *>(address), block);
+            const std::uint64_t where = address;
+            const std::uint32_t head[2]{level, static_cast<std::uint32_t>(block)};
+            file.write(reinterpret_cast<const char *>(&where), 8).write(reinterpret_cast<const char *>(head), 8);
+            file.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(block));
+            ++written;
+            if (level >= static_cast<std::uint32_t>(*depth)) continue;
+            for (std::size_t at = 0; at + 8 <= block; at += 8) {
+                std::uintptr_t target{};
+                std::memcpy(&target, bytes.data() + at, 8);
+                if (target > 0x10000 && target < 0x7fffffffffff && !(target & 7) && seen.emplace(target, true).second) queue.emplace_back(target, level + 1);
+            }
+        }
+        return std::format("{} blocks of {:x} bytes written.", written, block);
+    }
+    // </dev>
     if (v == "states") {
         std::string result;
         for (const auto &[id, ticks] : s.states) result += std::format("{}{}: {}", result.empty() ? "" : ", ", id, ticks);

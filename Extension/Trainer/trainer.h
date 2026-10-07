@@ -5,6 +5,7 @@
 // console command, so the menu page (presentation thread) only queues commands and reads
 // the two snapshots below; nothing here touches the game from the UI.
 #include "trainer_camera.h"
+#include "trainer_gamestate.h"
 #include "Extension/Skater/client_source_spawn.h"
 #include <array>
 #include <cstdint>
@@ -92,6 +93,10 @@ struct View {
     RevertTuning revert;  // what counts as a revert and what it is worth
     float offboard_height{1}; // a jump on foot
     float flip_speed{1};      // board flip tricks: x of the game's own speed
+    bool flip_advanced{};     // each flip trick also has a speed of its own
+    std::array<float, flip_tricks.size()> flip_trick{}; // those, in the order of flip_tricks
+    bool flip_advanced_blocked{};       // ticked, but this session's rules keep the game's own flips
+    bool flip_live{};                   // the game's flip states are found: the speeds act
     bool flip_gate{true};     // the game brings a flip round before the landing; false: slow flips stay slow
     bool flip_gate_found{};   // the rule's number was found in memory (the switch can act)
     bool flip_gate_blocked{}; // ticked, but this session's rules keep the game's own flips
