@@ -97,7 +97,6 @@ struct View {
     std::array<float, flip_tricks.size()> flip_trick{}; // those, in the order of flip_tricks
     bool flip_advanced_blocked{};       // ticked, but this session's rules keep the game's own flips
     bool flip_live{};                   // the game's flip states are found: the speeds act
-    bool flip_gate{true};     // the game brings a flip round before the landing; false: slow flips stay slow
     bool flip_gate_found{};   // the rule's number was found in memory (the switch can act)
     bool flip_gate_blocked{}; // ticked, but this session's rules keep the game's own flips
     bool catch_at{};          // flips are caught at a set part of the jump

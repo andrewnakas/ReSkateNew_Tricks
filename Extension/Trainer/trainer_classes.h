@@ -34,6 +34,8 @@ void find_classes() noexcept;
 bool finding_classes() noexcept;
 // How many searches have finished (0: none yet).
 std::uint64_t class_searches() noexcept;
+// A number that changes when a search finds something it did not know (or loses something).
+std::uint64_t class_search_found() noexcept;
 // Copies of class `index` found.
 std::size_t class_copies(std::size_t index) noexcept;
 // What field `field` (an index into class_fields) should hold. Written by apply_classes.

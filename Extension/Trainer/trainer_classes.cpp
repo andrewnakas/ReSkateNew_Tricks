@@ -604,6 +604,29 @@ void find_classes() noexcept {
 }
 bool finding_classes() noexcept { return found().searching.load(std::memory_order_acquire); }
 std::uint64_t class_searches() noexcept { return found().searches.load(std::memory_order_acquire); }
+std::uint64_t class_search_found() noexcept {
+    auto &f = found();
+    std::lock_guard lock(f.mutex);
+    std::uint64_t all{};
+    const auto add = [&](std::uintptr_t address) { all = (all ^ address) * 0x100000001b3ull; };
+    for (const auto &list : f.copies) {
+        std::uint64_t sum{}; // the order within a class is the search's, not the game's
+        for (const auto copy : list) sum += copy.base;
+        add(sum + list.size());
+    }
+    for (const auto &list : f.mirror_copies) {
+        std::uint64_t sum{};
+        for (const auto base : list) sum += base;
+        add(sum + list.size());
+    }
+    std::uint64_t sum{};
+    for (const auto address : f.gates) sum += address;
+    add(sum + f.gates.size());
+    sum = 0;
+    for (const auto &curve : f.flip) sum += curve.points;
+    add(sum + f.flip.size());
+    return all;
+}
 std::size_t class_copies(std::size_t index) noexcept {
     auto &f = found();
     if (index >= class_count) return 0;

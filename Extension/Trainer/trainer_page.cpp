@@ -499,16 +499,6 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
             ImGui::TreePop();
         }
     }
-    if (wanted("Let slow flips stay slow (no finish before landing)")) {
-        bool slow = !view.flip_gate;
-        if (ImGui::Checkbox("Let slow flips stay slow", &slow)) trainer_command(menu, callbacks, std::format("option flip_gate {}", slow ? 0 : 1));
-        if (ImGui::IsItemHovered())
-            wrapped_tooltip("%s", "The game speeds a flip up so the board is round 1/6 of a second before the landing it predicts, however slow the flip speed "
-                                  "is set. That is why a slowed flip still comes round on a small pop. Ticked: that rule is off. The board turns as "
-                                  "slowly as you set it and lands however far round it got, so a flip you start too late or too low is a bail.");
-        if (view.flip_gate_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here, so flips finish before landing as usual.");
-        else if (slow && !view.flip_gate_found) ImGui::TextDisabled("Not found in the game yet: it takes effect a few seconds after a level loads.");
-    }
     if (wanted("Catch flips at a set point of the jump (realism, percent of air time)")) {
         bool on = view.catch_at;
         if (ImGui::Checkbox("Catch flips at a set point of the jump", &on)) trainer_command(menu, callbacks, std::format("option catch_at {}", on ? 1 : 0));

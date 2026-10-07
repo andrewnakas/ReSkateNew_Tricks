@@ -184,6 +184,8 @@ struct PadScript {
     bool loop{};       // `pad loop`: play again until `pad off`
 };
 // </dev>
+// How long a new skater alone waits for a memory search: doubled while searches find nothing new.
+constexpr std::uint64_t class_skater_wait_low = 20000, class_skater_wait_high = 600000;
 struct State {
     bool loaded{}; // the store was read
     // <dev>
@@ -254,7 +256,6 @@ struct State {
     } flip_drive;
     bool flip_live{};
     std::uint32_t flip_trick_seen{}; // the last trick that turned (CurrentFlipTrick)
-    bool flip_gate{true}; // false: the game's finish-before-landing rule for flip tricks is held off
     bool catch_at{};           // flips are caught at catch_percent of the jump's air time
     float catch_percent{70};
     float catch_seconds{flip_gate_stock}; // what that comes to for the jump in the air now, as seconds before landing
@@ -279,6 +280,11 @@ struct State {
     std::uint64_t class_research_after{};   // no new search before this, however many skaters come and go
     std::uint64_t class_creations{};        // the skaters the game had built at the last look
     bool class_research_due{};              // a new skater came while a search could not start: look when it can
+    bool class_skater_due{};                // the same, for a new skater alone (nothing looked lost)
+    bool class_skater_judged{true};         // the search a new skater asked for has been compared with what was known
+    std::uint64_t class_skater_after{};     // no search for a new skater alone before this
+    std::uint64_t class_skater_wait{class_skater_wait_low};
+    std::uint64_t class_found{};            // class_search_found() before that search
     std::vector<std::size_t> class_entries; // the entries that are fields of those classes
     // A session whose host sets everyone's physics (session_physics.h): what the host shares
     // beyond its tuning, and what each class field holds for it. The player's own stand down.
@@ -459,7 +465,6 @@ void load_store() {
             s.flip_advanced = o.value("flip_advanced", false);
             for (std::size_t i = 0; i < flip_tricks.size(); ++i)
                 s.flip_trick[i] = std::clamp(o.value(std::string(flip_tricks[i].key), 1.0f), flip_low, flip_high);
-            s.flip_gate = o.value("flip_gate", true);
             s.catch_at = o.value("catch_at", false);
             s.catch_percent = std::clamp(o.value("catch_percent", 70.0f), catch_low, catch_high);
             s.boneless_height = std::clamp(o.value("boneless_height", 1.0f), height_low, height_high);
@@ -541,7 +546,6 @@ void save_store() {
         options["flip_advanced"] = s.flip_advanced;
         for (std::size_t i = 0; i < flip_tricks.size(); ++i)
             if (s.flip_trick[i] != 1.0f) options[std::string(flip_tricks[i].key)] = s.flip_trick[i];
-        options["flip_gate"] = s.flip_gate;
         options["catch_at"] = s.catch_at;
         options["catch_percent"] = s.catch_percent;
         options["boneless_height"] = s.boneless_height;
@@ -1114,8 +1118,7 @@ float *trick_option(std::string_view name) {
 bool set_trick_key(std::string_view key, double value) {
     if (!key.starts_with(trick_prefix)) return false;
     const auto name = key.substr(trick_prefix.size());
-    // The slow-flip switch rides along as a number: 0 holds the game's finish-before-landing rule off.
-    if (name == flip_gate_name) state().flip_gate = value != 0;
+    // (flip_gate, a switch of earlier versions, still comes in old presets: a slow flip stays slow by itself now.)
     if (name == catch_at_name) state().catch_at = value != 0;
     if (name == flip_advanced_name) state().flip_advanced = value != 0;
     if (name == catch_percent_name) state().catch_percent = std::clamp(static_cast<float>(value), catch_low, catch_high);
@@ -1289,6 +1292,10 @@ void enter_map(const std::string &level) {
     s.class_search_at = level.empty() ? 0 : GetTickCount64() + 10000;
     s.class_search_tries = 0;
     s.class_search_seen = class_searches();
+    s.class_skater_wait = class_skater_wait_low;
+    s.class_skater_after = 0;
+    s.class_skater_due = false;
+    s.class_skater_judged = true;
     s.class_list_wanted = false;
     if (!level.empty()) {
         const auto found = s.maps.find(level);
@@ -2294,9 +2301,8 @@ void build_view() {
     next->flip_trick = s.flip_trick;
     next->flip_advanced_blocked = s.flip_advanced && extras_blocked();
     next->flip_live = s.flip_live;
-    next->flip_gate = s.flip_gate;
     next->flip_gate_found = flip_gates() != 0;
-    next->flip_gate_blocked = (!s.flip_gate || s.catch_at) && extras_blocked();
+    next->flip_gate_blocked = s.catch_at && extras_blocked();
     next->catch_at = s.catch_at;
     next->catch_percent = s.catch_percent;
     next->boneless_height = s.boneless_height;
@@ -2321,7 +2327,7 @@ void build_view() {
         next->camera_game = std::format("{:.1f} m behind, {:.1f} m up, tilt {:.0f} degrees, FOV {:.0f}", profile.distance, profile.height, profile.pitch, profile.fov);
     next->open_serial = s.open_serial;
     next->stock = s.revert == RevertTuning{} && !s.camera_on && s.rigs == std::array<RigSetting, camera_rigs>{} && !next->touched && s.active.empty() && std::ranges::none_of(s.entries, &Entry::frozen) &&
-                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); }) && s.flip_gate && !s.catch_at && !s.flip_advanced;
+                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); }) && !s.catch_at && !s.flip_advanced;
     next->share_text = s.share_text;
     next->share_serial = s.share_serial;
     next->open_tab = s.open_tab;
@@ -2378,7 +2384,6 @@ std::string export_preset(const std::string &name) {
             if (e.touched) values[e.key] = e.value;
         for (const auto trick : trick_names)
             if (const auto *option = trick_option(trick); *option != trick_stock(trick)) values[std::string(trick_prefix) + std::string(trick)] = *option;
-        if (!s.flip_gate) values[std::string(trick_prefix) + std::string(flip_gate_name)] = 0;
         if (s.flip_advanced) values[std::string(trick_prefix) + std::string(flip_advanced_name)] = 1;
         if (s.catch_at) {
             values[std::string(trick_prefix) + std::string(catch_at_name)] = 1;
@@ -2532,8 +2537,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         // host's enforced physics or in a session that has turned boosts off.
         // A flip asked to be slow is slow from the start: the game's rule would hurry it round before
         // the landing, so it is held off for as long as the speed in force is under the game's own.
-        const bool slow = s.flip_live && (s.flip_drive.active ? s.flip_drive.factor : s.boosts.flip) < 1.0f;
-        want_flip_gate(extras_blocked() ? flip_gate_stock : s.catch_at ? s.catch_seconds : s.flip_gate && !slow ? flip_gate_stock : flip_gate_off);
+        const bool slow = (s.flip_drive.active ? s.flip_drive.factor : s.boosts.flip) < 1.0f;
+        want_flip_gate(extras_blocked() ? flip_gate_stock : s.catch_at ? s.catch_seconds : slow ? flip_gate_off : flip_gate_stock);
         if (s.boosts.flip != s.flip_applied) {
             // The catch times follow the flip speed (want_class).
             s.flip_applied = s.boosts.flip;
@@ -2554,14 +2559,30 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
                 new_skater = new_skater || s.class_creations != 0;
                 s.class_creations = creations;
             }
-            s.class_research_due = s.class_research_due || lost || new_skater;
-            if (s.class_research_due && !classes_wanted()) s.class_research_due = false;
-            if (s.class_research_due && !s.class_search_at && now >= s.class_research_after && !finding_classes()) {
-                s.class_research_due = false;
+            // A bail builds a new skater too, and most of those bring nothing new: a search that a
+            // new skater asked for and that found only what was known doubles the wait before the
+            // next one (a search reads all of the game's writable memory, for seconds).
+            if (!s.class_skater_judged && !s.class_search_at && !finding_classes()) {
+                s.class_skater_judged = true;
+                s.class_skater_wait = class_search_found() == s.class_found ? std::min(s.class_skater_wait * 2, class_skater_wait_high) : class_skater_wait_low;
+                s.class_skater_after = now + s.class_skater_wait;
+            }
+            s.class_research_due = s.class_research_due || lost;
+            s.class_skater_due = s.class_skater_due || new_skater;
+            if (!classes_wanted()) s.class_research_due = s.class_skater_due = false;
+            const bool for_lost = s.class_research_due && now >= s.class_research_after;
+            const bool for_skater = s.class_skater_due && now >= s.class_skater_after && now >= s.class_research_after;
+            if ((for_lost || for_skater) && !s.class_search_at && !finding_classes()) {
+                s.class_research_due = s.class_skater_due = false;
                 s.class_search_seen = class_searches();
                 s.class_search_tries = 0;
                 s.class_search_at = now + 3000;
                 s.class_research_after = now + 20000;
+                if (!for_lost) {
+                    s.class_skater_judged = false;
+                    s.class_found = class_search_found();
+                    s.class_skater_after = now + s.class_skater_wait;
+                }
             }
         }
         set_trick_heights(s.boosts.nocomply, s.boosts.boneless);
@@ -2802,7 +2823,6 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         }
         if (v == "reset" && lower(arg(0)) == "tricks") {
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = 1.0f;
-            s.flip_gate = true;
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_trick.fill(1.0f);
@@ -2834,7 +2854,6 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.camera_on = false;
             s.rigs = {};
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = 1.0f;
-            s.flip_gate = true;
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_trick.fill(1.0f);
@@ -2905,7 +2924,6 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
                 if (e.touched) values[e.key] = e.value;
             for (const auto trick : trick_names)
                 if (const auto *option = trick_option(trick); *option != trick_stock(trick)) values[std::string(trick_prefix) + std::string(trick)] = *option;
-        if (!s.flip_gate) values[std::string(trick_prefix) + std::string(flip_gate_name)] = 0;
         if (s.flip_advanced) values[std::string(trick_prefix) + std::string(flip_advanced_name)] = 1;
         if (s.catch_at) {
             values[std::string(trick_prefix) + std::string(catch_at_name)] = 1;
@@ -3002,16 +3020,14 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             if (!value) return "error: return_delay needs seconds.";
             s.return_delay = std::clamp(static_cast<float>(*value), 0.0f, 10.0f);
         } else if (!flag(arg(1), on)) {
-            return "error: usage: trainer option hud|hud_jump|auto_return|pad|pad_menu|flip_gate|flip_advanced|catch_at|log 0|1";
+            return "error: usage: trainer option hud|hud_jump|auto_return|pad|pad_menu|flip_advanced|catch_at|log 0|1";
         } else if (name == "hud") s.hud = on;
         else if (name == "hud_jump") s.hud_jump = on;
         else if (name == "auto_return") s.auto_return = on;
         else if (name == "pad") s.pad_shortcuts = on;
         else if (name == "pad_menu") s.pad_menu = on;
-        else if (name == "flip_gate") {
-            if (!on && !editable(&why)) return "error: " + why;
-            s.flip_gate = on;
-        } else if (name == "catch_at") {
+        else if (name == "flip_gate") return "That switch is gone: a flip set slower than the game's own stays slow by itself.";
+        else if (name == "catch_at") {
             if (on && !editable(&why)) return "error: " + why;
             s.catch_at = on;
         } else if (name == "flip_advanced") {
