@@ -2007,6 +2007,7 @@ void build_view() {
     next->flip_speed = s.flip_speed;
     next->flip_gate = s.flip_gate;
     next->flip_gate_found = flip_gates() != 0;
+    next->flip_gate_blocked = !s.flip_gate && (s.enforced || (multiplayer_session_active() && !session_boosts_allowed()));
     next->boneless_height = s.boneless_height;
     next->revert_boost = s.revert_boost;
     next->revert = s.revert;
@@ -2227,6 +2228,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
                 find_classes();
             }
         }
+        flip_speed_in_use(s.boosts.flip != 1.0f);
         want_flip_speed(s.boosts.flip);
         // The player's own choice, and only where their own trick settings count: not under a
         // host's enforced physics or in a session that has turned boosts off.
@@ -2831,6 +2833,21 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             result += "]";
         }
         return result;
+    }
+    if (v == "curvex") {
+        // trainer curvex <curve 0..7> <factor>: that curve of the flip trick tuning at the game's outputs times the factor.
+        const auto index = number(arg(0)), factor = number(arg(1));
+        if (!index || !factor) return "error: usage: trainer curvex <curve 0..7> <factor>";
+        return dev_scale_curve(static_cast<std::size_t>(*index), static_cast<float>(*factor));
+    }
+    if (v == "flipcurves") {
+        // trainer flipcurves <hex mask>: which flip trick curves the flip speed scales (bit n = curve n in memory order).
+        std::uint32_t mask{};
+        const auto text = arg(0);
+        if (text.empty() || std::from_chars(text.data(), text.data() + text.size(), mask, 16).ec != std::errc{}) return "error: usage: trainer flipcurves <hex mask>";
+        dev_set_flip_curve_mask(mask);
+        find_classes();
+        return std::format("Flip speed now scales the curves of mask {:x}; searching again.", mask);
     }
     if (v == "setters") {
         std::array<Writer, 32> found{};

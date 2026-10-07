@@ -92,6 +92,7 @@ struct View {
     float flip_speed{1};      // board flip tricks: x of the game's own speed
     bool flip_gate{true};     // the game brings a flip round before the landing; false: slow flips stay slow
     bool flip_gate_found{};   // the rule's number was found in memory (the switch can act)
+    bool flip_gate_blocked{}; // ticked, but this session's rules keep the game's own flips
     // HUD
     bool hud{}, hud_jump{}, logging{};
     // The loaded map and what its author ships for the trainer (Mods/<mod>/trainer.json).

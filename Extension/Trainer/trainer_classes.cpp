@@ -65,7 +65,7 @@ int mirror_field(const MirrorSlot &slot) noexcept {
 struct FlipCurve {
     std::uintptr_t curve{}, points{};
     std::vector<float> outputs;
-    float low{}, high{}; // the bounds the curve clamps its output to (+0x20, +0x24)
+    float low{}, high{}; // the input range the curve is read over (MinX, MaxX at +0x20, +0x24): never written
 };
 constexpr std::size_t curve_point = 0x1c, curve_x = 0xc, curve_y = 0x14, curve_points_at = 0x18;
 // The point that tells what a curve holds: its largest output (some curves start at 0).
@@ -81,6 +81,7 @@ struct Found {
     std::mutex mutex;
     std::vector<FlipCurve> flip;
     float flip_wanted{1}, flip_written{1};
+    bool flip_used{}; // a flip speed other than the game's is set, though not written at this moment
     std::vector<std::uintptr_t> gates; // where the flick warp limit's number lives
     bool gate_kept{true};              // false: the trainer holds it off
     Copies copies;
@@ -232,6 +233,18 @@ void collect_eights(std::uintptr_t start, std::size_t size, const std::vector<st
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
+// The curves the flip speed slider scales, a bit per curve in memory order: only curve 4,
+// GestureSpeedToFlipSpeed, the stick's speed to the speed of the flip. Measured with the owner on
+// flat ground, 2026-10-06 (outputs x0.3, nothing else touched): kickflips at about half the
+// game's turn rate, plain ollies 0.39 to 0.40 m with 0.62 s of air, the same as untouched.
+// 0.4.0 to 0.4.2 also scaled curves 3, 6 and 7 (what a flick adds to the HEIGHT of the pop) and
+// every curve's input range at +0x20 / +0x24 (MinX and MaxX, not output bounds as was thought):
+// that made a slow flip a low ollie. Curves 0 and 1 changed neither the flip nor the pop.
+std::atomic<std::uint32_t> flip_curve_mask{0x10};
+// <dev>
+std::mutex dev_curve_mutex;
+std::array<FlipCurve, 8> dev_curves; // the last set found, by memory index, with the shipped outputs
+// </dev>
 // One curve's points: false unless it has `count` points starting at (x0, y0).
 bool read_curve(std::uintptr_t curve, std::uint32_t count, float x0, float y0, FlipCurve &out) noexcept {
     std::uintptr_t points{};
@@ -265,18 +278,43 @@ std::vector<FlipCurve> find_flip_curves(std::uintptr_t curve_type) {
     for (const auto run : runs) {
         std::array<std::uintptr_t, 8> curves{};
         if (!peek(run, curves)) continue;
-        // In memory order: 0 the flip speed against the flick, 1 the same for the legacy controls,
-        // 2 a multiplier for a high flick (1 to 2: left alone), 3, 6 and 7 the speed a flick's height
-        // and the stick sensitivity add (0 to 2.75), 4 flick speed to flip speed, 5 ollie speed to
-        // flip speed. Scaling only 0, 1, 4 and 5 slowed a flip by a third at x0.4: the rest is 3, 6, 7.
+        // In memory order: 0 and 1 a speed against the flick (new controls and legacy), 2 a
+        // multiplier for a high flick (1 to 2), 3, 6 and 7 what a flick adds to the height of the
+        // pop (0 to 2.75 over the stick's speed), 4 the stick's speed to the flip speed, 5 the
+        // ollie's speed to the flip speed (flat 1). All seven are checked to know the run is the
+        // flip trick tuning; flip_curve_mask says which are scaled.
         std::array<FlipCurve, 7> speed;
         if (!read_curve(curves[0], 3, 0.0f, 0.4f, speed[0]) || !read_curve(curves[1], 3, 0.35f, 0.65f, speed[1]) ||
             !read_curve(curves[4], 3, 0.0f, 0.05f, speed[2]) || !read_curve(curves[5], 2, 0.0f, 1.0f, speed[3]) ||
             !read_curve(curves[3], 4, 0.0f, 0.0f, speed[4]) || !read_curve(curves[6], 4, 0.0f, 0.0f, speed[5]) ||
             !read_curve(curves[7], 4, 0.0f, 0.0f, speed[6]))
             continue;
-        for (auto &curve : speed)
-            if (std::ranges::none_of(result, [&](const FlipCurve &known) { return known.points == curve.points; })) result.push_back(std::move(curve));
+        // <dev>
+        {
+            static constexpr std::size_t order[]{0, 1, 4, 5, 3, 6, 7};
+            std::lock_guard lock(dev_curve_mutex);
+            for (std::size_t i = 0; i < speed.size(); ++i) dev_curves[order[i]] = speed[i];
+            FlipCurve second;
+            std::uintptr_t points{};
+            std::uint32_t n{};
+            if (peek(curves[2] + curve_points_at, points) && points && peek(points - 4, n)) {
+                second.curve = curves[2];
+                second.points = points;
+                for (std::uint32_t k = 0; k < (n & 0xff) && k < 16; ++k) {
+                    float y{};
+                    if (peek(points + k * curve_point + curve_y, y)) second.outputs.push_back(y);
+                }
+                dev_curves[2] = second;
+            }
+        }
+        // </dev>
+        // Which of them the flip speed scales: a bit per curve, in memory order (see flip_curve_mask).
+        static constexpr std::size_t memory_index[]{0, 1, 4, 5, 3, 6, 7};
+        const auto mask = flip_curve_mask.load(std::memory_order_relaxed);
+        for (std::size_t i = 0; i < speed.size(); ++i)
+            if (auto &curve = speed[i]; ((mask >> memory_index[i]) & 1u) &&
+                                        std::ranges::none_of(result, [&](const FlipCurve &known) { return known.points == curve.points; }))
+                result.push_back(std::move(curve));
     }
     return result;
 }
@@ -414,8 +452,6 @@ DWORD WINAPI search(void *) noexcept {
                 if (std::ranges::any_of(f.flip, [&](const FlipCurve &known) { return known.points == curve.points; })) continue;
                 if (f.flip_written != 1) {
                     for (std::size_t i = 0; i < curve.outputs.size(); ++i) (void)put(curve.points + i * curve_point + curve_y, curve.outputs[i] * f.flip_written);
-                    (void)put(curve.curve + 0x20, curve.low > 0 ? curve.low * f.flip_written : curve.low);
-                    (void)put(curve.curve + 0x24, curve.high > 0 ? curve.high * f.flip_written : curve.high);
                 }
                 f.flip.push_back(std::move(curve));
             }
@@ -458,9 +494,6 @@ std::size_t write_gates(Found &f) noexcept {
 }
 void write_flip_curve(const FlipCurve &curve, float factor) noexcept {
     for (std::size_t i = 0; i < curve.outputs.size(); ++i) (void)put(curve.points + i * curve_point + curve_y, curve.outputs[i] * factor);
-    // The bounds move with the outputs, or the curve clamps the scaled values back.
-    (void)put(curve.curve + 0x20, curve.low > 0 ? curve.low * factor : curve.low);
-    (void)put(curve.curve + 0x24, curve.high > 0 ? curve.high * factor : curve.high);
 }
 } // namespace
 
@@ -475,6 +508,15 @@ bool refresh_classes(std::uint64_t now) noexcept {
     std::size_t repaired{};
     repaired += write_gates(f);
     lost = lost || (!f.gate_kept && f.gates.empty());
+    // On the ground the curves hold the game's own (the flip speed is written in the air only):
+    // one that holds something else is someone else's memory now.
+    if (f.flip_used && f.flip_written == 1) {
+        std::erase_if(f.flip, [&](const FlipCurve &curve) {
+            float y{};
+            return curve.outputs.empty() || !peek(probe_address(curve), y) || !same(y, probe_output(curve));
+        });
+        lost = lost || f.flip.empty();
+    }
     if (f.flip_written != 1) {
         std::erase_if(f.flip, [&](const FlipCurve &curve) {
             float y{};
@@ -567,7 +609,7 @@ void want_class_value(std::size_t field, float value) noexcept {
 bool classes_wanted() noexcept {
     auto &f = found();
     std::lock_guard lock(f.mutex);
-    if (f.flip_wanted != 1 || !f.gate_kept) return true;
+    if (f.flip_wanted != 1 || f.flip_used || !f.gate_kept) return true;
     for (std::size_t i = 0; i < class_field_count; ++i)
         if (f.wanted[i] != class_fields[i].stock) return true;
     return false;
@@ -587,9 +629,6 @@ std::size_t apply_classes() noexcept {
         for (const auto &curve : f.flip) {
             for (std::size_t i = 0; i < curve.outputs.size(); ++i)
                 if (put(curve.points + i * curve_point + curve_y, curve.outputs[i] * f.flip_wanted)) ++count;
-            // The bounds move with the outputs, or the curve clamps the scaled values back.
-            (void)put(curve.curve + 0x20, curve.low > 0 ? curve.low * f.flip_wanted : curve.low);
-            (void)put(curve.curve + 0x24, curve.high > 0 ? curve.high * f.flip_wanted : curve.high);
         }
         f.flip_written = f.flip_wanted;
     }
@@ -631,6 +670,11 @@ void want_flip_speed(float factor) noexcept {
         f.dirty = true;
     }
 }
+void flip_speed_in_use(bool used) noexcept {
+    auto &f = found();
+    std::lock_guard lock(f.mutex);
+    f.flip_used = used;
+}
 void want_flip_gate(bool kept) noexcept {
     auto &f = found();
     std::lock_guard lock(f.mutex);
@@ -644,6 +688,36 @@ std::size_t flip_gates() noexcept {
     return f.gates.size();
 }
 // <dev>
+// One curve's outputs times `factor`, by hand. Returns a line saying what it now holds.
+std::string dev_scale_curve(std::size_t index, float factor) {
+    std::lock_guard lock(dev_curve_mutex);
+    if (index >= dev_curves.size() || dev_curves[index].outputs.empty()) return "no such curve found yet";
+    const auto &curve = dev_curves[index];
+    std::string result = std::format("curve {} x{}:", index, factor);
+    for (std::size_t i = 0; i < curve.outputs.size(); ++i) {
+        (void)put(curve.points + i * curve_point + curve_y, curve.outputs[i] * factor);
+        float x{}, y{};
+        (void)peek(curve.points + i * curve_point + curve_x, x);
+        (void)peek(curve.points + i * curve_point + curve_y, y);
+        result += std::format(" ({:.3g}, {:.3g})", x, y);
+    }
+    float low{}, high{};
+    (void)peek(curve.curve + 0x20, low);
+    (void)peek(curve.curve + 0x24, high);
+    return result + std::format(" bounds at +20/+24: {:.3g} {:.3g}", low, high);
+}
+// Another choice of curves for the flip speed: the ones scaled so far go back to the game's own
+// and are forgotten; the caller starts a search, after which the wanted speed is written to the
+// new choice.
+void dev_set_flip_curve_mask(std::uint32_t mask) noexcept {
+    auto &f = found();
+    std::lock_guard lock(f.mutex);
+    for (const auto &curve : f.flip) write_flip_curve(curve, 1.0f);
+    f.flip.clear();
+    f.flip_written = 1;
+    f.dirty = true;
+    flip_curve_mask.store(mask, std::memory_order_relaxed);
+}
 // What the game does when it builds its tuning again: every flip curve and class copy back to
 // the game's own numbers, behind the trainer's back (`trainer undo`, to test refresh_classes).
 std::size_t dev_undo_classes() noexcept {

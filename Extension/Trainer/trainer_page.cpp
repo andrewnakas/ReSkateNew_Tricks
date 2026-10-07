@@ -474,7 +474,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         return true;
     };
     slider("Flip trick speed", "flip_speed", view.flip_speed, p.flip_edit, p.flip_editing,
-           "How fast the board turns in a flip trick. Below 1 a flip is slower and gets that much longer to come round. On its own the game still "
+           "How fast the board turns in a flip trick. It does not change how high you pop. Below 1 a flip is slower. On its own the game still "
            "hurries a slow flip so it is finished before you land: tick the switch below to stop that. Above 1 the game's own limit on how fast a "
            "board turns takes over.",
            3.0f);
@@ -485,7 +485,8 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
             wrapped_tooltip("%s", "The game speeds a flip up so the board is round 1/6 of a second before the landing it predicts, however slow the flip speed "
                                   "is set. That is why a slowed flip still comes round on a small pop. Ticked: that rule is off. The board turns as "
                                   "slowly as you set it and lands however far round it got, so a flip you start too late or too low is a bail.");
-        if (slow && !view.flip_gate_found) ImGui::TextDisabled("Not found in the game yet: it takes effect a few seconds after a level loads.");
+        if (view.flip_gate_blocked) ImGui::TextDisabled("Off in this session: the host's physics rules apply here, so flips finish before landing as usual.");
+        else if (slow && !view.flip_gate_found) ImGui::TextDisabled("Not found in the game yet: it takes effect a few seconds after a level loads.");
     }
     slider("No comply height", "nocomply_height", view.nocomply_height, p.nocomply_edit, p.nocomply_editing, "How high a no comply pops. 1 is the game's own.");
     slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing, "How high a boneless pops. 1 is the game's own.");
