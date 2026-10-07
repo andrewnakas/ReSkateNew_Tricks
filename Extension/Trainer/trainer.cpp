@@ -1380,6 +1380,8 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
         m.takeoff_stamp = m.stamp;
         m.apex = std::max(m.position[1], position[1]);
     }
+    // On the ground the limit is the game's own: the number left by the last flight means nothing for the next.
+    if (!m.airborne) state().catch_seconds = flip_gate_stock;
     if (m.airborne) {
         m.apex = std::max(m.apex, position[1]);
         t.air_time = static_cast<float>(clock_seconds(stamp - m.takeoff_stamp));
@@ -1392,7 +1394,13 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
             const float g = std::max(1.0f, gravity ? static_cast<float>(gravity->touched ? gravity->value : gravity->stock) : 9.81f);
             const float rise = velocity[1], above = std::max(0.0f, position[1] - m.takeoff[1]);
             const float whole = t.air_time + (rise + std::sqrt(rise * rise + 2 * g * above)) / g;
-            if (whole > 0.05f && whole < 60.0f) own.catch_seconds = (1 - own.catch_percent / 100) * whole;
+            // A catch asked for earlier than a board can come round (a flick late in a short
+            // jump) would make the limit negative, which the game reads as no limit at all and
+            // the flip crawls (measured at 10%: big pops turned at 450 deg/s to the ground). Such a
+            // flip is asked to come round as fast as the game turns one, about a fifth of a second.
+            constexpr float fastest_flip = 0.2f;
+            if (whole > 0.05f && whole < 60.0f)
+                own.catch_seconds = std::min((1 - own.catch_percent / 100) * whole, whole - t.air_time - fastest_flip);
         }
         t.height = m.apex - m.takeoff[1];
         if (!flying)
