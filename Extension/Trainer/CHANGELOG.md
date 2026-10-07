@@ -22,6 +22,11 @@
   it is found about 15 seconds after a level loads. Off under a host's enforced physics or with
   boosts off. It replaces the dial "Pumping strength" (Pump Power), which changed nothing: the
   game's own gain is small (0.3 to 1 m/s a pump, measured) and fades the faster you already go.
+- **TUNE opens on PRESETS.** A new first list with only the presets: "Play like" (skate., Skate 3
+  Easy, Skate 3, Skate 3 Hardcore) and YOUR PRESETS, where the setup you have now is saved under
+  a name, turned on and off, shared as one line of text and imported from one. The dials, trick
+  sliders and values stay on REALISTIC, FUN, TRICKLINING and EVERYTHING. Saving now also works
+  when only a trick setting is changed (`trainer open presets`).
 - **The camera tab is gone.** The camera controls did not work reliably, so they are out of this
   version: the CAMERA tab, `trainer camera` and the saved camera numbers (ignored if present).
 - **The dial "On foot: flip and roll speed" is gone.** It changed nothing in the game. The three
