@@ -245,7 +245,6 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         end_card();
         return;
     }
-    if (!view.editable) warn(view.blocked.c_str());
     // Two short lists, the trick line section and the whole table (modes 0, 1, 3 and 2).
     {
         static constexpr std::pair<const char *, int> modes[]{{"REALISTIC", 0}, {"FUN", 1}, {"TRICKLINING", 3}, {"EVERYTHING", 2}};
@@ -441,7 +440,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
 }
 
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words) {
-    static constexpr const char *labels[]{"Flip trick speed", "Let slow flips stay slow (no finish before landing)", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
+    static constexpr const char *labels[]{"Flip trick speed", "Let slow flips stay slow (no finish before landing)", "Catch flips at a set point of the jump (realism, percent of air time)", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
                                            "Board bending boost (revert speed)"};
     const auto wanted = [&](const char *label) { return words.empty() || contains_words(lower(std::string(label) + " tricks"), words); };
     if (std::ranges::none_of(labels, wanted)) return;
@@ -485,8 +484,28 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
             wrapped_tooltip("%s", "The game speeds a flip up so the board is round 1/6 of a second before the landing it predicts, however slow the flip speed "
                                   "is set. That is why a slowed flip still comes round on a small pop. Ticked: that rule is off. The board turns as "
                                   "slowly as you set it and lands however far round it got, so a flip you start too late or too low is a bail.");
-        if (view.flip_gate_blocked) ImGui::TextDisabled("Off in this session: the host's physics rules apply here, so flips finish before landing as usual.");
+        if (view.flip_gate_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here, so flips finish before landing as usual.");
         else if (slow && !view.flip_gate_found) ImGui::TextDisabled("Not found in the game yet: it takes effect a few seconds after a level loads.");
+    }
+    if (wanted("Catch flips at a set point of the jump (realism, percent of air time)")) {
+        bool on = view.catch_at;
+        if (ImGui::Checkbox("Catch flips at a set point of the jump", &on)) trainer_command(menu, callbacks, std::format("option catch_at {}", on ? 1 : 0));
+        if (ImGui::IsItemHovered())
+            wrapped_tooltip("%s", "For realism. Every flip trick turns so that the board is round, and caught, at the percent of the jump's air time "
+                                  "you set: 70 means the catch comes 70% of the way from the pop to the landing, on a small ollie and a big one alike. "
+                                  "While this is on the trainer sets the flip speed and the finish-before-landing rule itself, so the two controls "
+                                  "above stand aside. The air time is worked out from the pop over level ground: off a drop or a gap the catch "
+                                  "comes earlier than asked. 100 or close to it means you land still flipping.");
+        ImGui::SameLine();
+        float percent = view.catch_percent;
+        ImGui::SetNextItemWidth(px(64));
+        if (ImGui::InputFloat("##catch-percent", &percent, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue))
+            trainer_command(menu, callbacks, std::format("option catch_percent {}", percent));
+        if (ImGui::IsItemHovered()) wrapped_tooltip("%s", "Percent of the air time at which the flip is caught. Type a number from 1 to 100 and press Enter.");
+        ImGui::SameLine();
+        ImGui::TextUnformatted("% of the air time");
+        if (view.catch_at && view.flip_gate_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here.");
+        else if (on && !view.flip_gate_found) ImGui::TextDisabled("Not found in the game yet: it takes effect a few seconds after a level loads.");
     }
     slider("No comply height", "nocomply_height", view.nocomply_height, p.nocomply_edit, p.nocomply_editing, "How high a no comply pops. 1 is the game's own.");
     slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing, "How high a boneless pops. 1 is the game's own.");
@@ -997,16 +1016,20 @@ bool trainer_page_wanted() {
 void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks) {
     auto &p = page();
     const auto view = trainer::view();
-    ImGui::BeginDisabled(!callbacks.queue_console_command);
+    // A guest under the host's physics would only wipe a setup they cannot see at work here.
+    ImGui::BeginDisabled(!callbacks.queue_console_command || view->session_enforced);
     if (ImGui::Button("RESET EVERYTHING")) {
         p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.revert_editing = false;
         trainer_command(menu, callbacks, "reset everything");
     }
     tip("Puts back every value, lock, preset, dial, trick setting and camera: the game exactly as it shipped.");
     ImGui::EndDisabled();
+    if (view->session_enforced && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        wrapped_tooltip("%s", "Off in this multiplayer game: the host controls physics here. Your own setup is kept for when you leave.");
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
-    if (view->ready && view->stock) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "STOCK: the game is exactly as it shipped. Nothing of the trainer's is on.");
+    if (view->session_enforced) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "HOST'S PHYSICS: your own setup is kept for when you leave.");
+    else if (view->ready && view->stock) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "STOCK: the game is exactly as it shipped. Nothing of the trainer's is on.");
     else if (view->ready) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "MODIFIED: this button puts back every value, lock, preset and trick slider.");
     else ImGui::TextDisabled("The game as it shipped: every value, lock, preset and trick slider.");
     // `preset export` leaves its line here; the clipboard belongs to this thread.
@@ -1016,6 +1039,18 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     } else if (p.share_serial != view->share_serial) {
         p.share_serial = view->share_serial;
         ImGui::SetClipboardText(view->share_text.c_str());
+    }
+    // Above the tabs, so every tab says why its controls do nothing in this session.
+    if (view->session_enforced) {
+        begin_card(menu, "session-note", "MULTIPLAYER: THE HOST CONTROLS PHYSICS");
+        warn("You are in a multiplayer game where the host controls physics. This menu will not work in this multiplayer game.");
+        note("You skate with the host's setup. Camera, HUD and markers still work. Your own setup comes back when you leave.");
+        end_card();
+    } else if (view->boosts_blocked) {
+        begin_card(menu, "session-note", "MULTIPLAYER: BOOSTS ARE OFF");
+        warn("The host has turned boosts off in this multiplayer game: trick sliders, flip speed, auto push and the board bending boost will not work here.");
+        note("The physics values still apply. The rest comes back when the host allows boosts or you leave.");
+        end_card();
     }
     category_tabs(menu, p.tab, {"TUNE", "PRACTICE", "CAMERA", "MAP & HUD"}, "trainer-tabs");
     ImGui::PushID(p.tab);

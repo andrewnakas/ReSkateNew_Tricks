@@ -83,7 +83,7 @@ struct Found {
     float flip_wanted{1}, flip_written{1};
     bool flip_used{}; // a flip speed other than the game's is set, though not written at this moment
     std::vector<std::uintptr_t> gates; // where the flick warp limit's number lives
-    bool gate_kept{true};              // false: the trainer holds it off
+    float gate_wanted{flip_gate_stock}; // the seconds before landing a flip must be round by
     Copies copies;
     MirrorCopies mirror_copies;
     std::array<std::array<int, 15>, mirror_count> mirror_fields{};
@@ -323,12 +323,19 @@ std::vector<FlipCurve> find_flip_curves(std::uintptr_t curve_type) {
 // left before landing less one number: 1/6 s as shipped. That number sits in the expression's
 // kernel between words that do not change; far below zero, the limit never binds and a slow flip
 // stays slow all the way to the ground.
-constexpr float gate_stock = 1.0f / 6.0f, gate_off = -1000.0f;
-bool is_gate(std::uintptr_t address, std::uintptr_t low, std::uintptr_t high) noexcept {
+constexpr float gate_stock = flip_gate_stock, gate_off = flip_gate_off;
+// The words around the number: enough to know a place already found is still the rule.
+bool gate_shape(std::uintptr_t address, std::uintptr_t low, std::uintptr_t high) noexcept {
     if (address < low + 12 || address + 12 > high) return false;
     const auto *words = reinterpret_cast<const std::uint32_t *>(address);
-    return words[2] == 0x2419u && words[-3] == 0x00010300u && !words[-2] && !words[-1] && !words[1] &&
-           (words[0] == bits(gate_stock) || words[0] == bits(gate_off));
+    return words[2] == 0x2419u && words[-3] == 0x00010300u && !words[-2] && !words[-1] && !words[1];
+}
+// A search also wants the number itself (the game's, or the trainer's "off"): other expressions
+// share the shape.
+bool is_gate(std::uintptr_t address, std::uintptr_t low, std::uintptr_t high) noexcept {
+    if (!gate_shape(address, low, high)) return false;
+    const auto word = *reinterpret_cast<const std::uint32_t *>(address);
+    return word == bits(gate_stock) || word == bits(gate_off);
 }
 void collect_gates(std::uintptr_t start, std::size_t size, std::vector<std::uintptr_t> &gates) noexcept {
     __try {
@@ -343,7 +350,7 @@ bool gate_still_there(std::uintptr_t address) noexcept {
         if (VirtualQuery(reinterpret_cast<void *>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT || info.Protect != PAGE_READWRITE)
             return false;
         const auto low = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
-        return is_gate(address, low, low + info.RegionSize);
+        return gate_shape(address, low, low + info.RegionSize);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -378,7 +385,7 @@ DWORD WINAPI search(void *) noexcept {
                           stock.data());
             bytes += info.RegionSize;
         }
-        std::size_t classes{}, copies{};
+        std::size_t classes{}, copies{}, native{};
         {
             std::lock_guard lock(f.mutex);
             for (std::size_t c = 0; c < class_count; ++c) {
@@ -410,7 +417,7 @@ DWORD WINAPI search(void *) noexcept {
                             (void)put(base + i * 4, f.written[index]);
                 kept.insert(kept.end(), fresh_mirrors[m].begin(), fresh_mirrors[m].end());
                 f.mirror_copies[m] = std::move(kept);
-                copies += f.mirror_copies[m].size();
+                native += f.mirror_copies[m].size();
             }
             f.ready = true;
             f.dirty = true;
@@ -463,12 +470,15 @@ DWORD WINAPI search(void *) noexcept {
             std::vector<std::uintptr_t> gates;
             each_region([&](std::uintptr_t start, std::size_t size) { collect_gates(start, size, gates); });
             std::lock_guard lock(f.mutex);
+            // One already known may hold a number of the trainer's own that a search does not look for.
+            for (const auto known : f.gates)
+                if (std::ranges::find(gates, known) == gates.end() && gate_still_there(known)) gates.push_back(known);
             f.gates = std::move(gates);
             gates_found = f.gates.size();
         }
         logging::write(logging::Level::info, logging::Channel::skater,
-                       std::format("Trainer: found {} of {} game tuning classes ({} copies), {} flip trick speed curves and {} flip landing limit in {} MB, {} ms.",
-                                   classes, class_count, copies, flip_found, gates_found, bytes >> 20, GetTickCount64() - started));
+                       std::format("Trainer: found {} of {} game tuning classes ({} copies, {} native), {} flip trick speed curves and {} flip landing limit in {} MB, {} ms.",
+                                   classes, class_count, copies, native, flip_found, gates_found, bytes >> 20, GetTickCount64() - started));
     } catch (...) {}
     f.searches.fetch_add(1, std::memory_order_release);
     f.searching.store(false, std::memory_order_release);
@@ -485,7 +495,7 @@ bool same(float a, float b) noexcept { return std::abs(a - b) <= 1e-5f * std::ma
 std::size_t write_gates(Found &f) noexcept {
     std::erase_if(f.gates, [](std::uintptr_t address) { return !gate_still_there(address); });
     std::size_t count{};
-    const float want = f.gate_kept ? gate_stock : gate_off;
+    const float want = f.gate_wanted;
     for (const auto address : f.gates) {
         float now{};
         if (peek(address, now) && now != want && put(address, want)) ++count;
@@ -507,7 +517,7 @@ bool refresh_classes(std::uint64_t now) noexcept {
     bool lost = false;
     std::size_t repaired{};
     repaired += write_gates(f);
-    lost = lost || (!f.gate_kept && f.gates.empty());
+    lost = lost || (f.gate_wanted != gate_stock && f.gates.empty());
     // On the ground the curves hold the game's own (the flip speed is written in the air only):
     // one that holds something else is someone else's memory now.
     if (f.flip_used && f.flip_written == 1) {
@@ -609,7 +619,7 @@ void want_class_value(std::size_t field, float value) noexcept {
 bool classes_wanted() noexcept {
     auto &f = found();
     std::lock_guard lock(f.mutex);
-    if (f.flip_wanted != 1 || f.flip_used || !f.gate_kept) return true;
+    if (f.flip_wanted != 1 || f.flip_used || f.gate_wanted != gate_stock) return true;
     for (std::size_t i = 0; i < class_field_count; ++i)
         if (f.wanted[i] != class_fields[i].stock) return true;
     return false;
@@ -675,11 +685,12 @@ void flip_speed_in_use(bool used) noexcept {
     std::lock_guard lock(f.mutex);
     f.flip_used = used;
 }
-void want_flip_gate(bool kept) noexcept {
+void want_flip_gate(float seconds) noexcept {
     auto &f = found();
+    if (!(seconds == seconds)) return;
     std::lock_guard lock(f.mutex);
-    if (f.gate_kept == kept) return;
-    f.gate_kept = kept;
+    if (f.gate_wanted == seconds) return;
+    f.gate_wanted = seconds;
     (void)write_gates(f);
 }
 std::size_t flip_gates() noexcept {
@@ -771,7 +782,7 @@ std::string classes_summary() {
         result += std::format("{}{}:{}+{}", c ? ", " : "", class_specs[c].key, f.copies[c].size() - static_cast<std::size_t>(slots), slots);
     }
     for (std::size_t m = 0; m < mirror_count; ++m) result += std::format(", native copy {}:{}", m, f.mirror_copies[m].size());
-    result += std::format(", flip trick speed curves:{}, flip landing limit:{}{}", f.flip.size(), f.gates.size(), f.gate_kept ? "" : " (held off)");
+    result += std::format(", flip trick speed curves:{}, flip landing limit:{}{}", f.flip.size(), f.gates.size(), f.gate_wanted == gate_stock ? std::string{} : std::format(" (held at {:.3f} s)", f.gate_wanted));
     return result;
 }
 } // namespace dingosdk::trainer

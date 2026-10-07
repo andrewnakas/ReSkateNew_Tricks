@@ -60,7 +60,10 @@ std::size_t flip_curves() noexcept;
 // slow the flip speed is set. `kept` false holds that rule off: the board turns as slowly as set
 // and lands however far round it got. The search finds the rule's number; flip_gates says whether
 // it did (0: nothing to switch yet).
-void want_flip_gate(bool kept) noexcept;
+// `seconds`: how long before the landing it predicts the game has a flip round. The game's own is
+// flip_gate_stock; flip_gate_off never hurries a flip; anything else moves the catch.
+inline constexpr float flip_gate_stock = 1.0f / 6.0f, flip_gate_off = -1000.0f;
+void want_flip_gate(float seconds) noexcept;
 std::size_t flip_gates() noexcept;
 // <dev>
 void dev_set_flip_curve_mask(std::uint32_t mask) noexcept;

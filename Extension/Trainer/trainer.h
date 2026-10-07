@@ -69,6 +69,8 @@ struct View {
     std::string last;    // what the last command answered
     bool editable{};     // false while a session's host sets everyone's physics (the host's apply)
     std::string blocked; // the reason shown on locked rows
+    bool session_enforced{}; // a guest where the host (or the server) sets everyone's physics
+    bool boosts_blocked{};   // a session whose host turned boosts off: the trick extras are the game's own
     std::vector<Row> rows;
     std::vector<std::string> groups;
     std::vector<PresetRow> presets;
@@ -93,6 +95,8 @@ struct View {
     bool flip_gate{true};     // the game brings a flip round before the landing; false: slow flips stay slow
     bool flip_gate_found{};   // the rule's number was found in memory (the switch can act)
     bool flip_gate_blocked{}; // ticked, but this session's rules keep the game's own flips
+    bool catch_at{};          // flips are caught at a set part of the jump
+    float catch_percent{70};  // which part: percent of the air time
     // HUD
     bool hud{}, hud_jump{}, logging{};
     // The loaded map and what its author ships for the trainer (Mods/<mod>/trainer.json).

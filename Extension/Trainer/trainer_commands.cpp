@@ -45,6 +45,9 @@ void register_trainer_commands(Commands &registry) {
         {"watchx", "Who calls a game function (diagnostic)", "<rva hex>", false},
         {"topspeed", "The top speed since last asked (diagnostic)", nullptr, false},
         {"pad", "Play a scripted controller (diagnostic)", "<controls:ms> ... | off", false},
+        {"fakesession", "Show the menu's session messages without a session (diagnostic)", "enforced|boosts|off", false},
+        {"flipext", "Catch extension times follow the flip speed (diagnostic)", "0|1", false},
+        {"flipgate", "The flip landing limit's copies, and a new number for them (diagnostic)", "[seconds]", false},
         // </dev>
         {"classes", "The game's tuning classes the trainer found in memory (diagnostic)", "[find]", false},
         {"refresh", "Refresh the skater's cached copy of the tuning (diagnostic)", nullptr, false},
