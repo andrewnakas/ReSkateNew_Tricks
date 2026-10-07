@@ -17,7 +17,7 @@ namespace {
 struct Page {
     int tab{}; // opens on TUNE: the dials and switches
     std::array<char, 96> search{};
-    int mode{4}; // the Tune tab: 4 Presets, 0 Realistic, 1 Fun (two short lists), 3 Tricklining, 2 Everything
+    int mode{1}; // the Tune tab: 0 Realistic, 1 Fun (two short lists), 3 Tricklining, 2 Everything
     int group{1}; // Everything: 1: every group, 2..: one of the view's groups
     bool only_changed{}, graph_points{}, show_unused{};
     std::size_t hidden_unused{}; // rows the filters would show but for "no use found"
@@ -311,10 +311,10 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         end_card();
         return;
     }
-    // The presets, two short lists, the trick line section and the whole table (modes 4, 0, 1, 3 and 2).
+    // Two short lists, the trick line section and the whole table (modes 0, 1, 3 and 2).
     {
-        static constexpr std::pair<const char *, int> modes[]{{"PRESETS", 4}, {"REALISTIC", 0}, {"FUN", 1}, {"TRICKLINING", 3}, {"EVERYTHING", 2}};
-        const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 4) / 5;
+        static constexpr std::pair<const char *, int> modes[]{{"REALISTIC", 0}, {"FUN", 1}, {"TRICKLINING", 3}, {"EVERYTHING", 2}};
+        const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 3) / 4;
         bool first = true;
         for (const auto &[label, mode] : modes) {
             if (!first) ImGui::SameLine();
@@ -322,8 +322,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
             const bool on = p.mode == mode;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
             if (ImGui::Button(label, ImVec2(width, 0))) p.mode = mode;
-            tip(mode == 4 ? "Play like Skate 3, and your own presets: save a setup under a name, go back to it, share it."
-                : mode == 0 ? "A short list for toning the game down: lower pops, slower pushes, harder bails."
+            tip(mode == 0 ? "A short list for toning the game down: lower pops, slower pushes, harder bails."
                 : mode == 1 ? "A short list for turning the game up: bigger pops, faster pushes, moon jumps."
                 : mode == 3 ? "Everything that makes a trick line in one place: board bending, reverts, pumping, pops, spins, manuals and grinds."
                             : "Every dial and every tuning value the trainer knows.");
@@ -342,10 +341,11 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         return searching ? contains_words(lower(preset.title + " " + preset.name + " " + preset.note), words) : p.mode == 2 || (preset.modes & list) != 0;
     };
 
-    if (!searching && (p.mode == 4 || p.mode == 3)) {
+    // The whole-game choices (Play like, the player's saved setups) are on MAP & HUD; a trick line
+    // is the one list that is about a whole feel, so it keeps the choice at hand.
+    if (!searching && p.mode == 3) {
         begin_card(menu, "feel", "PLAY LIKE", "The game's own tuning, or Skate 3's on one of its difficulties");
-        if (p.mode == 3)
-            note("A Skate 3 choice sets Skate 3's own numbers for everything the two games share (pop, grind pops, pushing, pumping, steering, "
+        note("A Skate 3 choice sets Skate 3's own numbers for everything the two games share (pop, grind pops, pushing, pumping, steering, "
                  "manuals, spins, bails), and for grinds the way they were before skate.: the older grind friction, Skate 3's lock-on distances, wider slide "
                  "angles, and no automatic turning between grinds. What a number cannot change stays skate.'s: animations and which stick "
                  "motion asks for which grind.");
@@ -356,11 +356,6 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
     }
     if (p.mode == 3 && !searching) {
         trickline_section(menu, callbacks, p, view);
-        return;
-    }
-    if (p.mode == 4 && !searching) {
-        your_presets(menu, callbacks, p, view, can_edit);
-        note("Dials, trick sliders and every value are on the other lists. Set the game up there, then come back here to save it under a name.");
         return;
     }
     begin_card(menu, "dials", p.mode == 0 ? "FEEL: TONE IT DOWN" : p.mode == 1 ? "FEEL: TURN IT UP" : "FEEL",
@@ -394,6 +389,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%zu values changed", view.touched);
+    note("To save or share the whole setup under a name, or to play like Skate 3: MAP & HUD, at the bottom.");
     end_card();
 
     ImGui::BeginDisabled(!can_edit);
@@ -858,7 +854,7 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
 }
 
 
-void map_tab(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View &view) {
+void map_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     const auto telemetry = trainer::telemetry();
     begin_card(menu, "hud", "HUD");
     bool hud = view.hud, jump = view.hud_jump, logging = view.logging;
@@ -913,6 +909,20 @@ void map_tab(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View 
     if (view.map_note.empty() && view.map_preset.empty() && view.spots.empty())
         note("Map makers can ship a trainer.json in their mod folder with spots and a recommended preset.");
     end_card();
+
+    // The whole game at once: which game it plays like, and the player's own saved setups. (The
+    // presets on TUNE each change one thing.)
+    if (view.ready) {
+        const bool can_edit = view.editable && callbacks.queue_console_command != nullptr;
+        begin_card(menu, "feel", "PLAY LIKE", "The game's own tuning, or Skate 3's on one of its difficulties");
+        ImGui::BeginDisabled(!can_edit);
+        feel_buttons(menu, callbacks, view);
+        ImGui::EndDisabled();
+        note("A Skate 3 choice sets Skate 3's own numbers for everything the two games share. The dials and switches on TUNE each change one "
+             "thing: set those as you like, then save the whole setup below.");
+        end_card();
+        your_presets(menu, callbacks, p, view, can_edit);
+    }
 }
 } // namespace
 
@@ -921,10 +931,9 @@ bool trainer_take_open() {
     auto &p = page();
     if (view->open_serial == p.open_serial) return false;
     p.open_serial = view->open_serial;
-    // `trainer open` still takes "presets": they live on the Tune tab now.
-    p.tab = view->open_tab == 3 ? 2 : view->open_tab == 2 ? 1 : 0; // by name, see `trainer open`
+    // "presets": the player's saved setups are at the bottom of MAP & HUD.
+    p.tab = view->open_tab == 3 || view->open_tab == 1 ? 2 : view->open_tab == 2 ? 1 : 0; // by name, see `trainer open`
     if (view->open_tab == 8) p.mode = 3; // the trick line section of the Tune tab
-    if (view->open_tab == 1) p.mode = 4; // `trainer open presets`
     if (view->open_tab >= 4 && view->open_tab < 7) p.mode = std::clamp(view->open_tab - 4, 0, 2);
     p.show_page = true;
     return true;
@@ -981,7 +990,7 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     switch (p.tab) {
     case 0: tune_tab(menu, model, callbacks, p, *view); break;
     case 1: practice_tab(menu, model, callbacks, p, *view); break;
-    default: map_tab(menu, callbacks, *view); break;
+    default: map_tab(menu, callbacks, p, *view); break;
     }
     ImGui::EndChild();
     ImGui::PopID();

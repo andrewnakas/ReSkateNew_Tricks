@@ -2934,7 +2934,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         const std::array<std::string_view, 9> tabs{"tune", "presets", "practice", "map", "realistic", "fun", "everything", "camera", "trickline"};
         const auto found = std::ranges::find(tabs, tab);
         if (!tab.empty() && found == tabs.end()) return "error: usage: trainer open [tune|trickline|practice|map|realistic|fun|everything]";
-        s.open_tab = tab.empty() ? 1 : static_cast<int>(found - tabs.begin());
+        s.open_tab = tab.empty() ? 0 : static_cast<int>(found - tabs.begin());
         ++s.open_serial;
         s.view_due = true;
         return "Opening the trainer.";
