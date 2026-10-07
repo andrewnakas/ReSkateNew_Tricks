@@ -135,6 +135,12 @@ struct State {
         std::uint32_t state{};
     };
     bool flip_trace{};
+    // The pump log (trainer option pumplog 1): each time the skater's speed tops out and falls
+    // away again (the bottom of a transition), that top speed is logged.
+    bool pump_log{};
+    float pump_peak{}, pump_peak_height{};
+    bool pump_rising{};
+    int pump_serial{};
     std::vector<FlipSample> flip_samples;
     int flip_serial{};
     float flip_takeoff_up{};
@@ -1411,6 +1417,24 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     t.speed = horizontal(velocity);
     t.vertical = velocity[1];
     t.top_speed = std::max(t.top_speed, t.speed);
+    // <dev>
+    if (auto &own = state(); own.pump_log) {
+        const float whole = std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]);
+        if (whole < 1000.0f) {
+            if (whole > own.pump_peak) {
+                own.pump_peak = whole;
+                own.pump_peak_height = position[1];
+                own.pump_rising = true;
+            } else if (own.pump_rising && whole < own.pump_peak - 1.0f) {
+                say(logging::Level::info, std::format("Trainer pump #{}: top {:.2f} m/s at height {:.2f} m{}.", ++own.pump_serial, own.pump_peak,
+                                                      own.pump_peak_height, m.airborne ? " (in the air)" : ""));
+                own.pump_rising = false;
+            }
+            // A new swing starts once the speed has fallen well away from the last top.
+            if (!own.pump_rising && whole < own.pump_peak - 1.0f) own.pump_peak = whole;
+        }
+    }
+    // </dev>
     m.velocity = velocity;
     m.position = position;
     m.stamp = stamp;
@@ -2793,6 +2817,12 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         // <dev>
         else if (name == "statelog") s.state_log = on;
         else if (name == "fliptrace") s.flip_trace = on;
+        else if (name == "pumplog") {
+            s.pump_log = on;
+            s.pump_peak = 0;
+            s.pump_rising = false;
+            s.pump_serial = 0;
+        }
         // </dev>
         else if (name == "log") {
             set_logging(on);
