@@ -34,12 +34,6 @@ struct State {
     Clock::time_point at;
     float hx{}, hz{1}; // direction of travel, eased
     std::array<float, 3> last{};
-    // The player's own camera.
-    CustomCamera custom;
-    Clock::time_point custom_at;
-    float custom_hx{}, custom_hz{1};
-    std::array<float, 3> custom_last{}, custom_eye{};
-    bool custom_running{};
 };
 State &state() {
     static auto *value = new State;
@@ -131,68 +125,5 @@ std::array<float, 16> follow_camera(std::uint64_t id, const Transform &root, flo
                                   back[0] * right[1] - back[1] * right[0]};
     fov = p.fov;
     return {right[0], right[1], right[2], 0, up[0], up[1], up[2], 0, back[0], back[1], back[2], 0, eye[0], eye[1], eye[2], 1};
-}
-
-void set_custom_camera(const CustomCamera &camera) noexcept {
-    auto &s = state();
-    std::lock_guard lock(s.mutex);
-    s.custom = camera;
-    if (!camera.on) s.custom_running = false;
-}
-CameraProfile gameplay_camera_profile() noexcept {
-    auto &s = state();
-    std::lock_guard lock(s.mutex);
-    return {s.profile.distance, s.profile.height, s.profile.pitch * 57.2958f, s.profile.fov, s.samples};
-}
-std::optional<std::array<float, 16>> custom_camera(float &fov) noexcept {
-    auto &s = state();
-    std::lock_guard lock(s.mutex);
-    const auto &c = s.custom;
-    if (!c.on) return std::nullopt;
-    const auto now = Clock::now();
-    const auto &pos = c.position;
-    if (!std::isfinite(pos[0]) || !std::isfinite(pos[1]) || !std::isfinite(pos[2])) return std::nullopt;
-    const bool fresh = !s.custom_running || now - s.custom_at > std::chrono::milliseconds(500);
-    if (fresh) {
-        // Start behind the way the skater faces; their travel takes over once they move.
-        s.custom_hx = std::sin(c.heading / 57.2958f);
-        s.custom_hz = std::cos(c.heading / 57.2958f);
-        s.custom_last = pos;
-        s.custom_at = now;
-    }
-    const float dt = std::clamp(seconds(now - s.custom_at), 0.0005f, 0.1f);
-    const float vx = (pos[0] - s.custom_last[0]) / dt, vz = (pos[2] - s.custom_last[2]) / dt;
-    const float speed = std::sqrt(vx * vx + vz * vz);
-    if (speed > 1.0f && speed < 120.0f) {
-        const float turn = 1.0f - std::exp(-dt / 0.25f);
-        float hx = s.custom_hx + (vx / speed - s.custom_hx) * turn, hz = s.custom_hz + (vz / speed - s.custom_hz) * turn;
-        const float length = std::sqrt(hx * hx + hz * hz);
-        if (length > .01f) { s.custom_hx = hx / length; s.custom_hz = hz / length; }
-    }
-    s.custom_last = pos;
-    s.custom_at = now;
-    const float hx = s.custom_hx, hz = s.custom_hz;
-    const float distance = std::clamp(c.distance, 0.0f, 10000.0f), height = std::clamp(c.height, -10000.0f, 10000.0f);
-    const float side = std::clamp(c.side, -10000.0f, 10000.0f), pitch = std::clamp(c.pitch, -89.0f, 89.0f) / 57.2958f;
-    // Right of the direction of travel, on the ground plane.
-    const std::array<float, 3> target{pos[0] - hx * distance - hz * side, pos[1] + height, pos[2] - hz * distance + hx * side};
-    // The camera trails its place by `lag`; a teleport (or the first frame) snaps.
-    const float gap = std::abs(target[0] - s.custom_eye[0]) + std::abs(target[1] - s.custom_eye[1]) + std::abs(target[2] - s.custom_eye[2]);
-    if (fresh || c.lag < 0.005f || gap > 25.0f + distance) s.custom_eye = target;
-    else {
-        const float k = 1.0f - std::exp(-dt / std::min(c.lag, 60.0f));
-        for (std::size_t i = 0; i < 3; ++i) s.custom_eye[i] += (target[i] - s.custom_eye[i]) * k;
-    }
-    s.custom_running = true;
-    const auto &eye = s.custom_eye;
-    const float cp = std::cos(pitch), sp = std::sin(pitch);
-    const std::array<float, 3> back{-hx * cp, -sp, -hz * cp};
-    std::array<float, 3> right{back[2], 0, -back[0]};
-    const float flat = std::sqrt(right[0] * right[0] + right[2] * right[2]);
-    if (flat > .001f) { right[0] /= flat; right[2] /= flat; } else right = {1, 0, 0};
-    const std::array<float, 3> up{back[1] * right[2] - back[2] * right[1], back[2] * right[0] - back[0] * right[2],
-                                  back[0] * right[1] - back[1] * right[0]};
-    fov = c.fov >= 1.0f && c.fov <= 179.0f ? c.fov : s.profile.fov;
-    return std::array<float, 16>{right[0], right[1], right[2], 0, up[0], up[1], up[2], 0, back[0], back[1], back[2], 0, eye[0], eye[1], eye[2], 1};
 }
 } // namespace dingosdk::multiplayer
