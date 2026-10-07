@@ -4,7 +4,6 @@
 // The game thread owns the trainer's state (trainer.cpp). Every change is a `trainer ...`
 // console command, so the menu page (presentation thread) only queues commands and reads
 // the two snapshots below; nothing here touches the game from the UI.
-#include "trainer_camera.h"
 #include "trainer_gamestate.h"
 #include "Extension/Skater/client_source_spawn.h"
 #include <array>
@@ -58,11 +57,6 @@ struct Spot {
 inline constexpr std::size_t marker_slots = 5;
 
 // Changes rarely: rebuilt when a command or a level load changes something.
-// The Camera tab: one framing on the board and one on foot (Extension/Multiplayer/Hud/follow_camera.h).
-struct CameraSet {
-    float distance{3.4f}, height{1.5f}, pitch{-9.0f}, side{}, fov{}, lag{0.08f};
-    bool operator==(const CameraSet &) const = default;
-};
 struct View {
     std::uint64_t revision{};
     bool ready{};        // the game's tuning is read and the running game's copy was found
@@ -107,11 +101,6 @@ struct View {
     std::string map, map_note, map_preset, profile_preset;
     std::vector<Spot> spots;
     // `trainer open <tab>`: each new serial opens the menu on the trainer page at that tab.
-    bool camera_on{};
-    CameraSet camera_board, camera_foot{1.9f, 1.6f, -8.0f, 0.4f, 0.0f, 0.06f};
-    std::string camera_game; // how the game itself frames the skater, measured
-    std::array<RigSetting, camera_rigs> rigs{}; // the game's own cameras, moved
-    std::string rigs_found;                     // what of their data was found
     std::uint64_t open_serial{};
     std::string share_text; // `preset export`: the line to put on the clipboard
     std::uint64_t share_serial{};

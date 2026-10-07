@@ -4,7 +4,6 @@
 #include "trainer_jump.h"
 #include "trainer_presets.h"
 #include "trainer_session.h"
-#include "Extension/Multiplayer/Hud/follow_camera.h"
 // <dev>
 #include "trainer_probe.h"
 // </dev>
@@ -231,9 +230,6 @@ struct State {
     int slot{};
     bool auto_return{}, pad_shortcuts{}, hud{}, hud_jump{}, logging{};
     bool pad_menu{true}; // LB + RB + R3 opens and closes the menu
-    std::array<RigSetting, camera_rigs> rigs{};
-    bool camera_on{};
-    CameraSet camera_board, camera_foot{1.9f, 1.6f, -8.0f, 0.4f, 0.0f, 0.06f};
     // The hippy jump's height is set by the game's trick scripts, not by tuning: the trainer
     // scales the upward velocity when it sees one start.
     float hippy_height{1};
@@ -377,50 +373,6 @@ std::optional<Vec3> read_position(const Json &value) {
     }
     return result;
 }
-// ---- the player's own camera -------------------------------------------------------------------
-struct CameraPreset {
-    std::string_view name, note;
-    bool foot; // it is a framing for walking, not skating
-    CameraSet set;
-};
-constexpr CameraPreset camera_presets[]{
-    {"Low", "Close to the ground behind the board, looking slightly up: the Skate 1 feel.", false, {2.6f, 0.45f, 4.0f, 0.0f, 78.0f, 0.06f}},
-    {"Low plus", "The low camera raised a little, so more of the skater shows.", false, {2.8f, 0.8f, 0.0f, 0.0f, 72.0f, 0.06f}},
-    {"Skate 3", "Close chase camera with a wide lens.", false, {2.3f, 0.9f, -2.0f, 0.0f, 80.0f, 0.1f}},
-    {"High", "Further back and above, for lines and big gaps.", false, {4.8f, 2.6f, -18.0f, 0.0f, 62.0f, 0.1f}},
-    {"Shoulder", "On foot: over the right shoulder.", true, {1.7f, 1.55f, -6.0f, 0.45f, 62.0f, 0.05f}},
-    {"Shoulder left", "On foot: over the left shoulder.", true, {1.7f, 1.55f, -6.0f, -0.45f, 62.0f, 0.05f}},
-};
-float *camera_field(CameraSet &set, std::string_view name) {
-    return name == "distance" ? &set.distance : name == "height" ? &set.height : name == "pitch" ? &set.pitch
-         : name == "side" ? &set.side : name == "fov" ? &set.fov : name == "lag" ? &set.lag : nullptr;
-}
-CameraSet sane_camera(CameraSet set) {
-    const auto finite = [](float value, float low, float high, float otherwise) { return std::isfinite(value) ? std::clamp(value, low, high) : otherwise; };
-    set.distance = finite(set.distance, 0.0f, 10000.0f, 3.4f);
-    set.height = finite(set.height, -10000.0f, 10000.0f, 1.5f);
-    set.pitch = finite(set.pitch, -89.0f, 89.0f, -9.0f);
-    set.side = finite(set.side, -10000.0f, 10000.0f, 0.0f);
-    set.fov = set.fov < 1.0f ? 0.0f : finite(set.fov, 1.0f, 179.0f, 0.0f);
-    set.lag = finite(set.lag, 0.0f, 60.0f, 0.08f);
-    return set;
-}
-Json write_camera(const CameraSet &set) {
-    Json row = Json::object();
-    row["distance"] = set.distance;
-    row["height"] = set.height;
-    row["pitch"] = set.pitch;
-    row["side"] = set.side;
-    row["fov"] = set.fov;
-    row["lag"] = set.lag;
-    return row;
-}
-CameraSet read_camera(const Json &row, CameraSet set) {
-    if (!row.is_object()) return set;
-    for (const auto name : {"distance", "height", "pitch", "side", "fov", "lag"})
-        if (row.contains(name) && row.at(name).is_number()) *camera_field(set, name) = row.at(name).get<float>();
-    return sane_camera(set);
-}
 Json write_position(const Vec3 &p) { return Json::array({Json(p[0]), Json(p[1]), Json(p[2])}); }
 
 struct RevertField {
@@ -443,7 +395,6 @@ RevertTuning sane_revert(RevertTuning tuning) {
     }
     return tuning;
 }
-RigSetting sane_rig(RigSetting rig);
 void load_store() {
     auto &s = state();
     s.loaded = true;
@@ -484,7 +435,8 @@ void load_store() {
             }
         if (json->contains("active") && json->at("active").is_array())
             for (const auto &name : json->at("active"))
-                if (name.is_string()) s.active.push_back(name.string());
+                // (Fast Parkour Flips was a preset of earlier versions that changed nothing.)
+                if (name.is_string() && name.string() != "Fast Parkour Flips") s.active.push_back(name.string());
         if (json->contains("revert") && json->at("revert").is_object()) {
             for (const auto &field : revert_fields)
                 if (const auto name = std::string(field.name); json->at("revert").contains(name) && json->at("revert").at(name).is_number())
@@ -493,25 +445,6 @@ void load_store() {
             // 180s: a file from before the rules were numbered that still holds it gets today's (off).
             if (!json->at("revert").contains("rules") && s.revert.min_slip == 12.0f) s.revert.min_slip = RevertTuning{}.min_slip;
             s.revert = sane_revert(s.revert);
-        }
-        if (json->contains("camera") && json->at("camera").is_object()) {
-            const auto &camera = json->at("camera");
-            s.camera_on = camera.value("on", false);
-            if (camera.contains("board")) s.camera_board = read_camera(camera.at("board"), s.camera_board);
-            if (camera.contains("foot")) s.camera_foot = read_camera(camera.at("foot"), s.camera_foot);
-            if (camera.contains("rigs") && camera.at("rigs").is_object())
-                for (std::size_t i = 0; i < camera_rigs; ++i) {
-                    const auto *name = i == 0 ? "low" : i == 1 ? "high" : "foot";
-                    if (!camera.at("rigs").contains(name) || !camera.at("rigs").at(name).is_object()) continue;
-                    const auto &row = camera.at("rigs").at(name);
-                    RigSetting rig;
-                    rig.distance = row.value("distance", 1.0f);
-                    rig.height = row.value("height", 0.0f);
-                    rig.raise = row.value("raise", 0.0f);
-                    rig.side = row.value("side", 1.0f);
-                    const auto finite = [](float value, float low, float high, float otherwise) { return std::isfinite(value) ? std::clamp(value, low, high) : otherwise; };
-                    s.rigs[i] = sane_rig(rig);
-                }
         }
         if (json->contains("maps") && json->at("maps").is_object())
             for (const auto &[level, row] : json->at("maps").items()) {
@@ -586,21 +519,6 @@ void save_store() {
         for (const auto &field : revert_fields) revert[std::string(field.name)] = s.revert.*field.member;
         revert["rules"] = 2;
         json["revert"] = std::move(revert);
-        Json camera = Json::object();
-        camera["on"] = s.camera_on;
-        camera["board"] = write_camera(s.camera_board);
-        camera["foot"] = write_camera(s.camera_foot);
-        Json rigs = Json::object();
-        for (std::size_t i = 0; i < camera_rigs; ++i) {
-            Json row = Json::object();
-            row["distance"] = s.rigs[i].distance;
-            row["height"] = s.rigs[i].height;
-            row["raise"] = s.rigs[i].raise;
-            row["side"] = s.rigs[i].side;
-            rigs[i == 0 ? "low" : i == 1 ? "high" : "foot"] = std::move(row);
-        }
-        camera["rigs"] = std::move(rigs);
-        json["camera"] = std::move(camera);
         const auto directory = data_directory();
         if (directory.empty()) return;
         std::error_code error;
@@ -890,7 +808,6 @@ void adopt(const tuning::Values &live) {
     changed(false);
 }
 std::string apply_preset(std::string_view name);
-void drive_camera(bool playing);
 bool editable(std::string *why = nullptr) {
     // A guest's physics are the host's while the session enforces them: the tuning
     // (physics_tuning::enforce), and what the host shares beyond it (sync_session). Writing
@@ -1279,7 +1196,6 @@ MapFile read_map_file(const std::string &level) {
 }
 void enter_map(const std::string &level) {
     auto &s = state();
-    forget_camera_rigs();
     s.map = level;
     s.map_file = level.empty() ? MapFile{} : read_map_file(level);
     s.motion = {};
@@ -2318,15 +2234,8 @@ void build_view() {
     next->map_note = s.map_file.note;
     next->map_preset = s.map_file.preset.empty() ? std::string{} : s.map_file.preset_name.empty() ? "Map preset" : s.map_file.preset_name;
     next->spots = s.map_file.spots;
-    next->rigs = s.rigs;
-    next->rigs_found = camera_rigs_summary();
-    next->camera_on = s.camera_on;
-    next->camera_board = s.camera_board;
-    next->camera_foot = s.camera_foot;
-    if (const auto profile = multiplayer::gameplay_camera_profile(); profile.samples >= 60)
-        next->camera_game = std::format("{:.1f} m behind, {:.1f} m up, tilt {:.0f} degrees, FOV {:.0f}", profile.distance, profile.height, profile.pitch, profile.fov);
     next->open_serial = s.open_serial;
-    next->stock = s.revert == RevertTuning{} && !s.camera_on && s.rigs == std::array<RigSetting, camera_rigs>{} && !next->touched && s.active.empty() && std::ranges::none_of(s.entries, &Entry::frozen) &&
+    next->stock = s.revert == RevertTuning{} && !next->touched && s.active.empty() && std::ranges::none_of(s.entries, &Entry::frozen) &&
                   std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); }) && !s.catch_at && !s.flip_advanced;
     next->share_text = s.share_text;
     next->share_serial = s.share_serial;
@@ -2492,7 +2401,6 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         s.base = base;
         sync_session();
         s.boosts = boosts_in_force();
-        drive_camera(playing);
         // <dev>
         s.client = client;
         // </dev>
@@ -2640,36 +2548,6 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
 }
 
 namespace {
-// Every tick: the framing for what the skater is doing, or none.
-void drive_camera(bool playing) {
-    auto &s = state();
-    multiplayer::CustomCamera camera;
-    const auto &set = s.telemetry.physics_state == addr::no_bail::offboard_physics_state ? s.camera_foot : s.camera_board;
-    camera.on = s.camera_on && playing && s.telemetry.skater;
-    camera.position = s.telemetry.position;
-    camera.heading = s.telemetry.heading;
-    camera.distance = set.distance;
-    camera.height = set.height;
-    camera.pitch = set.pitch;
-    camera.side = set.side;
-    camera.fov = set.fov;
-    camera.lag = set.lag;
-    multiplayer::set_custom_camera(camera);
-    want_camera_rigs(s.rigs);
-    if (playing && s.telemetry.skater) (void)apply_camera_rigs(GetTickCount64());
-}
-constexpr std::string_view rig_names[]{"low", "high", "foot"};
-float *rig_field(RigSetting &rig, std::string_view name) {
-    return name == "distance" ? &rig.distance : name == "height" ? &rig.height : name == "raise" ? &rig.raise : name == "side" ? &rig.side : nullptr;
-}
-RigSetting sane_rig(RigSetting rig) {
-    const auto finite = [](float value, float low, float high, float otherwise) { return std::isfinite(value) ? std::clamp(value, low, high) : otherwise; };
-    rig.distance = finite(rig.distance, -1000.0f, 1000.0f, 1.0f);
-    rig.height = finite(rig.height, -1000.0f, 1000.0f, 0.0f);
-    rig.raise = finite(rig.raise, -1000.0f, 1000.0f, 0.0f);
-    rig.side = finite(rig.side, -1000.0f, 1000.0f, 1.0f);
-    return rig;
-}
 // ---- tricklining -------------------------------------------------------------------------------
 // trainer revert <field> <number> | reset: what counts as a revert and what it is worth.
 std::string revert_command(const std::vector<std::string> &a) {
@@ -2727,81 +2605,6 @@ std::string trickline_command(const std::vector<std::string> &a) {
     changed();
     return on ? "Tricklining extras on: the board bending boost, heavier revert and powerslide friction." : "Tricklining extras off.";
 }
-// The game's own cameras: `trainer camera rig low|high|foot <field> <number>`, or a preset for all three.
-std::string rig_command(const std::vector<std::string> &a) {
-    auto &s = state();
-    const auto arg = [&](std::size_t i) { return i < a.size() ? lower(a[i]) : std::string{}; };
-    if (arg(1) == "stock") {
-        s.rigs = {};
-        changed();
-        return "The game's cameras are where the game puts them.";
-    }
-    if (arg(1) == "sunjay") {
-        // SunJay's Low Cam (thunderstore.io/c/reskate/p/SunJayTeam/SunJays_Low_Cam): both on-board
-        // cameras 1.2 m back, 0.4 m lower, turning about a point 0.4 m lower.
-        s.rigs[0] = {1.2f / 1.9f, -0.4f, -0.4f, 1.0f / 1.35f};
-        s.rigs[1] = {1.2f / 3.0f, -0.4f, -0.4f, 1.0f};
-        changed();
-        return "Both on-board cameras set like SunJay's Low Cam.";
-    }
-    if (arg(1) == "low+") {
-        s.rigs[0] = {0.8f, -0.25f, -0.15f, 0.85f};
-        changed();
-        return "Low camera: lower and closer, with more of the skater in view.";
-    }
-    const auto found = std::ranges::find(rig_names, arg(1));
-    auto *field = found != std::end(rig_names) ? rig_field(s.rigs[static_cast<std::size_t>(found - std::begin(rig_names))], arg(2)) : nullptr;
-    const auto value = number(arg(3));
-    if (!field || !value) return "error: usage: trainer camera rig low|high|foot distance|height|raise|side <number>, or camera rig stock|sunjay|low+";
-    *field = static_cast<float>(*value);
-    auto &rig = s.rigs[static_cast<std::size_t>(found - std::begin(rig_names))];
-    rig = sane_rig(rig);
-    changed();
-    return std::format("Camera {} {} = {:.3g}. {}", arg(1), arg(2), *field, camera_rigs_summary());
-}
-// trainer camera on|off | game | preset <name> | set board|foot <field> <number>
-std::string camera_command(const std::vector<std::string> &a) {
-    auto &s = state();
-    const auto arg = [&](std::size_t i) { return i < a.size() ? lower(a[i]) : std::string{}; };
-    const auto action = arg(0);
-    if (action == "rig") return rig_command(a);
-    bool on{};
-    if (flag(action, on)) {
-        s.camera_on = on;
-        changed();
-        return on ? "Your camera is on. It does not avoid walls; switch it off to get the game's back." : "The game's own camera is back.";
-    }
-    if (action == "game") {
-        const auto profile = multiplayer::gameplay_camera_profile();
-        if (profile.samples < 60) return "error: skate for a few seconds with the game's own camera first, so it can be measured.";
-        s.camera_board = sane_camera({profile.distance, profile.height, profile.pitch, 0.0f, 0.0f, 0.1f});
-        changed();
-        return std::format("On board: the game's framing, {:.1f} m behind, {:.1f} m up, tilt {:.0f} degrees.", profile.distance, profile.height, profile.pitch);
-    }
-    if (action == "preset") {
-        std::string name;
-        for (std::size_t i = 1; i < a.size(); ++i) name += (i > 1 ? " " : "") + lower(a[i]);
-        for (const auto &preset : camera_presets)
-            if (lower(preset.name) == name) {
-                (preset.foot ? s.camera_foot : s.camera_board) = preset.set;
-                s.camera_on = true;
-                changed();
-                return std::format("Camera: {} ({}).", preset.name, preset.foot ? "on foot" : "on board");
-            }
-        return "error: no camera preset is called \"" + name + "\".";
-    }
-    if (action == "set") {
-        auto *set = arg(1) == "board" ? &s.camera_board : arg(1) == "foot" ? &s.camera_foot : nullptr;
-        auto *field = set ? camera_field(*set, arg(2)) : nullptr;
-        const auto value = number(arg(3));
-        if (!field || !value) return "error: usage: trainer camera set board|foot distance|height|pitch|side|fov|lag <number>";
-        *field = static_cast<float>(*value);
-        *set = sane_camera(*set);
-        changed();
-        return std::format("Camera {} {} = {:.3g}", arg(1), arg(2), *field);
-    }
-    return "error: usage: trainer camera on|off | game | preset <name> | set board|foot <field> <number>";
-}
 std::string run(std::string_view verb, const std::vector<std::string> &a) {
     auto &s = state();
     const auto v = lower(verb);
@@ -2851,8 +2654,6 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             }
             s.saved.clear();
             s.active.clear();
-            s.camera_on = false;
-            s.rigs = {};
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = 1.0f;
             s.catch_at = false;
             s.flip_advanced = false;
@@ -2943,7 +2744,6 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         }
         return "error: usage: trainer preset apply|save|delete <name>";
     }
-    if (v == "camera") return camera_command(a);
     if (v == "revert") return revert_command(a);
     if (v == "trickline") return trickline_command(a);
     if (v == "feel") return feel_command(a);
@@ -3071,7 +2871,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         // The last three are the Tune tab on one of its lists.
         const std::array<std::string_view, 9> tabs{"tune", "presets", "practice", "map", "realistic", "fun", "everything", "camera", "trickline"};
         const auto found = std::ranges::find(tabs, tab);
-        if (!tab.empty() && found == tabs.end()) return "error: usage: trainer open [tune|trickline|practice|camera|map|realistic|fun|everything]";
+        if (!tab.empty() && found == tabs.end()) return "error: usage: trainer open [tune|trickline|practice|map|realistic|fun|everything]";
         s.open_tab = tab.empty() ? 1 : static_cast<int>(found - tabs.begin());
         ++s.open_serial;
         s.view_due = true;
