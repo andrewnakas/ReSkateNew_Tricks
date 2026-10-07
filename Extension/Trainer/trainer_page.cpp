@@ -31,7 +31,7 @@ struct Page {
     std::array<char, 49> preset_name{};
     std::array<float, 3> teleport{};
     double speed_edit{-1}, speed_until{};
-    float hippy_edit{1}, nocomply_edit{1}, boneless_edit{1}, offboard_edit{1}, flip_edit{1};
+    float hippy_edit{1}, nocomply_edit{1}, boneless_edit{1}, offboard_edit{1}, flip_edit{1}, pump_edit{1};
     std::array<float, trainer::flip_tricks.size()> trick_edit{}; // the speed of each flip trick
     std::array<bool, trainer::flip_tricks.size()> trick_editing{};
     float revert_edit{};
@@ -39,7 +39,7 @@ struct Page {
     // The Tricklining list: rows of the value table per group, for one snapshot.
     std::array<std::vector<std::size_t>, 5> trick_rows;
     std::uint64_t trick_revision{~0ull};
-    bool hippy_editing{}, nocomply_editing{}, boneless_editing{}, offboard_editing{}, flip_editing{};
+    bool hippy_editing{}, nocomply_editing{}, boneless_editing{}, offboard_editing{}, flip_editing{}, pump_editing{};
     std::uint64_t open_serial{}; // the last `trainer open` acted on
     std::uint64_t share_serial{}; // the last `preset export` put on the clipboard
     bool share_seen{};
@@ -443,7 +443,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
 
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words) {
     static constexpr const char *advanced_label = "Advanced trick speed (a speed for each flip trick: kickflip, heelflip, 360 flip, varial, shuvit, hardflip, laser flip, impossible)";
-    static constexpr const char *labels[]{"Flip trick speed", advanced_label, "Let slow flips stay slow (no finish before landing)", "Catch flips at a set point of the jump (realism, percent of air time)", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
+    static constexpr const char *labels[]{"Flip trick speed", advanced_label, "Pump power (pumping transitions)", "Catch flips at a set point of the jump (realism, percent of air time)", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
                                            "Board bending boost (revert speed)"};
     const auto wanted = [&](const char *label) { return words.empty() || contains_words(lower(std::string(label) + " tricks"), words); };
     if (std::ranges::none_of(labels, wanted)) return;
@@ -523,6 +523,13 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
     slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing, "How high a boneless pops. 1 is the game's own.");
     slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing, "How high you jump off the board in a hippy jump. 1 is the game's own.");
     slider("Off-board jump height", "offboard_height", view.offboard_height, p.offboard_edit, p.offboard_editing, "How high you jump on foot. 1 is the game's own.");
+    if (slider("Pump power (pumping transitions)", "pump_power", view.pump_power, p.pump_edit, p.pump_editing,
+               "How much speed pumping a transition gives: 2 doubles what each pump gains, 0.5 halves it, 0 takes the pump's gain away. 1 is the "
+               "game's own. The game still decides when you are pumping; this only sizes what it gives. It is found in the game about 15 "
+               "seconds after a level loads.")) {
+        if (view.pump_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here.");
+        else if (view.pump_power != 1.0f && !view.pump_live) ImGui::TextDisabled("Finding the game's pumping in memory: it acts about 15 seconds after a level loads.");
+    }
     if (wanted("Board bending boost (revert speed)")) {
         // Not a multiplier: 0 is the game's own (no boost).
         field(menu, "Board bending boost");
@@ -553,7 +560,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
     }
     if (ImGui::Button("Reset tricks")) {
         p.revert_editing = false;
-        p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = false;
+        p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = false;
         p.trick_editing = {};
         trainer_command(menu, callbacks, "reset tricks");
     }
@@ -924,7 +931,7 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     // A guest under the host's physics would only wipe a setup they cannot see at work here.
     ImGui::BeginDisabled(!callbacks.queue_console_command || view->session_enforced);
     if (ImGui::Button("RESET EVERYTHING")) {
-        p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.revert_editing = false;
+        p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = p.revert_editing = false;
         p.trick_editing = {};
         trainer_command(menu, callbacks, "reset everything");
     }

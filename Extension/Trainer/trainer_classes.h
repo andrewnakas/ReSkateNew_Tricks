@@ -66,6 +66,8 @@ std::size_t flip_curves() noexcept;
 // flip_gate_stock; flip_gate_off never hurries a flip; anything else moves the catch.
 inline constexpr float flip_gate_stock = 1.0f / 6.0f, flip_gate_off = -1000.0f;
 void want_flip_gate(float seconds) noexcept;
+// Something else needs the game states the search finds (the pump power): a reason to search.
+void states_in_use(bool used) noexcept;
 std::size_t flip_gates() noexcept;
 // <dev>
 void dev_set_flip_curve_mask(std::uint32_t mask) noexcept;

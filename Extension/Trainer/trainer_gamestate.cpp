@@ -51,7 +51,12 @@ StateObject flip_speed_object{{0xb0, 0x7b, 0x6c, 0x08, 0x42, 0xe7, 0xef, 0xc7, 0
                               "Animation/Dingo/Float.Anim.TrickFlipSpeed"};
 StateObject flip_trick_object{{0x17, 0x54, 0x40, 0x3c, 0xa7, 0x06, 0x61, 0x3d, 0x3c, 0x40, 0x54, 0x17, 0x06, 0xa7, 0x3d, 0x61},
                               "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick"};
-StateObject *const objects[]{&flip_speed_object, &flip_trick_object};
+StateObject pumping_object{{0xab, 0x5b, 0xd5, 0x21, 0x9f, 0xa4, 0xb0, 0xfb, 0x21, 0xd5, 0x5b, 0xab, 0xa4, 0x9f, 0xfb, 0xb0}, "Animation/Dingo/Bool.Intent.Pumping"};
+StateObject pump_strength_object{{0x54, 0xc6, 0x59, 0x6a, 0xbb, 0xad, 0xfc, 0x05, 0x6a, 0x59, 0xc6, 0x54, 0xad, 0xbb, 0x05, 0xfc},
+                                 "Animation/Dingo/Float.Intent.UserTriggeredPumpStrength"};
+StateObject pump_assist_object{{0xcb, 0xdf, 0x5b, 0x53, 0x14, 0x53, 0xc8, 0x29, 0x53, 0x5b, 0xdf, 0xcb, 0x53, 0x14, 0x29, 0xc8},
+                               "Animation/Dingo/Float.Anim.PumpingAssistAmount"};
+StateObject *const objects[]{&flip_speed_object, &flip_trick_object, &pumping_object, &pump_strength_object, &pump_assist_object};
 
 // The object behind an asset id seen at `id_at`, when it is that state's (its name says so).
 bool is_object(const StateObject &object, std::uintptr_t id_at) noexcept {
@@ -59,7 +64,7 @@ bool is_object(const StateObject &object, std::uintptr_t id_at) noexcept {
         if (std::memcmp(reinterpret_cast<const void *>(id_at), object.id, sizeof(object.id)) != 0) return false;
         const auto name = *reinterpret_cast<const std::uintptr_t *>(id_at + object_after_id + object_name);
         if (name <= id_at || name > id_at + 0x400) return false;
-        return std::memcmp(reinterpret_cast<const void *>(name), object.name.data(), object.name.size()) == 0 &&
+        return _strnicmp(reinterpret_cast<const char *>(name), object.name.data(), object.name.size()) == 0 &&
                *reinterpret_cast<const char *>(name + object.name.size()) == 0;
     } __except (1) { return false; }
 }
@@ -150,6 +155,21 @@ FlipState read_flip_state(std::uintptr_t base, std::uintptr_t entity) noexcept {
     // Anything else there means this is not the layout this was written for.
     if (state.trick >= trick_count || !std::isfinite(state.speed) || state.speed < 0 || state.speed > 1000) return {};
     state.speed_at = speed_at;
+    return state;
+}
+PumpState read_pump_state(std::uintptr_t base, std::uintptr_t entity) noexcept {
+    PumpState state;
+    if (!pumping_object.at.load(std::memory_order_relaxed) && !pump_strength_object.at.load(std::memory_order_relaxed)) return state;
+    const auto block = states_block(base, entity);
+    if (!block) return state;
+    std::uint8_t flag{};
+    float number{};
+    if (const auto at = value_address(pumping_object, block); at && peek(at, flag)) {
+        state.found = true;
+        state.pumping = flag != 0;
+    }
+    if (const auto at = value_address(pump_strength_object, block); at && peek(at, number) && std::isfinite(number)) state.strength = number;
+    if (const auto at = value_address(pump_assist_object, block); at && peek(at, number) && std::isfinite(number)) state.assist = number;
     return state;
 }
 std::array<std::uintptr_t, 6> state_pages(std::uintptr_t base, std::uintptr_t entity) noexcept {

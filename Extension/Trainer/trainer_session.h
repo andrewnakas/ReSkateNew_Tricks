@@ -15,6 +15,7 @@ namespace dingosdk::trainer {
 inline constexpr float height_low = 0.001f, height_high = 1.0e6f; // heights; the sliders stop far short, a typed number need not
 inline constexpr float catch_low = 1.0f, catch_high = 100.0f;    // where in a jump a flip is caught, percent of the air time
 inline constexpr float flip_low = 0.01f, flip_high = 100.0f;     // board flip speed; the slider stops far short, a typed number need not
+inline constexpr float pump_high = 1000.0f;                         // pump power; 1 is the game's own
 inline constexpr float revert_boost_high = 1000.0f;                 // revert boost strength; 0 is off
 inline constexpr float cruise_high = 100.0f;                     // auto push, m/s
 

@@ -84,6 +84,9 @@ struct View {
     // The same for the no comply and the boneless.
     float nocomply_height{1}, boneless_height{1};
     float revert_boost{}; // strength of the speed given back on an auto revert; 0: off
+    float pump_power{1};  // x what pumping a transition gains
+    bool pump_live{};     // the game's pumping states are found: the pump power acts
+    bool pump_blocked{};  // set, but this session's rules keep the game's own pumping
     RevertTuning revert;  // what counts as a revert and what it is worth
     float offboard_height{1}; // a jump on foot
     float flip_speed{1};      // board flip tricks: x of the game's own speed

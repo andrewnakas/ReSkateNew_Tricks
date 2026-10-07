@@ -260,6 +260,13 @@ struct State {
     // The no comply and the boneless are launched by the trick scripts too (trainer_jump.cpp).
     float nocomply_height{1}, boneless_height{1};
     float revert_boost{};            // 0: off
+    float pump_power{1};             // x what pumping a transition gains
+    bool pump_live{};                // the game's pumping states are found
+    // <dev>
+    std::uint32_t pump_seen{};       // pump log: the pumps told so far
+    bool pump_was{};
+    float pump_strength{}, pump_gained{}, pump_given{}, pump_speed{};
+    // </dev>
     RevertTuning revert;
     std::uint64_t revert_boosts_seen{};
     std::uint32_t last_state{};
@@ -420,6 +427,7 @@ void load_store() {
             s.catch_percent = std::clamp(o.value("catch_percent", 70.0f), catch_low, catch_high);
             s.boneless_height = std::clamp(o.value("boneless_height", 1.0f), height_low, height_high);
             s.revert_boost = std::clamp(o.value("revert_boost", 0.0f), 0.0f, revert_boost_high);
+            s.pump_power = std::clamp(o.value("pump_power", 1.0f), 0.0f, pump_high);
             s.slot = std::clamp(o.value("slot", 0), 0, static_cast<int>(marker_slots) - 1);
         }
         if (json->contains("values") && json->at("values").is_object())
@@ -483,6 +491,7 @@ void save_store() {
         options["catch_percent"] = s.catch_percent;
         options["boneless_height"] = s.boneless_height;
         options["revert_boost"] = s.revert_boost;
+        options["pump_power"] = s.pump_power;
         options["slot"] = s.slot;
         json["options"] = std::move(options);
         Json values = Json::object();
@@ -1008,7 +1017,7 @@ std::string apply_dial(std::string_view name, double factor) {
 }
 // A preset of the player's own also carries the trick sliders that are off 1, under these keys.
 constexpr std::string_view trick_prefix = "trick.";
-constexpr std::string_view trick_sliders[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height", "revert_boost"};
+constexpr std::string_view trick_sliders[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height", "revert_boost", "pump_power"};
 // Those and the speed of each flip trick.
 constexpr auto trick_names = [] {
     std::array<std::string_view, std::size(trick_sliders) + flip_tricks.size()> names{};
@@ -1029,7 +1038,7 @@ float *trick_option(std::string_view name) {
         if (name == flip_tricks[i].key) return &s.flip_trick[i];
     return name == "flip_speed" ? &s.flip_speed : name == "hippy_height" ? &s.hippy_height : name == "nocomply_height" ? &s.nocomply_height
          : name == "boneless_height" ? &s.boneless_height : name == "offboard_height" ? &s.offboard_height
-         : name == "revert_boost" ? &s.revert_boost : nullptr;
+         : name == "revert_boost" ? &s.revert_boost : name == "pump_power" ? &s.pump_power : nullptr;
 }
 // Sets a trick slider named by a preset key; false when the key is not one.
 bool set_trick_key(std::string_view key, double value) {
@@ -1042,6 +1051,7 @@ bool set_trick_key(std::string_view key, double value) {
     if (auto *option = trick_option(name))
         *option = name == "flip_speed" || name.starts_with("flip.") ? std::clamp(static_cast<float>(value), flip_low, flip_high)
                 : name == "revert_boost" ? std::clamp(static_cast<float>(value), 0.0f, revert_boost_high)
+                : name == "pump_power" ? std::clamp(static_cast<float>(value), 0.0f, pump_high)
                 : std::clamp(static_cast<float>(value), height_low, height_high);
     return true;
 }
@@ -2223,6 +2233,9 @@ void build_view() {
     next->catch_percent = s.catch_percent;
     next->boneless_height = s.boneless_height;
     next->revert_boost = s.revert_boost;
+    next->pump_power = s.pump_power;
+    next->pump_live = s.pump_live;
+    next->pump_blocked = s.pump_power != 1.0f && extras_blocked();
     next->revert = s.revert;
     next->return_delay = s.return_delay;
     next->pad_shortcuts = s.pad_shortcuts;
@@ -2502,6 +2515,48 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         const float push_factor = top_speed && top_speed->touched && top_speed->stock > 0 && !extras_blocked()
                                       ? std::max(1.0f, static_cast<float>(top_speed->value / top_speed->stock)) : 1.0f;
         set_push_speed(client, s.entity, push_factor, top_speed ? static_cast<float>(top_speed->stock) : 0.0f, s.boosts.cruise);
+        // Pumping: the game says when (its pumping state), the trainer sizes the gain on the physics
+        // step (trainer_pump_power). The player's own setting only, like the push speed.
+        {
+            const auto pump = read_pump_state(base, static_cast<std::uintptr_t>(s.entity));
+            if (pump.found != s.pump_live) {
+                s.pump_live = pump.found;
+                s.view_due = true;
+            }
+            bool measure = false;
+            // <dev>
+            measure = s.pump_log;
+            // </dev>
+            states_in_use(s.pump_power != 1.0f || measure);
+            set_pump_power(client, s.entity, extras_blocked() ? 1.0f : s.pump_power, pump.found && pump.pumping, measure);
+            // <dev>
+            if (s.pump_log) {
+                // One line a pump, when it ends: what the game's pump gained and what the trainer added.
+                const auto report = pump_power_report();
+                const bool on = pump.found && pump.pumping;
+                if (on) {
+                    s.pump_strength = std::max(s.pump_was ? s.pump_strength : 0.0f, pump.strength);
+                    s.pump_gained = report.gained;
+                    s.pump_given = report.given;
+                    s.pump_speed = report.speed;
+                } else if (s.pump_was) {
+                    const float speed = std::max(s.pump_speed, 1.0f);
+                    say(logging::Level::info, std::format("Trainer pumped #{}: the game's pump gained {:+.2f} J/kg ({:+.2f} m/s at {:.1f} m/s), the trainer added {:+.2f} J/kg "
+                                                          "({:+.2f} m/s); strength {:.2f}, assist {:.2f}, power x{:.2f}.",
+                                                          report.pumps, s.pump_gained, s.pump_gained / speed, speed, s.pump_given, s.pump_given / speed, s.pump_strength,
+                                                          pump.assist, s.pump_power));
+                }
+                s.pump_was = on;
+                if (!pump.found && report.pumps == s.pump_seen) {
+                    static std::uint64_t told{};
+                    if (now >= told) {
+                        told = now + 10000;
+                        say(logging::Level::info, "Trainer pump log: the game's pumping states are not found yet (they come with the memory search).");
+                    }
+                }
+            }
+            // </dev>
+        }
         // The revert boost adds speed, so it keeps to the session's rule for boosts and to a host's physics.
         set_revert_boost(client, s.entity, s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 0.0f : s.revert_boost, s.revert);
         if (const auto report = revert_boost_report(); report.sequence != s.revert_boosts_seen) {
@@ -2625,7 +2680,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
                           : std::format("{} values put back.", count);
         }
         if (v == "reset" && lower(arg(0)) == "tricks") {
-            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = 1.0f;
+            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = 1.0f;
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_trick.fill(1.0f);
@@ -2654,7 +2709,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             }
             s.saved.clear();
             s.active.clear();
-            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = 1.0f;
+            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = 1.0f;
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_trick.fill(1.0f);
@@ -2805,6 +2860,11 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             if (!editable(&why)) return "error: " + why;
             (name == "hippy_height" ? s.hippy_height : name == "nocomply_height" ? s.nocomply_height : name == "offboard_height" ? s.offboard_height : s.boneless_height) =
                 std::clamp(static_cast<float>(*value), height_low, height_high);
+        } else if (name == "pump_power") {
+            const auto value = number(arg(1));
+            if (!value) return "error: pump_power needs a multiplier, 1 = what the game's own pump gains.";
+            if (!editable(&why)) return "error: " + why;
+            s.pump_power = std::clamp(static_cast<float>(*value), 0.0f, pump_high);
         } else if (name == "revert_boost") {
             const auto value = number(arg(1));
             if (!value) return "error: revert_boost needs a strength: 0 is off, 1 gives back about 2 m/s on an auto revert.";

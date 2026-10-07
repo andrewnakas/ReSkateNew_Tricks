@@ -12,7 +12,22 @@
   with the main one. Presets carry them (`trick.flip.<trick>`, `trick.flip_advanced`).
 - **A slow flip is slow from the start.** Below x 1 the game's finish-before-landing rule is held
   off by itself, so the board is not hurried round: with too little air you land on a board that
-  is still turning. "Let slow flips stay slow" is no longer needed for that.
+  is still turning. The switch "Let slow flips stay slow" of 0.4.1 is gone: this does its job
+  (a preset that carries it still loads).
+- **Pump power.** A new slider under TRICKS sizes what pumping a transition gives: x 2 doubles
+  what each pump gains, x 0.5 halves it, 1 is the game's own. The game's own pumping state says
+  when you are pumping; the trainer measures what the pump gained on each physics step and adds
+  or takes its share (`trainer option pump_power <x>`, preset key `trick.pump_power`). Off under a
+  host's enforced physics or with boosts off.
+- **The camera tab is gone.** The camera controls did not work reliably, so they are out of this
+  version: the CAMERA tab, `trainer camera` and the saved camera numbers (ignored if present).
+- **The dial "On foot: flip and roll speed" is gone.** It changed nothing in the game. The three
+  values are still listed under EVERYTHING.
+- **Far fewer memory searches.** Every bail builds a new skater and each one started a full search
+  of the game's memory (about 13 seconds of a background thread), so a session of slow flips
+  searched over and over. A search that a new skater asked for and that found nothing new now
+  doubles the wait before the next (20 s up to 10 minutes); a level load or a real change puts it
+  back.
 - **It takes about 15 seconds after every level load.** The game loads its flip animation states
   with the level, and the trainer has to find them in memory again; until it has, the main
   slider falls back to the old, weaker way and the per-trick speeds do nothing. The TRICKS card

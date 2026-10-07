@@ -83,6 +83,7 @@ struct Found {
     std::vector<FlipCurve> flip;
     float flip_wanted{1}, flip_written{1};
     bool flip_used{}; // a flip speed other than the game's is set, though not written at this moment
+    bool states_used{}; // the game states are wanted for something else
     std::vector<std::uintptr_t> gates; // where the flick warp limit's number lives
     float gate_wanted{flip_gate_stock}; // the seconds before landing a flip must be round by
     Copies copies;
@@ -645,7 +646,7 @@ void want_class_value(std::size_t field, float value) noexcept {
 bool classes_wanted() noexcept {
     auto &f = found();
     std::lock_guard lock(f.mutex);
-    if (f.flip_wanted != 1 || f.flip_used || f.gate_wanted != gate_stock) return true;
+    if (f.flip_wanted != 1 || f.flip_used || f.states_used || f.gate_wanted != gate_stock) return true;
     for (std::size_t i = 0; i < class_field_count; ++i)
         if (f.wanted[i] != class_fields[i].stock) return true;
     return false;
@@ -710,6 +711,11 @@ void flip_speed_in_use(bool used) noexcept {
     auto &f = found();
     std::lock_guard lock(f.mutex);
     f.flip_used = used;
+}
+void states_in_use(bool used) noexcept {
+    auto &f = found();
+    std::lock_guard lock(f.mutex);
+    f.states_used = used;
 }
 void want_flip_gate(float seconds) noexcept {
     auto &f = found();

@@ -26,6 +26,16 @@ bool flip_states_found() noexcept;
 std::array<std::uintptr_t, 6> state_pages(std::uintptr_t base, std::uintptr_t entity) noexcept;
 bool write_flip_speed(const FlipState &state, float speed) noexcept;
 
+// Pumping a transition, as the game's trick scripts see it: whether the skater counts as pumping
+// this tick and how hard (Bool.Intent.Pumping, Float.Intent.UserTriggeredPumpStrength,
+// Float.Anim.PumpingAssistAmount).
+struct PumpState {
+    bool found{};   // the states are known and the skater has them
+    bool pumping{};
+    float strength{}, assist{};
+};
+PumpState read_pump_state(std::uintptr_t base, std::uintptr_t entity) noexcept;
+
 // The tricks that have a speed of their own under "Advanced trick speed". A nollie turns at
 // its regular trick's speed.
 struct FlipTrick {
