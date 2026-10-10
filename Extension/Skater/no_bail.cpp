@@ -1,4 +1,5 @@
 #include "no_bail.h"
+#include "Engine/Game/Input/controller_bindings.h"
 #include "Engine/Core/Hooks/hooks.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Core/Platform/memory.h"
@@ -196,6 +197,8 @@ bool resolve(std::uintptr_t client, std::uintptr_t entity, Owner& o) noexcept {
     o.entity = entity;
     return true;
 }
+// Dark Pop borrows this protection around its timed landings (defined with Dark Pop below).
+bool dark_pop_protecting(std::uint64_t now) noexcept;
 bool protected_owner(std::uintptr_t object, std::uintptr_t Owner::* member, Owner* owner = nullptr) noexcept {
     auto& p = protection();
     if (!p.ready.load(std::memory_order_acquire)) return false;
@@ -204,7 +207,22 @@ bool protected_owner(std::uintptr_t object, std::uintptr_t Owner::* member, Owne
     AcquireSRWLockShared(&p.lock);
     const auto lease = p.lease;
     ReleaseSRWLockShared(&p.lock);
-    if (!lease.active(GetTickCount64()) || object != lease.owner.*member) return false;
+    const auto now = GetTickCount64();
+    if (!(lease.active(now) || dark_pop_protecting(now)) || object != lease.owner.*member) return false;
+    Owner current;
+    if (!resolve(lease.owner.client, lease.owner.entity, current) || current != lease.owner) return false;
+    if (owner) *owner = current;
+    return true;
+}
+// The local skater this process published (the lease keeps its owner even with No Bail off), checked
+// against the live game objects. Says nothing about whether protection is on.
+bool local_owner(std::uintptr_t object, std::uintptr_t Owner::* member, Owner* owner = nullptr) noexcept {
+    auto& p = protection();
+    if (!p.ready.load(std::memory_order_acquire)) return false;
+    AcquireSRWLockShared(&p.lock);
+    const auto lease = p.lease;
+    ReleaseSRWLockShared(&p.lock);
+    if (!lease.owner.entity || !object || object != lease.owner.*member) return false;
     Owner current;
     if (!resolve(lease.owner.client, lease.owner.entity, current) || current != lease.owner) return false;
     if (owner) *owner = current;
@@ -289,6 +307,149 @@ void hold_off_board(std::uintptr_t selector, std::uint32_t current) noexcept {
     if (!resolve(board.owner.client, board.owner.entity, current_owner) || current_owner != board.owner) return;
     (void)cancel_request(current_owner.context, animation_request_offset, mount_request_mask);
 }
+// ---- Dark Pop (auto release) ---------------------------------------------------------
+// Recordings of a 360 inward heelflip, dark catch (41 flights) showed the pop depends mostly on when, counted from the
+// takeoff, the game sees D-pad Right let go: 0.70-0.73 s after it 14 of 17 popped, 0.68 s or earlier 1 of 11. (The
+// landing itself is no clock: the game lands a bail at 0.82 s but decides a pop at 0.85 s.) So the mod times the
+// release from the takeoff, `after` seconds later.
+// Those recordings were made with 0.2.0, which (unnoticed) lent No Bail's protection while D-pad Right was held
+// and briefly after: 19 of 32 popped. 0.3.0 and 0.3.1 dropped it and 0 of 20 popped, nearly all wipeouts (300) that
+// the protection would have swapped away. So the protection is back: from the moment the game sees D-pad Right
+// pressed in a timed flight until shortly after its landing.
+// 0.3.3 (protection from the D-pad Right press): no more wipeouts, but 9 of 11 dismounts (504) at the landing tick,
+// which No Bail never swaps. The first Dark Pop forced the pop at that tick and was the version that worked. So a fired
+// flight whose landing the game turns into a bail (504 or 300) now pops anyway: the dismount request
+// (context+0x13d4 bit 0x100) is dropped, and while the pop's flight lasts a dismount is held off like No Bail holds
+// off a wipeout. Protection runs until shortly after the pop's own landing.
+extern "C" void DingoSDKOverlayDarkPopFlightStart(std::int64_t release_at) noexcept;
+extern "C" bool DingoSDKOverlayDarkPopFlightEnd(std::int64_t* shown_release) noexcept;
+extern "C" bool DingoSDKOverlayDarkPopLatched() noexcept;
+constexpr std::uint64_t dark_pop_settle_ms = 300; // protection after the landing of a timed flight with D-pad Right
+constexpr std::uint64_t dark_pop_pop_ms = 2500;   // the longest a pop's flight is protected if its landing is missed
+constexpr LONG dark_pop_dismount_mask = 0x100;    // context+0x13d4 (animation_request_offset): the dismount request
+bool dark_pop_air(std::uint32_t state) noexcept { return state >= 200 && state < 300; }
+bool dark_pop_ground(std::uint32_t state) noexcept { return state >= 100 && state < 200; }
+struct DarkPop {
+    std::atomic<bool> enabled{};
+    std::atomic<float> after{0.715f};
+    std::atomic<std::int64_t> takeoff{}; // QPC of the current timed flight (0 = none)
+    std::atomic<std::uint64_t> settle_until{}; // GetTickCount64: protection after a timed landing
+    std::atomic<std::uint64_t> pop_until{};    // GetTickCount64: a fired flight popped; its flight is protected until then
+    std::atomic<std::uint64_t> flights{}, holds{}, pop_landings{};
+    std::atomic<bool> pressed{}, forced{};
+    std::atomic<std::uint32_t> landed{}, wanted{}, pop_landed{};
+    std::atomic<float> seconds{}, release_after{};
+};
+DarkPop& dark_pop() { static auto* value = new DarkPop; return *value; }
+std::int64_t dark_pop_frequency() noexcept {
+    static const std::int64_t value = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart > 0 ? std::int64_t{f.QuadPart} : std::int64_t{1}; }();
+    return value;
+}
+float dark_pop_seconds(std::int64_t ticks) noexcept {
+    return static_cast<float>(static_cast<double>(ticks) / static_cast<double>(dark_pop_frequency()));
+}
+bool dark_pop_protecting(std::uint64_t now) noexcept {
+    auto& d = dark_pop();
+    if (!d.enabled.load(std::memory_order_relaxed)) return false;
+    if (now < d.settle_until.load(std::memory_order_relaxed) || now < d.pop_until.load(std::memory_order_relaxed)) return true;
+    return d.takeoff.load(std::memory_order_relaxed) && DingoSDKOverlayDarkPopLatched();
+}
+// After the original selector (and No Bail's wipeout swap) has chosen; returns the state to use.
+std::uint32_t dark_pop_choose(std::uintptr_t selector, std::uint32_t current, std::uint32_t chosen) noexcept {
+    auto& d = dark_pop();
+    if (!d.enabled.load(std::memory_order_relaxed)) {
+        if (d.takeoff.exchange(0, std::memory_order_relaxed)) (void)DingoSDKOverlayDarkPopFlightEnd(nullptr);
+        d.pop_until.store(0, std::memory_order_relaxed);
+        return chosen;
+    }
+    const auto tick = GetTickCount64();
+    const bool popping = tick < d.pop_until.load(std::memory_order_relaxed);
+    const bool lands = dark_pop_air(current) && (!dark_pop_air(chosen) || (chosen == 200 && current != 200));
+    const bool takes_off = dark_pop_ground(current) && dark_pop_air(chosen);
+    const bool dismount_in_pop = popping && dark_pop_air(current) && chosen == offboard_physics_state;
+    if (!lands && !takes_off && !dismount_in_pop) return chosen;
+    Owner owner;
+    if (!local_owner(selector, &Owner::selector, &owner)) return chosen;
+    const bool fired = d.takeoff.load(std::memory_order_relaxed) && DingoSDKOverlayDarkPopLatched();
+    // A dismount while the pop's flight is protected: stay in the air, as No Bail does with a wipeout.
+    // (Not on the landing tick of a fired flight: that is handled below.)
+    if (dismount_in_pop && !fired) {
+        (void)cancel_request(owner.context, animation_request_offset, dark_pop_dismount_mask);
+        d.holds.fetch_add(1, std::memory_order_relaxed);
+        return current;
+    }
+    if (takes_off) {
+        LARGE_INTEGER clock{};
+        QueryPerformanceCounter(&clock);
+        const auto after = static_cast<std::int64_t>(static_cast<double>(d.after.load(std::memory_order_relaxed)) *
+            static_cast<double>(dark_pop_frequency()));
+        d.takeoff.store(clock.QuadPart, std::memory_order_relaxed);
+        DingoSDKOverlayDarkPopFlightStart(clock.QuadPart + after);
+        return chosen;
+    }
+    if (popping && !d.takeoff.load(std::memory_order_relaxed)) {
+        // The pop's own flight has ended (it landed, or popped again).
+        d.pop_until.store(0, std::memory_order_relaxed);
+        d.settle_until.store(tick + dark_pop_settle_ms, std::memory_order_relaxed);
+        d.pop_landed.store(chosen, std::memory_order_relaxed);
+        d.pop_landings.fetch_add(1, std::memory_order_acq_rel);
+        return chosen;
+    }
+    const auto takeoff = d.takeoff.exchange(0, std::memory_order_relaxed);
+    if (!takeoff) return chosen;
+    LARGE_INTEGER clock{};
+    QueryPerformanceCounter(&clock);
+    std::int64_t shown_release{};
+    const bool pressed = DingoSDKOverlayDarkPopFlightEnd(&shown_release);
+    auto result = chosen;
+    const bool forced = pressed && (chosen == offboard_physics_state || chosen == wipeout_physics_state);
+    if (forced) {
+        (void)cancel_request(owner.context, animation_request_offset, dark_pop_dismount_mask);
+        (void)cancel_wipeout_requests(owner.context);
+        (void)reset_pending_causes(owner.causes);
+        result = 200;
+    }
+    if (pressed && result == 200) d.pop_until.store(tick + dark_pop_pop_ms, std::memory_order_relaxed);
+    else if (pressed) d.settle_until.store(tick + dark_pop_settle_ms, std::memory_order_relaxed);
+    d.pressed.store(pressed, std::memory_order_relaxed);
+    d.forced.store(forced, std::memory_order_relaxed);
+    d.wanted.store(chosen, std::memory_order_relaxed);
+    d.landed.store(result, std::memory_order_relaxed);
+    d.seconds.store(dark_pop_seconds(clock.QuadPart - takeoff), std::memory_order_relaxed);
+    d.release_after.store(shown_release ? dark_pop_seconds(shown_release - takeoff) : -1.0f, std::memory_order_relaxed);
+    d.flights.fetch_add(1, std::memory_order_acq_rel);
+    return result;
+}
+extern "C" void DingoSDKOverlayReadControllerInput(dingosdk::ControllerInput* input, bool allow_menu);
+extern "C" unsigned DingoSDKOverlayDarkPopInputFlags() noexcept;
+constexpr std::size_t fast_probe_capacity = 8192; // rows; about a minute of choices per drain interval at most
+struct FastProbe {
+    std::atomic<bool> enabled{};
+    std::atomic<std::uint64_t> head{}, tail{};
+    FastProbeRow rows[fast_probe_capacity];
+};
+FastProbe& fast_probe() { static auto* value = new FastProbe; return *value; }
+void fast_probe_record(std::uintptr_t selector, std::uint32_t current, std::uint32_t wanted, std::uint32_t chosen) noexcept {
+    auto& f = fast_probe();
+    if (!f.enabled.load(std::memory_order_relaxed)) return;
+    Owner owner;
+    if (!local_owner(selector, &Owner::selector, &owner)) return;
+    const auto head = f.head.load(std::memory_order_relaxed);
+    if (head - f.tail.load(std::memory_order_acquire) >= fast_probe_capacity) return;
+    auto& row = f.rows[head % fast_probe_capacity];
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    row.ticks = now.QuadPart;
+    row.current = current;
+    row.wanted = wanted;
+    row.chosen = chosen;
+    dingosdk::ControllerInput pad;
+    DingoSDKOverlayReadControllerInput(&pad, false);
+    row.buttons = (pad.available ? pad.buttons : 0u) | (DingoSDKOverlayDarkPopInputFlags() << 20); // 0x100000 shown held, 0x200000 hidden
+    for (int i = 0; i < 8; ++i) { unsigned word{}; row.words[i] = read(owner.context + 0x13c4 + 4 * i, word) ? word : 0u; }
+    for (int i = 0; i < 10; ++i) { unsigned word{}; row.words[8 + i] = read(owner.context + 0x140c + 4 * i, word) ? word : 0u; }
+    f.head.store(head + 1, std::memory_order_release);
+}
 std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
     {
         LastError error;
@@ -300,7 +461,9 @@ std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
     const bool filtered = filter_requests(selector, &Owner::selector);
     const auto next = protection().choose_original(selector, current);
     LastError error;
-    const auto chosen = filtered && next == wipeout_physics_state && protected_owner(selector, &Owner::selector) ? current : next;
+    auto chosen = filtered && next == wipeout_physics_state && protected_owner(selector, &Owner::selector) ? current : next;
+    chosen = dark_pop_choose(selector, current, chosen);
+    fast_probe_record(selector, current, next, chosen);
     auto& w = state_watch();
     if (selector == w.selector.load(std::memory_order_acquire) && GetTickCount64() < w.until.load(std::memory_order_acquire)) {
         if (const auto before = w.state.exchange(chosen, std::memory_order_acq_rel); before != chosen) {
@@ -504,6 +667,40 @@ void clear_no_bail() noexcept {
 bool no_bail_skater(NoBailSkater& skater) noexcept { return published_skater(0, skater); }
 void set_no_bail_step_observer(NoBailStepObserver observer) noexcept {
     protection().step_observer.store(observer, std::memory_order_release);
+}
+void dark_pop_update(bool enabled, float after) noexcept {
+    auto& d = dark_pop();
+    d.after.store(after, std::memory_order_relaxed);
+    d.enabled.store(enabled, std::memory_order_relaxed);
+}
+DarkPopLast dark_pop_last() noexcept {
+    auto& d = dark_pop();
+    DarkPopLast last;
+    last.flights = d.flights.load(std::memory_order_acquire);
+    last.pressed = d.pressed.load(std::memory_order_relaxed);
+    last.landed = d.landed.load(std::memory_order_relaxed);
+    last.seconds = d.seconds.load(std::memory_order_relaxed);
+    last.release_after = d.release_after.load(std::memory_order_relaxed);
+    last.forced = d.forced.load(std::memory_order_relaxed);
+    last.wanted = d.wanted.load(std::memory_order_relaxed);
+    last.pop_landings = d.pop_landings.load(std::memory_order_acquire);
+    last.pop_landed = d.pop_landed.load(std::memory_order_relaxed);
+    last.holds = d.holds.load(std::memory_order_relaxed);
+    return last;
+}
+void fast_probe_enable(bool on) noexcept {
+    auto& f = fast_probe();
+    if (on) f.tail.store(f.head.load(std::memory_order_acquire), std::memory_order_release); // start empty
+    f.enabled.store(on, std::memory_order_release);
+}
+std::size_t fast_probe_drain(FastProbeRow* rows, std::size_t capacity) noexcept {
+    auto& f = fast_probe();
+    auto tail = f.tail.load(std::memory_order_relaxed);
+    const auto head = f.head.load(std::memory_order_acquire);
+    std::size_t count = 0;
+    while (tail != head && count < capacity) rows[count++] = f.rows[tail++ % fast_probe_capacity];
+    f.tail.store(tail, std::memory_order_release);
+    return count;
 }
 void watch_physics_state(std::uintptr_t client, std::uintptr_t entity) noexcept {
     auto& w = state_watch();

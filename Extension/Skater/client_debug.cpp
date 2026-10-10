@@ -8,10 +8,17 @@
 #include "Engine/Game/Multiplayer/session_tools.h"
 #include "free_flight.h"
 #include "Engine/Game/Skater/velocity_boost.h"
+#include "reskate_version.h"
 #include "Extension/Multiplayer/Remote/native_skater.h"
 #include "Extension/Objects/ParkEditor/park_editor_runtime.h"
 #include "Extension/Profile/local_profile_runtime.h"
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <format>
 #include <optional>
 #include <utility>
 
@@ -59,6 +66,137 @@ std::array<float, 3> debug_position(SourceReader& reader, std::uintptr_t address
     for (std::size_t i = 0; i < 3; ++i)
         source_require(std::isfinite(row[i]) && std::abs(row[i]) <= 1000000.0f, "Position exceeds diagnostic bounds.");
     return {row[0], row[1], row[2]};
+}
+}
+// ---- Dark Pop (auto release) -----------------------------------------------------------
+// The selector hook in no_bail.cpp times each flight, lends No Bail's protection to fired flights and turns their
+// bailed landings into pops; input_capture.cpp shows the game a timed release of D-pad Right. This tick publishes the switch and the timing, and reports (and optionally boosts) each flight.
+// Nothing is read until Dark Pop is switched on.
+extern "C" void DingoSDKOverlayDarkPopEnable(bool enabled) noexcept;
+extern "C" std::uint64_t DingoSDKOverlayDarkPopGamePolls() noexcept;
+namespace {
+void dark_pop_tick(InteractiveDebug& debug, std::uintptr_t client, std::uintptr_t entity,
+    const NoclipBodies& bodies, bool ready) {
+    const bool allowed = debug.dark_pop && ready && session_boosts_allowed() && !debug.noclip && !debug.park_editor;
+    dark_pop_update(allowed, debug.dark_pop_release);
+    DingoSDKOverlayDarkPopEnable(allowed);
+    if (!debug.dark_pop) return;
+    const auto last = dark_pop_last();
+    if (last.pop_landings != debug.dark_pop_landings_seen) {
+        debug.dark_pop_landings_seen = last.pop_landings;
+        logging::log(logging::Level::info, logging::Channel::skater, "Dark Pop: the pop's flight landed (state {}){}, {} dismount(s) held off so far",
+            last.pop_landed, last.pop_landed >= 100 && last.pop_landed < 200 ? ", riding away" : ", not riding away", last.holds);
+    }
+    if (last.flights == debug.dark_pop_seen) return;
+    debug.dark_pop_seen = last.flights;
+    if (!last.pressed) return; // a flight without D-pad Right: nothing to report
+    const bool popped = last.landed == 200;
+    const float strength = std::min(debug.dark_pop_strength, 25.0f);
+    const bool boost = popped && strength >= 0.5f && source_state().velocity_guard_active.load(std::memory_order_acquire) &&
+        !bodies.offboard && !debug.up_velocity.valid;
+    if (boost) debug.up_velocity = {client, entity, bodies.core, GetTickCount64() + 1000, {0.0f, strength, 0.0f}, true};
+    if (popped) ++debug.dark_pop_count;
+    const char* outcome = popped ? (last.forced ? "bail turned into a pop" : "popped") :
+        last.landed >= 100 && last.landed < 200 ? "rode away (no pop)" : "bailed";
+    const auto polls = DingoSDKOverlayDarkPopGamePolls();
+    logging::log(logging::Level::info, logging::Channel::skater,
+        "Dark Pop: {:.3f} s flight, release shown {} -> game wanted {}, {}{}{}", last.seconds,
+        last.release_after >= 0.0f ? std::format("{:.3f} s after takeoff", last.release_after) : std::string("only at landing"),
+        last.wanted, outcome, boost ? std::format(", +{:.1f} m/s up", strength) : std::string(),
+        polls ? std::string() : std::string(" (the game has not read the controller through XInput, so it saw no change)"));
+}
+}
+// ---- Dark pop probe -----------------------------------------------------------
+// Off unless switched on. While on it writes logs\dark-pop-probe.csv beside the game: one row per tick
+// with the physics state, the controller buttons, 40 words of the skater's request block (where the game
+// keeps "mount", "dismount" and similar requests), 64 floats of the board's first body and the skater's
+// transform. Doing a few natural dark pops (and failures) with it on shows which of those values the
+// game changes at the moment a pop happens, which is what a faithful Dark Pop needs to know.
+namespace {
+std::ofstream& probe_file() { static auto* file = new std::ofstream; return *file; }
+std::ofstream& fast_file() { static auto* file = new std::ofstream; return *file; }
+std::int64_t g_fast_base = 0;
+// Writes what the selector hook queued: logs\dark-pop-fast.csv, one row per physics-state choice with its time
+// in microseconds, the state before, the state the game wanted, the state returned, the buttons and 18 words.
+void fast_probe_flush() {
+    auto& file = fast_file();
+    if (!file.is_open()) return;
+    static FastProbeRow rows[2048];
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    if (frequency.QuadPart <= 0) return;
+    char text[24];
+    for (int pass = 0; pass < 8; ++pass) {
+        const auto count = fast_probe_drain(rows, 2048);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& row = rows[i];
+            if (!g_fast_base) g_fast_base = row.ticks;
+            file << (row.ticks - g_fast_base) * 1000000 / frequency.QuadPart << ',' << row.current << ',' << row.wanted << ','
+                 << row.chosen << ',' << row.buttons;
+            for (const auto word : row.words) { std::snprintf(text, sizeof text, ",%x", word); file << text; }
+            file << '\n';
+        }
+        if (count < 2048) break;
+    }
+}
+void probe_tick(InteractiveDebug& debug, const std::array<float, 16>& transform, const NoclipBodies& bodies, bool ready) {
+    auto& file = probe_file();
+    if (!debug.probe || !ready) {
+        if (file.is_open()) file.close();
+        if (fast_file().is_open()) { fast_probe_enable(false); fast_probe_flush(); fast_file().close(); }
+        return;
+    }
+    if (!file.is_open()) {
+        wchar_t module[MAX_PATH]{};
+        const auto length = GetModuleFileNameW(nullptr, module, MAX_PATH);
+        if (!length || length >= MAX_PATH) { debug.probe = false; return; }
+        // A new pair of files each time the probe is switched on, named by the time, so nothing is overwritten.
+        char stamp[32]{};
+        const std::time_t now_time = std::time(nullptr);
+        std::tm local{};
+        localtime_s(&local, &now_time);
+        std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &local);
+        const auto path = std::filesystem::path(module).parent_path() / "logs" / (std::string("dark-pop-probe-") + stamp + ".csv");
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        file.open(path, std::ios::out | std::ios::trunc);
+        if (!file) { debug.probe = false; return; }
+        file << "ms,state,pad";
+        for (int i = 0; i < 40; ++i) file << ",c" << i;
+        for (int i = 0; i < 64; ++i) file << ",b" << i;
+        for (int i = 0; i < 16; ++i) file << ",t" << i;
+        file << "\n";
+        auto& fast = fast_file();
+        fast.open(path.parent_path() / (std::string("dark-pop-fast-") + stamp + ".csv"), std::ios::out | std::ios::trunc);
+        if (fast) {
+            fast << "us,current,wanted,chosen,pad";
+            for (int i = 0; i < 18; ++i) fast << ",w" << i;
+            fast << "\n";
+            g_fast_base = 0;
+            fast_probe_enable(true);
+        }
+        logging::write(logging::Level::info, logging::Channel::skater, std::format("Dark pop probe: writing logs\\dark-pop-probe-{0}.csv and logs\\dark-pop-fast-{0}.csv", stamp));
+    }
+    // Guarded same-process copies of larger blocks (value<T> is limited to 16 bytes).
+    SourceReader reader;
+    std::uint32_t state{};
+    std::array<std::uint32_t, 40> words{};
+    std::array<float, 64> board{};
+    source_require(reader.raw(bodies.context + 0x1414, &state, sizeof state) &&
+                   reader.raw(bodies.context + 0x13a0, words.data(), sizeof words) &&
+                   reader.raw(bodies.parts[0], board.data(), sizeof board),
+        "Dark pop probe: the skater's data could not be read.");
+    ControllerInput pad;
+    DingoSDKOverlayReadControllerInput(&pad);
+    char text[32];
+    file << GetTickCount64() << ',' << state << ',' << (pad.available ? pad.buttons : 0u);
+    for (const auto word : words) { std::snprintf(text, sizeof text, ",%x", word); file << text; }
+    for (const auto value : board) { std::snprintf(text, sizeof text, ",%.4g", static_cast<double>(value)); file << text; }
+    for (const auto value : transform) { std::snprintf(text, sizeof text, ",%.4g", static_cast<double>(value)); file << text; }
+    file << '\n';
+    fast_probe_flush();
+    static ULONGLONG last_flush = 0;
+    if (const auto now = GetTickCount64(); now - last_flush > 1000) { file.flush(); if (fast_file().is_open()) fast_file().flush(); last_flush = now; }
 }
 }
 std::array<float, 16> debug_skater(std::uintptr_t base, std::uintptr_t client, overlay::DebugModel& model) {
@@ -398,7 +536,9 @@ void debug_action(SourceTrial& trial, std::uintptr_t client, bool can_control, b
         request.action == overlay::DebugAction::set_first_person_fov ||
         request.action == overlay::DebugAction::set_free_camera_fov ||
         (request.action >= overlay::DebugAction::set_first_person_spring && request.action <= overlay::DebugAction::reset_first_person_arm) ||
-        request.action == overlay::DebugAction::set_no_bail,
+        request.action == overlay::DebugAction::set_no_bail || request.action == overlay::DebugAction::set_dark_pop_strength ||
+        request.action == overlay::DebugAction::set_dark_pop_release ||
+        (request.action == overlay::DebugAction::set_dark_pop_enabled && !request.enabled),
         "Close Park Editor before changing camera or HUD modes.");
     if (request.action >= overlay::DebugAction::set_first_person_spring &&
         request.action <= overlay::DebugAction::reset_first_person_arm) {
@@ -476,6 +616,33 @@ void debug_action(SourceTrial& trial, std::uintptr_t client, bool can_control, b
         mark_debug_changed(debug);
         return;
     }
+    if (request.action == overlay::DebugAction::set_dark_pop_strength) {
+        source_require(std::isfinite(request.value) && request.value >= 0.0f && request.value <= 25.0f,
+            "Dark Pop extra pop must be between 0 and 25.");
+        debug.dark_pop_strength = request.value;
+        debug.status = "Dark Pop extra pop updated.";
+        return;
+    }
+    if (request.action == overlay::DebugAction::set_dark_pop_release) {
+        source_require(std::isfinite(request.value) && request.value >= 0.55f && request.value <= 0.90f,
+            "Dark Pop release must be between 0.55 and 0.90 seconds after takeoff.");
+        debug.dark_pop_release = request.value;
+        debug.status = "Dark Pop release timing updated.";
+        return;
+    }
+    if (request.action == overlay::DebugAction::set_dark_pop_enabled && !request.enabled) {
+        debug.dark_pop = false;
+        dark_pop_update(false, debug.dark_pop_release);
+        DingoSDKOverlayDarkPopEnable(false);
+        debug.status = "Dark Pop disabled.";
+        logging::write(logging::Level::info, logging::Channel::skater, "Dark Pop disabled");
+        return;
+    }
+    if (request.action == overlay::DebugAction::set_probe_enabled) {
+        debug.probe = request.enabled;
+        debug.status = request.enabled ? "Dark pop probe on: writing a new pair of files in logs, named by the time." : "Dark pop probe off.";
+        return;
+    }
     if (request.action == overlay::DebugAction::restore_debug) {
         if (debug.save_pending) save_debug(debug);
         debug.first_person_settings = {};
@@ -490,6 +657,9 @@ void debug_action(SourceTrial& trial, std::uintptr_t client, bool can_control, b
         debug.up_velocity.valid = false;
         debug.offboard_up_velocity.valid = false;
         debug.no_bail = false;
+        debug.dark_pop = false;
+        dark_pop_update(false, debug.dark_pop_release);
+        DingoSDKOverlayDarkPopEnable(false);
         debug_stop_noclip(debug);
         clear_no_bail();
         // Level loads drop temporary modes, never the player's saved choices.
@@ -577,6 +747,16 @@ void debug_action(SourceTrial& trial, std::uintptr_t client, bool can_control, b
             ++debug.offboard_up_velocity_updates;
             debug.status = "Off-board up velocity added.";
         } else debug.status = up ? "Up Boost queued." : "Forward Boost queued.";
+        return;
+    }
+    if (request.action == overlay::DebugAction::set_dark_pop_enabled) {
+        source_require(session_boosts_allowed(), "The host has turned off boosts in this session.");
+        debug.dark_pop = true;
+        mark_debug_changed(debug);
+        debug.status = "Dark Pop enabled. Catch with RB, press D-pad Right in the air; the mod times the release.";
+        logging::log(logging::Level::info, logging::Channel::skater, "Dark Pop (auto release) enabled, release {:.3f} s after takeoff{}",
+            debug.dark_pop_release,
+            dingosdk::reskate_modified_build ? std::format(" (modified build {} {})", dingosdk::reskate_mod_id, dingosdk::reskate_mod_version) : std::string());
         return;
     }
     if (request.action == overlay::DebugAction::set_no_bail) {
@@ -902,7 +1082,7 @@ overlay::DebugModel on_client_debug_tick(std::uintptr_t base, std::uintptr_t cli
         !state.velocity_guard_active.load(std::memory_order_acquire) ? "Off-board Up Boost is unavailable for this game build." :
         "Local skater physics could not be read.";
     try {
-        (void)debug_skater(base, client, model);
+        const auto skater_transform = debug_skater(base, client, model);
         const auto bodies = debug_noclip_bodies(base, client, model.skater_identity);
         if (debug.forward_velocity.valid && (GetTickCount64() >= debug.forward_velocity.expires ||
             debug.forward_velocity.entity != model.skater_identity || debug.forward_velocity.core != bodies.core)) {
@@ -948,6 +1128,10 @@ overlay::DebugModel on_client_debug_tick(std::uintptr_t base, std::uintptr_t cli
         } else if (debug.offboard_up_velocity.valid) {
             model.offboard_up_velocity_unavailable = "Off-board Up Boost is being applied.";
         }
+        try { dark_pop_tick(debug, client, model.skater_identity, bodies, can_control); }
+        catch (...) {}
+        try { probe_tick(debug, skater_transform, bodies, can_control); }
+        catch (...) {}
         model.no_bail_available = can_control && update_no_bail(client, model.skater_identity, debug.no_bail && no_bail_allowed,
             debug.noclip && debug.noclip_velocity.valid, debug.noclip_velocity.expires);
         if (model.camera_available) {
@@ -1004,6 +1188,11 @@ overlay::DebugModel on_client_debug_tick(std::uintptr_t base, std::uintptr_t cli
     model.offboard_up_velocity_updates = debug.offboard_up_velocity_updates;
     state.offboard_boost_core.store(debug.offboard_up_velocity.valid ? debug.offboard_up_velocity.core : 0,
         std::memory_order_release);
+    model.dark_pop = debug.dark_pop;
+    model.dark_pop_strength = debug.dark_pop_strength;
+    model.dark_pop_release = debug.dark_pop_release;
+    model.dark_pop_count = debug.dark_pop_count;
+    model.probe = debug.probe;
     return model;
 }
 bool client_free_camera_active() noexcept {

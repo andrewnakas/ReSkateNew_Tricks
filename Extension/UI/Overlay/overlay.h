@@ -76,6 +76,10 @@ enum class DebugAction {
     set_first_person_board_only,
     reset_first_person_arm,
     set_free_camera_fov,  // 0 = the game's own FOV
+    set_probe_enabled,
+    set_dark_pop_enabled,
+    set_dark_pop_strength,
+    set_dark_pop_release,
     // Keep the last action in sync with the bound in request_scheduler.h.
 };
 
@@ -127,6 +131,12 @@ struct DebugModel {
     float forward_velocity_speed = 20.0f;
     float up_velocity_speed = 20.0f;
     float offboard_up_velocity_speed = 20.0f;
+    // Dark Pop: the mod times the release of D-pad Right for the game (see no_bail.cpp, input_capture.cpp).
+    bool dark_pop = false;
+    float dark_pop_strength = 0.0f; // extra upward m/s after the pop
+    float dark_pop_release = 0.715f; // seconds after takeoff
+    std::uint64_t dark_pop_count = 0;
+    bool probe = false; // Dark pop probe: writes logs\dark-pop-probe.csv
     bool camera_position_valid = false;
     bool skater_position_valid = false;
     std::array<float, 3> camera_position{};

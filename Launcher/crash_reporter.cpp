@@ -7,6 +7,7 @@
 #include "Engine/Core/Debug/multipart.h"
 #include "Engine/Game/Build/supported_build.h"
 #include "backtrace_config.h"
+#include "reskate_version.h"
 #include <cstdlib>
 #include <fstream>
 #include <format>
@@ -29,6 +30,12 @@ bool publish_dump(const std::filesystem::path& temporary, const SharedReport& re
     attributes["application"] = "ReSkate";
     attributes["process"] = utf8(report.application.data());
     attributes["version"] = build_version;
+    // A modified build says so, so ReSkate's maintainers can tell its crashes from their own.
+    if (reskate_modified_build) {
+        attributes["build.modified"] = true;
+        attributes["build.mod"] = std::string(reskate_mod_id);
+        attributes["build.mod_version"] = std::string(reskate_mod_version);
+    }
 #ifdef _DEBUG
     attributes["build.configuration"] = "Debug";
 #else

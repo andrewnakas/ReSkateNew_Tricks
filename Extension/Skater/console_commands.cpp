@@ -92,6 +92,56 @@ void register_movement_commands(Commands &registry) {
     };
     free_fov.reset = [](const Model &, const Output &) { request_debug(Debug::set_free_camera_fov, false, 0.0f); };
     registry.add(std::move(free_fov));
+    // Dark Pop (see dark_pop_tick in client_debug.cpp); the same switches as the menu rows.
+    auto dark_pop = variable("darkpop", "Dark Pop: RB catch, then D-pad Right in the air; the release is timed for you",
+        Group::movement, argument("0|1", Type::boolean));
+    dark_pop.inspect = [](const Model &m) {
+        return State{m.debug.available, m.debug.dark_pop ? "1" : "0", "Waiting for local player controls.",
+                     std::to_string(m.debug.dark_pop_count) + " pops", false};
+    };
+    dark_pop.run = [](const Model &, const Values &args, const Output &) {
+        request_debug(Debug::set_dark_pop_enabled, std::get<bool>(args[0]));
+    };
+    dark_pop.reset = [](const Model &, const Output &) { request_debug(Debug::set_dark_pop_enabled, false); };
+    registry.add(std::move(dark_pop));
+    auto dark_release_argument = argument("seconds", Type::number);
+    dark_release_argument.minimum = 0.55;
+    dark_release_argument.maximum = 0.9;
+    auto dark_release = variable("darkpoprelease", "Dark Pop: seconds after takeoff the game sees D-pad Right let go",
+        Group::movement, dark_release_argument);
+    dark_release.inspect = [](const Model &m) {
+        return State{m.debug.available, value_text(static_cast<double>(m.debug.dark_pop_release)),
+                     "Waiting for local player controls.", {}, false};
+    };
+    dark_release.run = [](const Model &, const Values &args, const Output &) {
+        request_debug(Debug::set_dark_pop_release, false, static_cast<float>(std::get<double>(args[0])));
+    };
+    dark_release.reset = [](const Model &, const Output &) { request_debug(Debug::set_dark_pop_release, false, 0.715f); };
+    registry.add(std::move(dark_release));
+    auto dark_strength_argument = argument("speed", Type::number);
+    dark_strength_argument.minimum = 0;
+    dark_strength_argument.maximum = 25;
+    auto dark_strength = variable("darkpopextra", "Dark Pop: extra upward speed after the pop, m/s",
+        Group::movement, dark_strength_argument);
+    dark_strength.inspect = [](const Model &m) {
+        return State{m.debug.available, value_text(static_cast<double>(m.debug.dark_pop_strength)),
+                     "Waiting for local player controls.", {}, false};
+    };
+    dark_strength.run = [](const Model &, const Values &args, const Output &) {
+        request_debug(Debug::set_dark_pop_strength, false, static_cast<float>(std::get<double>(args[0])));
+    };
+    dark_strength.reset = [](const Model &, const Output &) { request_debug(Debug::set_dark_pop_strength, false, 0.0f); };
+    registry.add(std::move(dark_strength));
+    auto dark_probe = variable("darkpopprobe", "Dark pop probe: record the game's state choices to two files in logs",
+        Group::movement, argument("0|1", Type::boolean));
+    dark_probe.inspect = [](const Model &m) {
+        return State{m.debug.available, m.debug.probe ? "1" : "0", "Waiting for local player controls.", {}, false};
+    };
+    dark_probe.run = [](const Model &, const Values &args, const Output &) {
+        request_debug(Debug::set_probe_enabled, std::get<bool>(args[0]));
+    };
+    dark_probe.reset = [](const Model &, const Output &) { request_debug(Debug::set_probe_enabled, false); };
+    registry.add(std::move(dark_probe));
     auto boost_speed_argument = argument("speed", Type::number);
     boost_speed_argument.minimum = 1;
     boost_speed_argument.maximum = 300;

@@ -3440,6 +3440,19 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         s.telemetry.top_speed = 0;
         return std::format("Top speed since last asked: {:.2f} m/s ({:.1f} km/h); now {:.2f} m/s.", top, top * 3.6f, s.telemetry.speed);
     }
+    if (v == "dp") {
+        // trainer dp [on|off] [release <s>] [extra <m/s>] [probe on|off]: Dark Pop's switches, for scripted tests.
+        auto &debug = dingosdk::client_source::detail::source_state().trial.debug;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            const auto word = lower(a[i]);
+            if (word == "on" || word == "off") debug.dark_pop = word == "on";
+            else if (word == "release" && i + 1 < a.size()) debug.dark_pop_release = std::clamp(std::stof(a[++i]), 0.3f, 1.5f);
+            else if (word == "extra" && i + 1 < a.size()) debug.dark_pop_strength = std::clamp(std::stof(a[++i]), 0.0f, 25.0f);
+            else if (word == "probe" && i + 1 < a.size()) debug.probe = lower(a[++i]) == "on";
+        }
+        return std::format("Dark Pop {}, release {:.3f} s, extra {:.1f} m/s, {} pops, probe {}.", debug.dark_pop ? "on" : "off",
+            debug.dark_pop_release, debug.dark_pop_strength, debug.dark_pop_count, debug.probe ? "on" : "off");
+    }
     if (v == "pad") {
         // trainer pad <controls:ms> ... | off: a scripted controller, for tests nobody has to play.
         auto &p = s.pad;

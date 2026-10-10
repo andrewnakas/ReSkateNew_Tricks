@@ -140,6 +140,12 @@ struct InteractiveDebug {
     std::uint64_t offboard_up_velocity_updates{};
     float up_velocity_speed = 20.0f;
     float offboard_up_velocity_speed = 20.0f;
+    // Dark Pop (see dark_pop_tick and probe_tick in client_debug.cpp).
+    bool dark_pop{};
+    float dark_pop_strength{}; // extra upward speed, m/s, queued as an Up Boost after the pop
+    float dark_pop_release{0.715f}; // seconds after takeoff the game is shown D-pad Right let go
+    std::uint64_t dark_pop_count{}, dark_pop_seen{}, dark_pop_landings_seen{};
+    bool probe{}; // see probe_tick in client_debug.cpp
     float noclip_altitude{};
     bool noclip_altitude_valid{}, noclip_altitude_offboard{};
     // Player choices kept in the local profile (see load_saved_debug):
