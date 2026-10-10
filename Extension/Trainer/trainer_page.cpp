@@ -303,7 +303,7 @@ void your_presets(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const 
     end_card();
 }
 
-void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
+void tune_tab(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     if (!view.ready) {
         begin_card(menu, "tune-wait", "PHYSICS TUNING");
         note(view.status.c_str());
@@ -374,14 +374,6 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         preset_switch(menu, callbacks, preset);
     }
     ImGui::EndDisabled();
-    if (p.mode != 0) {
-        // The game's own bail protection, the same switch as Skater > Movement.
-        const auto &debug = model.debug;
-        bool no_bail = debug.no_bail;
-        if (toggle_row(menu, "Never bail", "No wipeouts at all. Recover from a bail before switching it on.", no_bail,
-                (debug.no_bail_available || debug.no_bail) && callbacks.queue_debug != nullptr))
-            debug_request(menu, callbacks, {DebugAction::set_no_bail, no_bail});
-    }
     ImGui::BeginDisabled(!can_edit || !view.touched);
     if (ImGui::Button("Reset values")) trainer_command(menu, callbacks, "reset all");
     if (ImGui::IsItemHovered()) wrapped_tooltip("Every tuning value back to the game's own. Locked values stay.");
@@ -389,7 +381,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%zu values changed", view.touched);
-    note("To save or share the whole setup under a name, or to play like Skate 3: MAP & HUD, at the bottom.");
+    note("To save or share the whole setup under a name, or to play like Skate 3: MAP & HUD, at the bottom. No Bail, Noclip and the boosts: MOVEMENT.");
     end_card();
 
     ImGui::BeginDisabled(!can_edit);
@@ -734,7 +726,8 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
     begin_card(menu, "trickline", "TRICKLINING EXTRAS", "What Skate 3's tricklining had beyond its tuning");
     bool extras = view.revert_boost > 0;
     if (toggle_row(menu, "Skate 3's tricklining extras",
-            "The board bending boost below at x 1, and heavier revert and powerslide friction (x 3 and x 1.5: a first guess, tune them below).", extras))
+            "The board bending boost below at x 1, heavier revert and powerslide friction (x 3 and x 1.5) and higher footplants (no comply and "
+            "boneless height x 1.5). First guesses: tune each of them below.", extras))
         trainer_command(menu, callbacks, extras ? "trickline extras on" : "trickline extras off");
     note("Pick the game to play like above, then tune the tricklining part of it here. Blue = changed; Reset puts one value back. Type in a box to go past a slider's end.");
     end_card();
@@ -939,7 +932,7 @@ bool trainer_take_open() {
     if (view->open_serial == p.open_serial) return false;
     p.open_serial = view->open_serial;
     // "presets": the player's saved setups are at the bottom of MAP & HUD.
-    p.tab = view->open_tab == 3 || view->open_tab == 1 ? 2 : view->open_tab == 2 ? 1 : 0; // by name, see `trainer open`
+    p.tab = view->open_tab == 7 ? 3 : view->open_tab == 3 || view->open_tab == 1 ? 2 : view->open_tab == 2 ? 1 : 0; // by name, see `trainer open`
     if (view->open_tab == 8) p.mode = 3; // the trick line section of the Tune tab
     if (view->open_tab >= 4 && view->open_tab < 7) p.mode = std::clamp(view->open_tab - 4, 0, 2);
     p.show_page = true;
@@ -991,12 +984,13 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
         note("The physics values still apply. The rest comes back when the host allows boosts or you leave.");
         end_card();
     }
-    category_tabs(menu, p.tab, {"TUNE", "PRACTICE", "MAP & HUD"}, "trainer-tabs");
+    category_tabs(menu, p.tab, {"TUNE", "PRACTICE", "MAP & HUD", "MOVEMENT"}, "trainer-tabs");
     ImGui::PushID(p.tab);
     ImGui::BeginChild("trainer-tab", ImVec2(0, page_body_height(menu)));
     switch (p.tab) {
     case 0: tune_tab(menu, model, callbacks, p, *view); break;
     case 1: practice_tab(menu, model, callbacks, p, *view); break;
+    case 3: movement_controls(menu, model, callbacks); break; // ReSkate's own flight, bail and boost controls
     default: map_tab(menu, callbacks, p, *view); break;
     }
     ImGui::EndChild();

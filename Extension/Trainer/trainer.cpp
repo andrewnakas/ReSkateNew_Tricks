@@ -2741,7 +2741,9 @@ std::string feel_command(const std::vector<std::string> &a) {
     return found == std::end(feels) ? "Plays like skate.: the game's own tuning." : std::format("Plays like {}: its tuning for everything this game shares with it.", found->second);
 }
 // trainer trickline extras on|off: what Skate 3's trick lines had beyond its tuning. Speed back
-// out of reverts, and heavier revert and powerslide friction (x3 and x1.5: a first guess).
+// out of reverts, heavier revert and powerslide friction (x3 and x1.5: a first guess), and higher
+// footplants (no comply and boneless x1.5, OVM's ask: a first guess too).
+constexpr float trickline_footplant = 1.5f;
 std::string trickline_command(const std::vector<std::string> &a) {
     auto &s = state();
     std::string why;
@@ -2751,8 +2753,11 @@ std::string trickline_command(const std::vector<std::string> &a) {
     for (const auto &[key, factor] : trickline_friction)
         if (auto *e = find_entry(key); e && !is_locked(*e)) set_entry(*e, on ? e->stock * factor : e->stock);
     s.revert_boost = on ? std::max(s.revert_boost, 1.0f) : 0.0f;
+    s.nocomply_height = on ? std::max(s.nocomply_height, trickline_footplant) : 1.0f;
+    s.boneless_height = on ? std::max(s.boneless_height, trickline_footplant) : 1.0f;
     changed();
-    return on ? "Tricklining extras on: the board bending boost, heavier revert and powerslide friction." : "Tricklining extras off.";
+    return on ? "Tricklining extras on: the board bending boost, heavier revert and powerslide friction, no comply and boneless height x 1.5."
+              : "Tricklining extras off.";
 }
 std::string run(std::string_view verb, const std::vector<std::string> &a) {
     auto &s = state();
@@ -3036,9 +3041,9 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
     if (v == "open") {
         const auto tab = lower(arg(0));
         // The last three are the Tune tab on one of its lists.
-        const std::array<std::string_view, 9> tabs{"tune", "presets", "practice", "map", "realistic", "fun", "everything", "camera", "trickline"};
+        const std::array<std::string_view, 9> tabs{"tune", "presets", "practice", "map", "realistic", "fun", "everything", "movement", "trickline"};
         const auto found = std::ranges::find(tabs, tab);
-        if (!tab.empty() && found == tabs.end()) return "error: usage: trainer open [tune|trickline|practice|map|realistic|fun|everything]";
+        if (!tab.empty() && found == tabs.end()) return "error: usage: trainer open [tune|trickline|practice|map|movement|realistic|fun|everything]";
         s.open_tab = tab.empty() ? 0 : static_cast<int>(found - tabs.begin());
         ++s.open_serial;
         s.view_due = true;

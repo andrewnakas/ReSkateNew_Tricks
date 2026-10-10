@@ -191,7 +191,13 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
     ImGui::PushID(menu.skater_tab);
     ImGui::BeginChild("skater-tab", ImVec2(0, page_body_height(menu)));
     if (menu.skater_tab == 0) camera_controls(menu, model, callbacks);
-    else movement_controls(menu, model, callbacks);
+    else {
+        // Noclip, No Bail, Hall of Meat and the boosts live with the rest of the physics now.
+        begin_card(menu, "movement-moved", "FLIGHT, BAILS & BOOSTS");
+        note("Noclip, No Bail, Hall of Meat and the boost sliders are on PHYSICS > MOVEMENT.");
+        if (ImGui::Button("Open PHYSICS > MOVEMENT")) send_console(menu, callbacks, "trainer open movement");
+        end_card();
+    }
     ImGui::EndChild();
     ImGui::PopID();
 }
