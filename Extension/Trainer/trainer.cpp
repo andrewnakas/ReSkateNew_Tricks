@@ -242,6 +242,7 @@ struct State {
     float flip_speed{1};
     // "Advanced trick speed": each flip trick also turns at a speed of its own (flip_tricks, trainer_gamestate.h).
     bool flip_advanced{};
+    bool flip_pop{}; // a slowed flip trick pops higher, so it has the air time it needs
     std::array<float, flip_tricks.size()> flip_trick = [] {
         std::array<float, flip_tricks.size()> ones{};
         ones.fill(1.0f);
@@ -435,9 +436,10 @@ void load_store() {
             s.offboard_height = std::clamp(o.value("offboard_height", 1.0f), height_low, height_high);
             s.flip_speed = std::clamp(o.value("flip_speed", 1.0f), flip_low, flip_high);
             s.flip_advanced = o.value("flip_advanced", false);
+            s.flip_pop = o.value("flip_pop", false);
             for (std::size_t i = 0; i < flip_tricks.size(); ++i)
                 s.flip_trick[i] = std::clamp(o.value(std::string(flip_tricks[i].key), 1.0f), flip_low, flip_high);
-            s.catch_at = o.value("catch_at", false);
+            s.catch_at = false; // "Catch flips at a set point of the jump" was removed in 0.5.0
             s.catch_percent = std::clamp(o.value("catch_percent", 70.0f), catch_low, catch_high);
             s.boneless_height = std::clamp(o.value("boneless_height", 1.0f), height_low, height_high);
             s.revert_boost = std::clamp(o.value("revert_boost", 0.0f), 0.0f, revert_boost_high);
@@ -500,6 +502,7 @@ void save_store() {
         options["offboard_height"] = s.offboard_height;
         options["flip_speed"] = s.flip_speed;
         options["flip_advanced"] = s.flip_advanced;
+        options["flip_pop"] = s.flip_pop;
         for (std::size_t i = 0; i < flip_tricks.size(); ++i)
             if (s.flip_trick[i] != 1.0f) options[std::string(flip_tricks[i].key)] = s.flip_trick[i];
         options["catch_at"] = s.catch_at;
@@ -1060,7 +1063,7 @@ bool set_trick_key(std::string_view key, double value) {
     if (!key.starts_with(trick_prefix)) return false;
     const auto name = key.substr(trick_prefix.size());
     // (flip_gate, a switch of earlier versions, still comes in old presets: a slow flip stays slow by itself now.)
-    if (name == catch_at_name) state().catch_at = value != 0;
+    // (catch_at, a switch of earlier versions, still comes in old presets and is ignored.)
     if (name == flip_advanced_name) state().flip_advanced = value != 0;
     if (name == catch_percent_name) state().catch_percent = std::clamp(static_cast<float>(value), catch_low, catch_high);
     if (auto *option = trick_option(name))
@@ -1402,6 +1405,7 @@ void drive_dev_body_flip(std::uintptr_t base) {
     const auto now = read_body_flip_state(base, static_cast<std::uintptr_t>(state().entity));
     b.last = now;
     if (dev_capture) {
+        state().flip_trace = true; // each flight's turn and height lines
         dingosdk::ControllerInput pad;
         DingoSDKOverlayReadControllerInput(&pad);
         const auto buttons = pad.available ? pad.buttons : 0u;
@@ -1417,8 +1421,8 @@ void drive_dev_body_flip(std::uintptr_t base) {
         TrajectoryCall call;
         for (int i = 0; i < 32 && take_trajectory_call(call); ++i) {
             if (call.caller == 0x482f64b && call.up <= 0.05f) continue; // the falling updates
-            say(logging::Level::info, std::format("Trainer capture: launch from {:x}, state {} after {}, up {:.2f} m/s, buttons {:x}.", call.caller,
-                                                  call.state, call.previous, call.up, buttons));
+            say(logging::Level::info, std::format("Trainer capture: launch from {:x}, state {} after {}, up {:.2f} m/s, buttons {:x}, trick then {}.", call.caller,
+                                                  call.state, call.previous, call.up, buttons, call.trick));
         }
     }
     if (now.speed_at) {
@@ -1433,15 +1437,33 @@ void drive_dev_body_flip(std::uintptr_t base) {
     }
 }
 // </dev>
-void drive_flip_speed(std::uintptr_t base, bool airborne) {
+// Test value (`trainer flipland <seconds>`): this long before the landing a slowed flip goes back to the game's own speed.
+float flip_land_window = 0;
+// How much faster a flip trick slowed to `speed` has to leave the ground to land on time. Measured with scripted
+// kickflips on flat ground (2026-10-10): the smallest launch at which the landing came when the arc came down,
+// x 1 at 0.75, x 1.4 at 0.5, x 1.8 at 0.35, x 2.5 at 0.25. Height goes with the square: 2 times at 0.5, 6.4 at 0.25.
+float slow_flip_launch(float speed) {
+    static constexpr float points[][2]{{0.75f, 1.0f}, {0.5f, 1.4f}, {0.35f, 1.8f}, {0.25f, 2.5f}};
+    if (!(speed < 0.75f)) return 1.0f;
+    if (speed <= 0.25f) return std::min(0.625f / std::max(speed, 0.05f), 6.0f);
+    for (std::size_t i = 1; i < std::size(points); ++i)
+        if (speed >= points[i][0])
+            return points[i][1] + (points[i - 1][1] - points[i][1]) * (speed - points[i][0]) / (points[i - 1][0] - points[i][0]);
+    return 2.5f;
+}
+// CurrentFlipTrick values that are a pop with no flip in it (the nollie, the ollie pops, the boned ollie, the wallies):
+// the flip speed leaves them alone, as it does the ollie.
+constexpr bool plain_pop(std::uint32_t trick) { return trick <= 1 || trick == 16 || trick == 31 || trick == 32 || (trick >= 33 && trick <= 35) || trick == 42; }
+void drive_flip_speed(std::uintptr_t base, bool airborne, float to_landing) {
     auto &s = state();
     auto &drive = s.flip_drive;
     const auto now = read_flip_state(base, static_cast<std::uintptr_t>(s.entity));
     s.flip_live = static_cast<bool>(now);
+    set_launch_trick(now ? now.trick : 0xffu); // for the launch hook: the trick the game has in mind this tick
     // A plain ollie (trick 1) plays the same clip and reads the same number: slowed, it hangs in
     // the air (measured: 0.60 s of air at 1, 0.65 s at 0.5, 0.77 to 0.88 s at 0.25). Only a flip
     // trick is driven.
-    const bool flipping = now && now.trick > 1;
+    const bool flipping = now && !plain_pop(now.trick);
     if (!now || !airborne || !flipping) {
         if (now && drive.active && now.speed == drive.written && drive.written != drive.game) (void)write_flip_speed(now, drive.game);
         drive = {};
@@ -1451,6 +1473,9 @@ void drive_flip_speed(std::uintptr_t base, bool airborne) {
     float factor = s.boosts.flip;
     if (s.flip_advanced && !extras_blocked())
         if (const auto index = flip_trick_index(now.trick); index >= 0) factor *= s.flip_trick[static_cast<std::size_t>(index)];
+    // A slowed clip also plays its landing slowly, so the skater lands late and sinks (measured: 0.07 s late at x 0.5,
+    // 0.25 to 0.57 s at x 0.25). Close to the ground the clip goes back to the game's own speed.
+    if (factor < 1 && flip_land_window > 0 && to_landing < flip_land_window) factor = 1;
     // A number that is not the trainer's own is the game's: the flight's first, or a new trick's.
     if (!drive.active || now.speed != drive.written) drive.game = now.speed;
     drive.active = true;
@@ -1586,7 +1611,15 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     }
     // On the ground the limit is the game's own: the number left by the last flight means nothing for the next.
     if (!m.airborne) state().catch_seconds = flip_gate_stock;
-    drive_flip_speed(base, m.airborne);
+    {
+        // Seconds until the skater is back at the height they left from, by the flight's own arc.
+        float to_landing = 1e9f;
+        if (m.airborne) {
+            const float rise = velocity[1], above = position[1] - m.takeoff[1], under = rise * rise + 2 * 9.8f * above;
+            to_landing = under > 0 ? (rise + std::sqrt(under)) / 9.8f : 0.0f;
+        }
+        drive_flip_speed(base, m.airborne, to_landing);
+    }
 // <dev>
     drive_dev_body_flip(base);
 // </dev>
@@ -1780,6 +1813,17 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
             } else {
                 say(logging::Level::info, std::format("Trainer flip #{}: air {:.3f} s, up {:.2f} m/s, no board turn (peak {:.0f} deg/s).", s.flip_serial, air,
                                                       s.flip_takeoff_up, peak));
+            }
+            {
+                // How the flight went up and down: a slowed flip lands late and the skater sinks below where a stock one lands.
+                float apex = -1e9f, apex_at = 0, lowest = 1e9f, lowest_at = 0;
+                for (const auto &x : f) {
+                    if (x.height > apex) { apex = x.height; apex_at = x.time; }
+                    if (x.time > apex_at && x.height < lowest) { lowest = x.height; lowest_at = x.time; }
+                }
+                say(logging::Level::info, std::format("Trainer flipheight #{}: air {:.3f} s, up {:.2f} m/s, apex {:.2f} m at {:.2f} s, lowest {:.2f} m at {:.2f} s, "
+                                                      "flip speed {:.2f}, trick {}.", s.flip_serial, air, s.flip_takeoff_up, apex, apex_at, lowest, lowest_at,
+                                                      s.boosts.flip, s.flip_trick_seen));
             }
             try {
                 std::ofstream out(data_directory() / "flips.csv", std::ios::app);
@@ -2370,6 +2414,7 @@ void build_view() {
     next->offboard_height = s.offboard_height;
     next->flip_speed = s.flip_speed;
     next->flip_advanced = s.flip_advanced;
+    next->flip_pop = s.flip_pop;
     next->flip_trick = s.flip_trick;
     next->flip_advanced_blocked = s.flip_advanced && extras_blocked();
     next->flip_live = s.flip_live;
@@ -2667,6 +2712,18 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         }
         set_trick_heights(s.boosts.nocomply, s.boosts.boneless);
         // The pop out of a manual: the ollie's launch, scaled while Enum.Intent.Manual says the skater is in one.
+        // "Slow flips pop higher": the launch of each flip trick, by the speed it will turn at (the game has the trick in
+        // mind when it launches: measured, a kickflip reads 2 and an ollie 1 at that call).
+        for (std::uint32_t trick = 0; trick < 64; ++trick) {
+            float scale = 1;
+            if (s.flip_pop && !extras_blocked() && !plain_pop(trick)) {
+                float factor = s.boosts.flip;
+                if (s.flip_advanced)
+                    if (const auto index = flip_trick_index(trick); index >= 0) factor *= s.flip_trick[static_cast<std::size_t>(index)];
+                scale = slow_flip_launch(factor);
+            }
+            set_flip_launch(trick, scale);
+        }
         set_manual_pop(s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 1.0f : s.manual_height,
                        read_manual_intent(s.base, static_cast<std::uintptr_t>(s.entity)));
         // The speeds pushes aim for are the push class's (value_links ties them to the tuning's top
@@ -2852,6 +2909,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = s.manual_height = 1.0f;
             s.catch_at = false;
             s.flip_advanced = false;
+            s.flip_pop = false;
             s.flip_trick.fill(1.0f);
             s.revert_boost = 0.0f;
             changed();
@@ -2881,6 +2939,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = s.manual_height = 1.0f;
             s.catch_at = false;
             s.flip_advanced = false;
+            s.flip_pop = false;
             s.flip_trick.fill(1.0f);
             s.revert_boost = 0.0f;
             s.revert = {};
@@ -3063,7 +3122,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             if (!value) return "error: return_delay needs seconds.";
             s.return_delay = std::clamp(static_cast<float>(*value), 0.0f, 10.0f);
         } else if (!flag(arg(1), on)) {
-            return "error: usage: trainer option hud|hud_jump|auto_return|pad|pad_menu|flip_advanced|catch_at|log 0|1";
+            return "error: usage: trainer option hud|hud_jump|auto_return|pad|pad_menu|flip_advanced|flip_pop|log 0|1";
         } else if (name == "hud") s.hud = on;
         else if (name == "hud_jump") s.hud_jump = on;
         else if (name == "auto_return") s.auto_return = on;
@@ -3071,8 +3130,11 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         else if (name == "pad_menu") s.pad_menu = on;
         else if (name == "flip_gate") return "That switch is gone: a flip set slower than the game's own stays slow by itself.";
         else if (name == "catch_at") {
+            s.catch_at = false;
+            return "That switch is gone: it did not work reliably. Use the flip trick speed.";
+        } else if (name == "flip_pop") {
             if (on && !editable(&why)) return "error: " + why;
-            s.catch_at = on;
+            s.flip_pop = on;
         } else if (name == "flip_advanced") {
             if (on && !editable(&why)) return "error: " + why;
             s.flip_advanced = on;
@@ -3523,6 +3585,10 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         b.low_speed = b.low_rate = 1e9f;
         b.high_speed = b.high_rate = -1e9f;
         return text;
+    }
+    if (v == "flipland") {
+        if (const auto seconds = number(arg(0))) flip_land_window = std::clamp(static_cast<float>(*seconds), 0.0f, 2.0f);
+        return std::format("A slowed flip returns to the game's speed {:.3f} s before the landing.", flip_land_window);
     }
     if (v == "launches") return trajectory_calls();
     if (v == "launchdump") return trajectory_parameters();

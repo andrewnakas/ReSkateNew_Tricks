@@ -89,7 +89,18 @@ void dark_pop_tick(InteractiveDebug& debug, std::uintptr_t client, std::uintptr_
     }
     if (last.flights == debug.dark_pop_seen) return;
     debug.dark_pop_seen = last.flights;
-    if (!last.pressed) return; // a flight without D-pad Right: nothing to report
+    if (!last.pressed) {
+        // A flight without the press as the game saw it. Said a few times, so a controller the game does not read through
+        // XInput (Dark Pop cannot act on it) or a press before the RB catch shows up in the log.
+        if (debug.dark_pop_misses < 12) {
+            ++debug.dark_pop_misses;
+            const auto polls = DingoSDKOverlayDarkPopGamePolls();
+            logging::log(logging::Level::info, logging::Channel::skater,
+                "Dark Pop: {:.3f} s flight, no D-pad Right after an RB catch seen in it ({} controller reads by the game so far{}).",
+                last.seconds, polls, polls ? "" : ": the game is not reading this controller through XInput, so Dark Pop cannot act");
+        }
+        return;
+    }
     const bool popped = last.landed == 200;
     const float strength = std::min(debug.dark_pop_strength, 25.0f);
     const bool boost = popped && strength >= 0.5f && source_state().velocity_guard_active.load(std::memory_order_acquire) &&

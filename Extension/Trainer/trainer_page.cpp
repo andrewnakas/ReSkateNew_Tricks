@@ -440,7 +440,7 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
 
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words) {
     static constexpr const char *advanced_label = "Advanced trick speed (a speed for each flip trick: kickflip, heelflip, 360 flip, varial, shuvit, hardflip, laser flip, impossible)";
-    static constexpr const char *labels[]{"Flip trick speed", advanced_label, "Pump power (pumping transitions)", "Catch flips at a set point of the jump (realism, percent of air time)", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
+    static constexpr const char *labels[]{"Flip trick speed", advanced_label, "Pump power (pumping transitions)", "Manual pop height", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
                                            "Board bending boost (revert speed)"};
     const auto wanted = [&](const char *label) { return words.empty() || contains_words(lower(std::string(label) + " tricks"), words); };
     if (std::ranges::none_of(labels, wanted)) return;
@@ -472,6 +472,8 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         ImGui::PopID();
         return true;
     };
+    slider("Manual pop height", "manual_height", view.manual_height, p.manual_edit, p.manual_editing,
+           "How high you pop out of a manual or a nose manual. 1 is the game's own (lower than a riding ollie). Ollie height raises both.");
     slider("Flip trick speed", "flip_speed", view.flip_speed, p.flip_edit, p.flip_editing,
            "How fast the board turns in every flip trick. It does not change how high you pop. Below 1 flips are slower, above 1 faster. A slow "
            "flip is slow from the start and is not hurried round before you land: with too little air you land on a board that is still turning. "
@@ -479,6 +481,14 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
            3.0f);
     if (!view.flip_live && (view.flip_speed != 1.0f || view.flip_advanced) && wanted("Flip trick speed"))
         ImGui::TextDisabled("Finding the flip animations: flip speeds take hold about 15 seconds after a level loads.");
+    if (wanted("Flip trick speed") || wanted("Slow flips pop higher")) {
+        bool pop = view.flip_pop;
+        if (ImGui::Checkbox("Slow flips pop higher, so they land clean", &pop)) trainer_command(menu, callbacks, std::format("option flip_pop {}", pop ? 1 : 0));
+        if (ImGui::IsItemHovered())
+            wrapped_tooltip("%s", "A flip slowed below x 0.75 needs more time than a normal pop gives: without this the game holds the landing back and "
+                                  "the skater sinks before riding away. With it the pop of a slowed flip trick is raised just enough for the trick: about "
+                                  "twice the height at x 0.5, 3.4 times at x 0.35, 6.4 times at x 0.25. Plain ollies and flips at x 0.75 or faster are untouched.");
+    }
     if (wanted(advanced_label)) {
         bool on = view.flip_advanced;
         if (ImGui::Checkbox("Advanced trick speed", &on)) trainer_command(menu, callbacks, std::format("option flip_advanced {}", on ? 1 : 0));
@@ -496,28 +506,6 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
             ImGui::TreePop();
         }
     }
-    if (wanted("Catch flips at a set point of the jump (realism, percent of air time)")) {
-        bool on = view.catch_at;
-        if (ImGui::Checkbox("Catch flips at a set point of the jump", &on)) trainer_command(menu, callbacks, std::format("option catch_at {}", on ? 1 : 0));
-        if (ImGui::IsItemHovered())
-            wrapped_tooltip("%s", "For realism. Every flip trick turns so that the board is round, and caught, at the percent of the jump's air time "
-                                  "you set: 70 means the catch comes 70% of the way from the pop to the landing, on a small ollie and a big one alike. "
-                                  "While this is on the trainer sets the flip speed and the finish-before-landing rule itself, so the flip speed "
-                                  "above stands aside. The air time is worked out from the pop over level ground: off a drop or a gap the catch "
-                                  "comes earlier than asked. 100 or close to it means you land still flipping.");
-        ImGui::SameLine();
-        float percent = view.catch_percent;
-        ImGui::SetNextItemWidth(px(64));
-        if (ImGui::InputFloat("##catch-percent", &percent, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue))
-            trainer_command(menu, callbacks, std::format("option catch_percent {}", percent));
-        if (ImGui::IsItemHovered()) wrapped_tooltip("%s", "Percent of the air time at which the flip is caught. Type a number from 1 to 100 and press Enter.");
-        ImGui::SameLine();
-        ImGui::TextUnformatted("% of the air time");
-        if (view.catch_at && view.flip_gate_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here.");
-        else if (on && !view.flip_gate_found) ImGui::TextDisabled("Not found in the game yet: it takes effect a few seconds after a level loads.");
-    }
-    slider("Manual pop height", "manual_height", view.manual_height, p.manual_edit, p.manual_editing,
-           "How high you pop out of a manual or a nose manual. 1 is the game's own (lower than a riding ollie). Ollie height raises both.");
     slider("No comply height", "nocomply_height", view.nocomply_height, p.nocomply_edit, p.nocomply_editing, "How high a no comply pops. 1 is the game's own.");
     slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing, "How high a boneless pops. 1 is the game's own.");
     slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing, "How high you jump off the board in a hippy jump. 1 is the game's own.");

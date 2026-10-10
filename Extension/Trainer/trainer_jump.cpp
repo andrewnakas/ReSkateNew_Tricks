@@ -38,6 +38,8 @@ struct Hooked {
     std::atomic<std::uint64_t> manual_until{}; // GetTickCount64: the skater was in a manual until about then
     std::atomic<std::int32_t> manual_intent{-1};
     bool ollie_known{};
+    std::atomic<std::uint32_t> launch_trick{0xff}; // CurrentFlipTrick as the trainer read it last tick
+    std::array<std::atomic<float>, 64> flip_launch{}; // launch speed factor by trick; 0 or 1: the game's own
     // The last few launches, for the trainer's log line: written by the physics thread, read
     // by the client tick.
     std::array<std::atomic<std::uint64_t>, 8> seen{};
@@ -45,7 +47,7 @@ struct Hooked {
     bool attempted{}, ready{};
 // <dev>
     // Every call of the setter (caller, the local skater's state and the one before, upward speed).
-    struct Call { std::atomic<std::uint64_t> where{}, speed{}; };
+    struct Call { std::atomic<std::uint64_t> where{}, speed{}; std::atomic<std::uint32_t> trick{}; };
     std::array<Call, 32> calls{};
     std::atomic<std::uint32_t> call_count{};
     std::uint32_t listed{}, captured{}; // read places of `trainer launches` and the capture log
@@ -74,6 +76,7 @@ void set_trajectory_hook(std::uintptr_t trajectory, float *parameters) {
         call.where.store((std::uint64_t{caller & 0xffffffffu} << 32) | (std::uint64_t{watch.valid ? watch.state & 0xffffu : 0xffffu} << 16) |
                          (watch.valid ? watch.previous & 0xffffu : 0xffffu), std::memory_order_relaxed);
         call.speed.store((std::uint64_t{bits[0]} << 32) | bits[1], std::memory_order_relaxed);
+        call.trick.store(h.launch_trick.load(std::memory_order_relaxed), std::memory_order_relaxed);
         std::memcpy(h.last_parameters.data(), parameters, sizeof(float) * h.last_parameters.size());
         if (caller == 0x4824f84) parameters[velocity_y] *= h.test_scale.load(std::memory_order_relaxed);
         if (const int slot = h.test_slot.load(std::memory_order_relaxed); slot >= 0 && slot < 64)
@@ -100,6 +103,12 @@ void set_trajectory_hook(std::uintptr_t trajectory, float *parameters) {
             const auto packed = (std::uint64_t{bits[0]} << 32) | (std::uint64_t{bits[1]} << 1) | (trick == Trick::boneless ? 1u : 0u);
             h.seen[h.written.fetch_add(1, std::memory_order_relaxed) % h.seen.size()].store(packed, std::memory_order_release);
         }
+    }
+    // The ollie's launch into a flip trick that is set to turn slowly: more air for it (see set_flip_launch).
+    if (parameters && h.ollie_known && caller == ollie_call + 5) {
+        const auto trick = h.launch_trick.load(std::memory_order_relaxed);
+        const float up = parameters[velocity_y], factor = trick < h.flip_launch.size() ? h.flip_launch[trick].load(std::memory_order_relaxed) : 1.0f;
+        if (factor > 1 && factor <= 6 && std::isfinite(up) && up > 0.05f && up * factor < 200.0f) parameters[velocity_y] = up * factor;
     }
     // The ollie's launch, out of a manual (the game pops lower from one; see set_manual_pop).
     if (parameters && h.ollie_known && caller == ollie_call + 5 && GetTickCount64() < h.manual_until.load(std::memory_order_relaxed)) {
@@ -194,6 +203,7 @@ bool take_trajectory_call(TrajectoryCall &out) noexcept {
     const auto where = call.where.load(std::memory_order_relaxed), speed = call.speed.load(std::memory_order_relaxed);
     const std::uint32_t bits[2]{static_cast<std::uint32_t>(speed >> 32), static_cast<std::uint32_t>(speed)};
     out.caller = static_cast<std::uint32_t>(where >> 32);
+    out.trick = call.trick.load(std::memory_order_relaxed);
     out.state = static_cast<std::uint32_t>((where >> 16) & 0xffff);
     out.previous = static_cast<std::uint32_t>(where & 0xffff);
     std::memcpy(&out.up, &bits[0], 4);
@@ -221,6 +231,11 @@ void trajectory_test(float scale, int slot, float value) noexcept {
     hooked().test_slot.store(slot, std::memory_order_relaxed);
 }
 // </dev>
+void set_flip_launch(std::uint32_t trick, float scale) noexcept {
+    auto &h = hooked();
+    if (trick < h.flip_launch.size()) h.flip_launch[trick].store(std::isfinite(scale) ? scale : 1.0f, std::memory_order_relaxed);
+}
+void set_launch_trick(std::uint32_t trick) noexcept { hooked().launch_trick.store(trick, std::memory_order_relaxed); }
 void set_manual_pop(float height, std::int32_t intent) noexcept {
     auto &h = hooked();
     h.manual.store(std::isfinite(height) && height > 0 ? std::sqrt(std::min(height, 1.0e6f)) : 1.0f, std::memory_order_relaxed);

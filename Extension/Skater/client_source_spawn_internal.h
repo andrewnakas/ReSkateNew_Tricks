@@ -145,6 +145,7 @@ struct InteractiveDebug {
     float dark_pop_strength{}; // extra upward speed, m/s, queued as an Up Boost after the pop
     float dark_pop_release{0.715f}; // seconds after takeoff the game is shown D-pad Right let go
     std::uint64_t dark_pop_count{}, dark_pop_seen{}, dark_pop_landings_seen{};
+    int dark_pop_misses{}; // flights reported as without the press (the log says so a few times)
     bool probe{}; // see probe_tick in client_debug.cpp
     float noclip_altitude{};
     bool noclip_altitude_valid{}, noclip_altitude_offboard{};

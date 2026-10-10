@@ -92,6 +92,7 @@ struct View {
     float offboard_height{1}; // a jump on foot
     float flip_speed{1};      // board flip tricks: x of the game's own speed
     bool flip_advanced{};     // each flip trick also has a speed of its own
+    bool flip_pop{};          // a slowed flip trick pops higher
     std::array<float, flip_tricks.size()> flip_trick{}; // those, in the order of flip_tricks
     bool flip_advanced_blocked{};       // ticked, but this session's rules keep the game's own flips
     bool flip_live{};                   // the game's flip states are found: the speeds act

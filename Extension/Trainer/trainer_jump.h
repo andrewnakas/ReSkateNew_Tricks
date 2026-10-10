@@ -19,6 +19,10 @@ bool start_trick_heights(std::uintptr_t base) noexcept;
 void set_trick_heights(float no_comply, float boneless) noexcept;
 // The pop out of a manual: a height multiplier, and Enum.Intent.Manual as read this tick (above 0: in a manual).
 void set_manual_pop(float height, std::int32_t intent) noexcept;
+// EnumGS.Anim.CurrentFlipTrick as read this tick (0xff: unknown), for launches that depend on the trick.
+void set_launch_trick(std::uint32_t trick) noexcept;
+// How much faster the ollie launches into that trick (1: the game's own), for flip tricks set to turn slowly.
+void set_flip_launch(std::uint32_t trick, float scale) noexcept;
 // The scripted launches since the last call, oldest first; false when there are none.
 bool take_trick_launch(TrickLaunch &out) noexcept;
 // <dev>
@@ -26,7 +30,7 @@ bool take_trick_launch(TrickLaunch &out) noexcept;
 std::string trajectory_calls();
 // The same calls one at a time, for the capture log (caller as the return address's rva; 0xffff: no state).
 struct TrajectoryCall {
-    std::uint32_t caller{}, state{}, previous{};
+    std::uint32_t caller{}, state{}, previous{}, trick{};
     float up{}, forward{};
 };
 bool take_trajectory_call(TrajectoryCall &out) noexcept;
