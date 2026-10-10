@@ -48,6 +48,7 @@ struct Hooked {
     struct Call { std::atomic<std::uint64_t> where{}, speed{}; };
     std::array<Call, 32> calls{};
     std::atomic<std::uint32_t> call_count{};
+    std::uint32_t listed{}, captured{}; // read places of `trainer launches` and the capture log
     std::array<float, 64> last_parameters{}; // of the newest call (a torn copy is fine for looking)
     std::array<float, 96> last_trajectory{}; // the trajectory object after that call
     std::atomic<float> test_scale{1};        // multiplies the upward speed of the ollie launch (caller 0x4824f84)
@@ -164,11 +165,15 @@ void set_trick_heights(float no_comply, float boneless) noexcept {
 // <dev>
 std::string trajectory_calls() {
     auto &h = hooked();
-    const auto count = h.call_count.exchange(0, std::memory_order_relaxed);
+    const auto total = h.call_count.load(std::memory_order_relaxed);
+    const auto count = std::min<std::uint32_t>(total - h.listed, static_cast<std::uint32_t>(h.calls.size()));
+    const auto first = total - count;
+    h.listed = total;
     std::string text = std::to_string(count) + " calls (manual intent " + std::to_string(h.manual_intent.load()) + ", ollie call " +
                        (h.ollie_known ? "known" : "NOT known") + "):";
-    for (std::uint32_t i = 0; i < count && i < h.calls.size(); ++i) {
-        const auto where = h.calls[i].where.load(std::memory_order_relaxed), speed = h.calls[i].speed.load(std::memory_order_relaxed);
+    for (std::uint32_t i = first; i != total; ++i) {
+        const auto &call = h.calls[i % h.calls.size()];
+        const auto where = call.where.load(std::memory_order_relaxed), speed = call.speed.load(std::memory_order_relaxed);
         const std::uint32_t bits[2]{static_cast<std::uint32_t>(speed >> 32), static_cast<std::uint32_t>(speed)};
         float up{}, x{};
         std::memcpy(&up, &bits[0], 4);
@@ -179,6 +184,21 @@ std::string trajectory_calls() {
         text += line;
     }
     return text;
+}
+bool take_trajectory_call(TrajectoryCall &out) noexcept {
+    auto &h = hooked();
+    const auto total = h.call_count.load(std::memory_order_relaxed);
+    if (total - h.captured > h.calls.size()) h.captured = total - static_cast<std::uint32_t>(h.calls.size());
+    if (h.captured == total) return false;
+    const auto &call = h.calls[h.captured++ % h.calls.size()];
+    const auto where = call.where.load(std::memory_order_relaxed), speed = call.speed.load(std::memory_order_relaxed);
+    const std::uint32_t bits[2]{static_cast<std::uint32_t>(speed >> 32), static_cast<std::uint32_t>(speed)};
+    out.caller = static_cast<std::uint32_t>(where >> 32);
+    out.state = static_cast<std::uint32_t>((where >> 16) & 0xffff);
+    out.previous = static_cast<std::uint32_t>(where & 0xffff);
+    std::memcpy(&out.up, &bits[0], 4);
+    std::memcpy(&out.forward, &bits[1], 4);
+    return true;
 }
 std::string trajectory_parameters() {
     auto &h = hooked();

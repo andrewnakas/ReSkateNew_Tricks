@@ -130,7 +130,7 @@ struct FootLog {
     float peak{}, turned{}, up_at_start{}, height_at_start{};
     std::size_t part{};
 };
-FootLog dev_foot;
+FootLog dev_foot{.on = true}; // on for playtest captures
 // `trainer airdump`: the skater's game state blocks written to files on set ticks of the next flight.
 std::vector<int> dev_airdump_ticks;
 std::string dev_airdump_name;
@@ -1393,11 +1393,34 @@ struct DevBodyFlip {
     float speed{}, rate{};
     float low_speed{1e9f}, high_speed{-1e9f}, low_rate{1e9f}, high_rate{-1e9f};
     BodyFlipState last{};
+    float logged_speed{}, logged_rate{};
+    std::uint64_t logged_at{};
 } dev_body_flip;
+bool dev_capture = true; // `option capture 0|1`: log launches and off-board flip states while someone plays
 void drive_dev_body_flip(std::uintptr_t base) {
     auto &b = dev_body_flip;
     const auto now = read_body_flip_state(base, static_cast<std::uintptr_t>(state().entity));
     b.last = now;
+    if (dev_capture) {
+        dingosdk::ControllerInput pad;
+        DingoSDKOverlayReadControllerInput(&pad);
+        const auto buttons = pad.available ? pad.buttons : 0u;
+        const auto tick = GetTickCount64();
+        if ((now.speed_at || now.rate_at) && (std::abs(now.speed - b.logged_speed) > 0.001f || std::abs(now.rate - b.logged_rate) > 0.001f) &&
+            tick - b.logged_at > 50) {
+            say(logging::Level::info, std::format("Trainer capture: body flip speed {:.4g} rate {:.4g} (were {:.4g}, {:.4g}), buttons {:x}, physics state {}.",
+                                                  now.speed, now.rate, b.logged_speed, b.logged_rate, buttons, watched_physics_state().state));
+            b.logged_speed = now.speed;
+            b.logged_rate = now.rate;
+            b.logged_at = tick;
+        }
+        TrajectoryCall call;
+        for (int i = 0; i < 32 && take_trajectory_call(call); ++i) {
+            if (call.caller == 0x482f64b && call.up <= 0.05f) continue; // the falling updates
+            say(logging::Level::info, std::format("Trainer capture: launch from {:x}, state {} after {}, up {:.2f} m/s, buttons {:x}.", call.caller,
+                                                  call.state, call.previous, call.up, buttons));
+        }
+    }
     if (now.speed_at) {
         b.low_speed = std::min(b.low_speed, now.speed);
         b.high_speed = std::max(b.high_speed, now.speed);
@@ -2654,11 +2677,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
                 s.pump_live = pump.found;
                 s.view_due = true;
             }
-            bool measure = false;
+            bool measure = false, searching = false;
             // <dev>
             measure = s.pump_log;
+            searching = dev_capture; // the capture reads the off-board flip states
             // </dev>
-            states_in_use(s.pump_power != 1.0f || s.manual_height != 1.0f || measure);
+            states_in_use(s.pump_power != 1.0f || s.manual_height != 1.0f || measure || searching);
             set_pump_power(client, s.entity, extras_blocked() ? 1.0f : s.pump_power, pump.found && pump.pumping, measure);
             // <dev>
             if (s.pump_log) {
@@ -3049,6 +3073,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         else if (name == "statelog") s.state_log = on;
         else if (name == "fliptrace") s.flip_trace = on;
         else if (name == "footlog") dev_foot = {.on = on};
+        else if (name == "capture") dev_capture = on;
         else if (name == "pumplog") {
             s.pump_log = on;
             s.pump_started = s.pump_rising = false;

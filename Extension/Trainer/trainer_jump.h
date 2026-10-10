@@ -24,6 +24,12 @@ bool take_trick_launch(TrickLaunch &out) noexcept;
 // <dev>
 // Every call of the trajectory setter since the last asked (at most 32), for finding launches.
 std::string trajectory_calls();
+// The same calls one at a time, for the capture log (caller as the return address's rva; 0xffff: no state).
+struct TrajectoryCall {
+    std::uint32_t caller{}, state{}, previous{};
+    float up{}, forward{};
+};
+bool take_trajectory_call(TrajectoryCall &out) noexcept;
 // The newest call's first 64 floats (four to a group; the launch velocity is floats 32 to 34).
 std::string trajectory_parameters();
 // Test levers: scale the ollie launch, and overwrite one float of every call (slot < 0: none).
