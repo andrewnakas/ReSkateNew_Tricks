@@ -6,6 +6,7 @@
 #include "Extension/Boot/steam_restart_guard.h"
 #include "Extension/Boot/user_data_redirect.h"
 #include "Extension/Boot/ea_app_block.h"
+#include "Extension/Boot/ea_service_block.h"
 #include "Extension/Assets/native_patch_support.h"
 #include "Extension/Assets/mod_layers.h"
 #include "Extension/Assets/loose_files.h"
@@ -14,6 +15,7 @@
 #include "Extension/Assets/native_render_resource_pool.h"
 #include "Extension/Rendering/display_startup.h"
 #include "Extension/World/native_route_lookahead.h"
+#include "Extension/World/unload_guard.h"
 #include "Extension/World/native_entity_pages.h"
 #include "Extension/World/physics_world_size.h"
 #include <string>
@@ -56,11 +58,16 @@ bool initialize_bootstrap(std::uintptr_t base) {
     if (!stage(Channel::world, "Physics world pools (65000 static bodies)", ready, error)) return false;
     error.clear(); ready = start_native_route_lookahead(base, error);
     if (!stage(Channel::world, "NPC route cycle and endpoint guards", ready, error)) return false;
+    // A guard against one of the game's own crashes: without it the game runs as shipped.
+    error.clear(); ready = start_unload_guard(base, error);
+    (void)stage(Channel::world, "Level unload crash guard", ready, error);
     if (!stage(Channel::graphics, "Display startup settings", start_display_settings(base), {})) return false;
     error.clear(); ready = start_user_data_redirect(error);
     if (!stage(Channel::runtime, "Separate game user data", ready, error)) return false;
     error.clear(); ready = start_ea_app_block(error);
     if (!stage(Channel::runtime, "EA app launch block", ready, error)) return false;
+    error.clear(); ready = start_ea_service_block(error);
+    if (!stage(Channel::runtime, "EA online services block", ready, error)) return false;
     error.clear(); ready = start_steam_restart_guard(error);
     return stage(Channel::runtime, launcher::offline_mode() ? "Offline Steam" : "Steam restart guard", ready, error);
 }

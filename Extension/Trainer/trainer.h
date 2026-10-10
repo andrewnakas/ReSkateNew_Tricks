@@ -103,6 +103,9 @@ struct View {
     // The loaded map and what its author ships for the trainer (Mods/<mod>/trainer.json).
     std::string map, map_note, map_preset, profile_preset;
     std::vector<Spot> spots;
+    // The waypoint placed on the game's pause map (trainer_waypoint.h), if any.
+    bool waypoint_set{};
+    std::array<float, 3> waypoint{};
     // `trainer open <tab>`: each new serial opens the menu on the trainer page at that tab.
     std::uint64_t open_serial{};
     std::string share_text; // `preset export`: the line to put on the clipboard
@@ -145,6 +148,10 @@ bool take_class_list_shown() noexcept;
 // The menu hands over text to import (a pasted preset line): written where `preset import`
 // reads it. Any thread; touches no trainer state.
 bool stage_import(std::string_view text) noexcept;
+// The menu is drawing the TELEPORT card, which shows the pause map's waypoint. The map's
+// registry is read only while it is. Any thread; the game thread takes the note.
+void note_teleport_card_shown() noexcept;
+bool take_teleport_card_shown() noexcept;
 
 // Game thread (trainer.cpp).
 // Each client tick; `playing` while a local skater can exist, `level` the loaded level asset.

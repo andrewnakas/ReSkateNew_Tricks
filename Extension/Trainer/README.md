@@ -13,7 +13,7 @@ telemetry HUD. It ships no game data: the list of values is built at run time fr
 | Tab | What you get |
 |---|---|
 | **TUNE** | Four lists: REALISTIC, FUN, TRICKLINING and EVERYTHING. TRICKLINING gathers what a line needs: the board bending boost (speed out of a landing with the board out of line, as in Skate 3) with its rules, revert and powerslide friction, pumping, pops, spins and flips, manuals and grinds, each with a line on what it is for. Each opens on the dials: every built-in preset as one slider (Ollie height, pop out of grinds, on-board gravity, landings, revert friction, Push speed, Body flip and spin speed, Bail resistance, Grind lock-on and friction, on-foot jump and sprint, glide, torpedo), where 1 is the game's own and the preset's button jumps to the preset; then the switches (Auto Push, No Speed Wobble, Smooth Surfaces, Long Wheelbase, Never bail), the trick sliders (flip trick speed, pump power, no comply, boneless, hippy and off-board jump height, and a revert speed boost: speed back on a landing the game auto reverts, from AutoRevertBoost by Sivaes, jaq and OVM) and the values themselves: a short plainly named list, or under EVERYTHING the whole table (the physics tuning's values, one multiplier per curve and graph, and the 314 values of the game's other tuning classes) with groups, "only what I changed" and locks. One search box finds dials, trick sliders and values on every list; pointing at a named value says what it does. The built-in presets include Skate 3 (and its Hardcore and Easy): Skate 3's numbers for every value this game still shares with it. Changes apply while you skate. Values the game was never found or seen reading are hidden unless you ask for them. **Reset everything**, above the tabs, puts the game back as it shipped. |
-| **PRACTICE** | Game speed and pause, five marker slots per map (save / go / clear), return to the marker after a bail, teleport to coordinates, copy your position (game or Blender axes). |
+| **PRACTICE** | Game speed and pause, five marker slots per map (save / go / clear), return to the marker after a bail, teleport to coordinates or to the waypoint you placed on the pause map (onto the surface there), copy your position (game or Blender axes). |
 | **MAP & HUD** | Speed and air-time HUD, a read-out after every jump (takeoff speed and angle, height, distance, drop, landing speed, spin and flip), telemetry recording to CSV, and whatever the map's author ships for the trainer. At the bottom, the whole game at once: "Play like" (skate., Skate 3 Easy, Skate 3, Skate 3 Hardcore) and your own presets: save the setup you have now under a name, turn it on and off, share it as one line of text, import one you were sent. |
 
 The HUD, the jump read-out and the controller shortcuts are off until you switch them on (MAP & HUD,
@@ -26,7 +26,7 @@ it can be switched off on PRACTICE. With the marker shortcuts switched on: hold 
 Everything is also a console command (`~`): `trainer open [tune|practice|map|realistic|fun|everything]`, `trainer status`, `trainer set <id> <value>`,
 `trainer find <words>`, `trainer preset apply|remove|export <name>`, `trainer preset import`, `trainer dial <multiplier> <preset name>`,
 `trainer reset <id>|all|tricks|presets|everything`, `trainer marker save|go|clear [slot]`,
-`trainer tp <x> <y> <z>`, `trainer where`, `trainer jumps`, `trainer dump`, `trainer selftest`.
+`trainer tp <x> <y> <z>`, `trainer waypoint [info]`, `trainer ground <x> <z>`, `trainer where`, `trainer jumps`, `trainer dump`, `trainer selftest`.
 
 ## For map makers: `trainer.json`
 
@@ -78,6 +78,13 @@ It unlocks no cosmetics or entitlements.
   snapshots (`trainer_view.cpp`).
 - Jumps are measured from the skater's position each client tick: the game's own physics state says when the skater is in the air.
   Wipeouts come from the same state, which the no-bail hook already sees.
+- The pause map's waypoint is a point of interest in the map's registry (the one ReSkate's party
+  markers use, `addr::native_party::map_manager`), kind `DingoMapPOIType_Waypoint` (3). The registry
+  is walked only while the TELEPORT card is on screen or `trainer waypoint` runs (`trainer_waypoint.cpp`).
+- A waypoint's height is not the ground. `trainer waypoint` and `trainer ground` cast the park
+  editor's downward ray through the client physics world and land on the topmost surface; if
+  collision there is still streaming in, a short watch puts the skater back on it once it arrives.
+  The decisions are in `trainer_landing.h`, tested by `dingosdk_trainer_landing_tests`.
 - Settings, presets, markers: `%LOCALAPPDATA%\ReSkate\trainer\trainer.json`.
 
 ## Checking a build
@@ -88,7 +95,8 @@ ReSkateLauncher.exe --no-gui --no-update
 ```
 
 then read the `trainer selftest:` lines in `logs\ReSkate.log`. `dingosdk_trainer_tuning_dump <Skate
-folder>` (CMake option `DINGOSDK_BUILD_TRAINER_TESTS`) lists the tuning values without the game.
+folder>` (CMake option `DINGOSDK_BUILD_TRAINER_TESTS`) lists the tuning values without the game;
+the same option builds the `trainer_session_extras` and `trainer_landing` tests (`ctest -R trainer`).
 
 ## Known limits
 
