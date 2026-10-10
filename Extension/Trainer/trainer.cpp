@@ -1388,7 +1388,11 @@ void drive_flip_speed(std::uintptr_t base, bool airborne) {
     auto &drive = s.flip_drive;
     const auto now = read_flip_state(base, static_cast<std::uintptr_t>(s.entity));
     s.flip_live = static_cast<bool>(now);
-    if (!now || !airborne) {
+    // A plain ollie (trick 1) plays the same clip and reads the same number: slowed, it hangs in
+    // the air (measured: 0.60 s of air at 1, 0.65 s at 0.5, 0.77 to 0.88 s at 0.25). Only a flip
+    // trick is driven.
+    const bool flipping = now && now.trick > 1;
+    if (!now || !airborne || !flipping) {
         if (now && drive.active && now.speed == drive.written && drive.written != drive.game) (void)write_flip_speed(now, drive.game);
         drive = {};
         return;
