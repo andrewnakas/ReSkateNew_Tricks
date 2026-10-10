@@ -181,6 +181,19 @@ void movement_controls(SkateMenu& menu, const Model& model, const CallbacksV3& c
     if (ImGui::SliderFloat("##offboard-up-velocity", &offboard_up_velocity, 1.0f, 25.0f, "+%.1f", ImGuiSliderFlags_AlwaysClamp))
         debug_request(menu, callbacks, {DebugAction::set_offboard_up_velocity_speed, false, offboard_up_velocity});
     ImGui::EndDisabled();
+    note("Controller: left stick moves, right stick looks, RT / LT rise and fall, click the left stick to boost.");
+    note("Keyboard: WASD / Q E, Shift to boost. Close the menu to fly.");
+    end_card();
+}
+
+// Dark Pop (Extension/Skater/no_bail.cpp, input_capture.cpp): shown with the tricklining tools on PHYSICS > TUNE > TRICKLINING.
+void dark_pop_controls(SkateMenu& menu, const Model& model, const CallbacksV3& callbacks) {
+    const auto& debug = model.debug;
+    begin_card(menu, "dark-pop", "DARK POP", "Catch with RB, then D-pad Right in the air");
+    bool dark_pop = debug.dark_pop;
+    if (toggle_row(menu, "Dark Pop", "Catch your trick with RB, then press D-pad Right in the air and hold it or let go: the game sees it held and let go at the time set above, counted from your takeoff. D-pad Right without RB is left alone. From the press until the pop lands, bails are held off, and a landing the game would bail becomes the pop. Best on flat ground.",
+            dark_pop, callbacks.queue_debug != nullptr))
+        debug_request(menu, callbacks, {DebugAction::set_dark_pop_enabled, dark_pop});
     field(menu, "Dark Pop release");
     float dark_release = debug.dark_pop_release;
     if (ImGui::SliderFloat("##dark-pop-release", &dark_release, 0.55f, 0.90f, "%.3f s after takeoff", ImGuiSliderFlags_AlwaysClamp))
@@ -189,16 +202,11 @@ void movement_controls(SkateMenu& menu, const Model& model, const CallbacksV3& c
     float dark_strength = debug.dark_pop_strength;
     if (ImGui::SliderFloat("##dark-pop-strength", &dark_strength, 0.0f, 25.0f, "+%.1f m/s", ImGuiSliderFlags_AlwaysClamp))
         debug_request(menu, callbacks, {DebugAction::set_dark_pop_strength, false, dark_strength});
-    bool dark_pop = debug.dark_pop;
-    if (toggle_row(menu, "Dark Pop", "Catch your trick with RB, then press D-pad Right in the air and hold it or let go: the game sees it held and let go at the time set above, counted from your takeoff. D-pad Right without RB is left alone. From the press until the pop lands, bails are held off, and a landing the game would bail becomes the pop. Best on flat ground.",
-            dark_pop, callbacks.queue_debug != nullptr))
-        debug_request(menu, callbacks, {DebugAction::set_dark_pop_enabled, dark_pop});
     bool probe = debug.probe;
     if (toggle_row(menu, "Dark pop probe", "Records what the game does to two files in the logs folder named dark-pop-probe-<time>.csv and dark-pop-fast-<time>.csv. A new pair is made each time you switch it on. Turn it on, do your attempts, turn it off, and send both files.",
             probe, callbacks.queue_debug != nullptr))
         debug_request(menu, callbacks, {DebugAction::set_probe_enabled, probe});
-    note("Controller: left stick moves, right stick looks, RT / LT rise and fall, click the left stick to boost.");
-    note("Keyboard: WASD / Q E, Shift to boost. Close the menu to fly.");
+    note("Start with the release at 0.60 to 0.68 s: on a flat kickflip the default 0.715 s is later than the landing and does nothing.");
     end_card();
 }
 

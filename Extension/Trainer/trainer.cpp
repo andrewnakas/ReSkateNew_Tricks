@@ -1499,7 +1499,15 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
                                                   s.telemetry.speed * 3.6f));
         s.state_since = stamp;
         // </dev>
-        if (watch.state == addr::no_bail::offboard_physics_state && s.last_state == 100 && s.boosts.hippy != 1.0f) {
+        // Off a grind or a slide the board is in a 400s state (401 and 403 seen in a playtest) and the hippy leaves it the same
+        // way; that case is built from the riding one and not measured yet.
+        const bool from_board = s.last_state == 100 || (s.last_state >= 400 && s.last_state < 500);
+        // <dev>
+        if (dev_capture && (watch.state >= 400 || s.last_state >= 400))
+            say(logging::Level::info, std::format("Trainer capture: state {} -> {}, up {:.2f} m/s, {:.1f} km/h.", s.last_state, watch.state,
+                                                  s.telemetry.vertical, s.telemetry.speed * 3.6f));
+        // </dev>
+        if (watch.state == addr::no_bail::offboard_physics_state && from_board && s.boosts.hippy != 1.0f) {
             s.boost_factor = std::sqrt(s.boosts.hippy); // height goes with the square of the speed
             s.boost_until = now + 250;
             s.boost_name = "hippy jump";

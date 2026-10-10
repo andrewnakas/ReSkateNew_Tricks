@@ -47,7 +47,7 @@ struct Page {
 };
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words);
 void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View &view);
-void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view);
+void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view);
 Page &page() {
     static auto *value = new Page;
     return *value;
@@ -303,7 +303,7 @@ void your_presets(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const 
     end_card();
 }
 
-void tune_tab(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
+void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     if (!view.ready) {
         begin_card(menu, "tune-wait", "PHYSICS TUNING");
         note(view.status.c_str());
@@ -355,7 +355,7 @@ void tune_tab(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks, Page
         end_card();
     }
     if (p.mode == 3 && !searching) {
-        trickline_section(menu, callbacks, p, view);
+        trickline_section(menu, model, callbacks, p, view);
         return;
     }
     begin_card(menu, "dials", p.mode == 0 ? "FEEL: TONE IT DOWN" : p.mode == 1 ? "FEEL: TURN IT UP" : "FEEL",
@@ -722,7 +722,7 @@ void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::
 
 // Everything that makes a trick line, in one place: the same values and sliders as the Tune tab,
 // gathered, with one button for Skate 3's and one for the game's own.
-void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
+void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     const bool can_edit = view.editable && callbacks.queue_console_command != nullptr;
     ImGui::BeginDisabled(!can_edit);
     begin_card(menu, "trickline", "TRICKLINING EXTRAS", "What Skate 3's tricklining had beyond its tuning");
@@ -733,6 +733,10 @@ void trickline_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, c
         trainer_command(menu, callbacks, extras ? "trickline extras on" : "trickline extras off");
     note("Pick the game to play like above, then tune the tricklining part of it here. Blue = changed; Reset puts one value back. Type in a box to go past a slider's end.");
     end_card();
+    // Dark Pop is ReSkate's own switch (not a tuning value), so it is live even where the tuning is locked.
+    ImGui::EndDisabled();
+    dark_pop_controls(menu, model, callbacks);
+    ImGui::BeginDisabled(!can_edit);
 
     // Rows of the value table by id, looked up once per snapshot.
     static constexpr const char *groups[][2]{
