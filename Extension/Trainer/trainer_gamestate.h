@@ -36,6 +36,17 @@ struct PumpState {
 };
 PumpState read_pump_state(std::uintptr_t base, std::uintptr_t entity) noexcept;
 
+// Off the board, a flip in the air (jump, then RB and the left stick): Float.Intent.BodyFlipSpeedMod and
+// Float.Intent.BodyFlipAccelerationRate. An address is 0 while that state is not known or the skater has none.
+struct BodyFlipState {
+    std::uintptr_t speed_at{}, rate_at{};
+    float speed{}, rate{};
+};
+BodyFlipState read_body_flip_state(std::uintptr_t base, std::uintptr_t entity) noexcept;
+bool write_state_number(std::uintptr_t at, float value) noexcept;
+// Enum.Intent.Manual for the skater: 0 none, above 0 a manual; -1 while the state is not known.
+std::int32_t read_manual_intent(std::uintptr_t base, std::uintptr_t entity) noexcept;
+
 // The tricks that have a speed of their own under "Advanced trick speed". A nollie turns at
 // its regular trick's speed.
 struct FlipTrick {

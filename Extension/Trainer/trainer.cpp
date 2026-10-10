@@ -262,6 +262,7 @@ struct State {
     const char *boost_name{""};
     // The no comply and the boneless are launched by the trick scripts too (trainer_jump.cpp).
     float nocomply_height{1}, boneless_height{1};
+    float manual_height{1}; // the pop out of a manual
     float revert_boost{};            // 0: off
     float pump_power{1};             // x what pumping a transition gains
     bool pump_live{};                // the game's pumping states are found
@@ -430,6 +431,7 @@ void load_store() {
             s.return_delay = std::clamp(o.value("return_delay", 1.5f), 0.0f, 10.0f);
             s.hippy_height = std::clamp(o.value("hippy_height", 1.0f), height_low, height_high);
             s.nocomply_height = std::clamp(o.value("nocomply_height", 1.0f), height_low, height_high);
+            s.manual_height = std::clamp(o.value("manual_height", 1.0f), height_low, height_high);
             s.offboard_height = std::clamp(o.value("offboard_height", 1.0f), height_low, height_high);
             s.flip_speed = std::clamp(o.value("flip_speed", 1.0f), flip_low, flip_high);
             s.flip_advanced = o.value("flip_advanced", false);
@@ -494,6 +496,7 @@ void save_store() {
         options["return_delay"] = s.return_delay;
         options["hippy_height"] = s.hippy_height;
         options["nocomply_height"] = s.nocomply_height;
+        options["manual_height"] = s.manual_height;
         options["offboard_height"] = s.offboard_height;
         options["flip_speed"] = s.flip_speed;
         options["flip_advanced"] = s.flip_advanced;
@@ -1029,7 +1032,7 @@ std::string apply_dial(std::string_view name, double factor) {
 }
 // A preset of the player's own also carries the trick sliders that are off 1, under these keys.
 constexpr std::string_view trick_prefix = "trick.";
-constexpr std::string_view trick_sliders[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height", "revert_boost", "pump_power"};
+constexpr std::string_view trick_sliders[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height", "revert_boost", "pump_power", "manual_height"};
 // Those and the speed of each flip trick.
 constexpr auto trick_names = [] {
     std::array<std::string_view, std::size(trick_sliders) + flip_tricks.size()> names{};
@@ -1050,7 +1053,7 @@ float *trick_option(std::string_view name) {
         if (name == flip_tricks[i].key) return &s.flip_trick[i];
     return name == "flip_speed" ? &s.flip_speed : name == "hippy_height" ? &s.hippy_height : name == "nocomply_height" ? &s.nocomply_height
          : name == "boneless_height" ? &s.boneless_height : name == "offboard_height" ? &s.offboard_height
-         : name == "revert_boost" ? &s.revert_boost : name == "pump_power" ? &s.pump_power : nullptr;
+         : name == "revert_boost" ? &s.revert_boost : name == "pump_power" ? &s.pump_power : name == "manual_height" ? &s.manual_height : nullptr;
 }
 // Sets a trick slider named by a preset key; false when the key is not one.
 bool set_trick_key(std::string_view key, double value) {
@@ -1383,6 +1386,30 @@ void finish_jump(const Vec3 &landing, float landing_speed, std::int64_t landed_a
 // Float.Anim.TrickFlipSpeed when the board is flicked; while the skater is in the air the
 // trainer keeps it at that number times the flip speed (and, with "Advanced trick speed", times
 // the speed of the trick that is turning). On the ground the game's own number is put back.
+// <dev>
+// `trainer bodyflip`: the off-board flip's two states, what they have been since last asked, and a hold for tests.
+struct DevBodyFlip {
+    bool hold_speed{}, hold_rate{}, found{};
+    float speed{}, rate{};
+    float low_speed{1e9f}, high_speed{-1e9f}, low_rate{1e9f}, high_rate{-1e9f};
+    BodyFlipState last{};
+} dev_body_flip;
+void drive_dev_body_flip(std::uintptr_t base) {
+    auto &b = dev_body_flip;
+    const auto now = read_body_flip_state(base, static_cast<std::uintptr_t>(state().entity));
+    b.last = now;
+    if (now.speed_at) {
+        b.low_speed = std::min(b.low_speed, now.speed);
+        b.high_speed = std::max(b.high_speed, now.speed);
+        if (b.hold_speed) (void)write_state_number(now.speed_at, b.speed);
+    }
+    if (now.rate_at) {
+        b.low_rate = std::min(b.low_rate, now.rate);
+        b.high_rate = std::max(b.high_rate, now.rate);
+        if (b.hold_rate) (void)write_state_number(now.rate_at, b.rate);
+    }
+}
+// </dev>
 void drive_flip_speed(std::uintptr_t base, bool airborne) {
     auto &s = state();
     auto &drive = s.flip_drive;
@@ -1529,6 +1556,9 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     // On the ground the limit is the game's own: the number left by the last flight means nothing for the next.
     if (!m.airborne) state().catch_seconds = flip_gate_stock;
     drive_flip_speed(base, m.airborne);
+// <dev>
+    drive_dev_body_flip(base);
+// </dev>
     if (m.airborne) {
         m.apex = std::max(m.apex, position[1]);
         t.air_time = static_cast<float>(clock_seconds(stamp - m.takeoff_stamp));
@@ -1537,8 +1567,8 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
             // so far plus the time back down to the height they left from. Right over flat ground,
             // short over a drop. The game has a flip round `seconds` before the landing it
             // predicts, so the catch falls at the asked part of the flight.
-            const auto *gravity = find_entry("onboard_speedmodel.gravityacceleration");
-            const float g = std::max(1.0f, gravity ? static_cast<float>(gravity->touched ? gravity->value : gravity->stock) : 9.81f);
+            // The flight's own gravity (the trajectory object holds 0, -9.8, 0); the tuning value named for it does nothing.
+            const float g = 9.8f;
             const float rise = velocity[1], above = std::max(0.0f, position[1] - m.takeoff[1]);
             const float whole = t.air_time + (rise + std::sqrt(rise * rise + 2 * g * above)) / g;
             // A catch asked for earlier than a board can come round (a flick late in a short
@@ -2305,6 +2335,7 @@ void build_view() {
     next->auto_return = s.auto_return;
     next->hippy_height = s.hippy_height;
     next->nocomply_height = s.nocomply_height;
+    next->manual_height = s.manual_height;
     next->offboard_height = s.offboard_height;
     next->flip_speed = s.flip_speed;
     next->flip_advanced = s.flip_advanced;
@@ -2604,6 +2635,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             }
         }
         set_trick_heights(s.boosts.nocomply, s.boosts.boneless);
+        // The pop out of a manual: the ollie's launch, scaled while Enum.Intent.Manual says the skater is in one.
+        set_manual_pop(s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 1.0f : s.manual_height,
+                       read_manual_intent(s.base, static_cast<std::uintptr_t>(s.entity)));
         // The speeds pushes aim for are the push class's (value_links ties them to the tuning's top
         // pushing speed, which only gates whether a push may start).
         const auto *top_speed = find_entry("physicspush.maxpushablespeed");
@@ -2624,7 +2658,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             // <dev>
             measure = s.pump_log;
             // </dev>
-            states_in_use(s.pump_power != 1.0f || measure);
+            states_in_use(s.pump_power != 1.0f || s.manual_height != 1.0f || measure);
             set_pump_power(client, s.entity, extras_blocked() ? 1.0f : s.pump_power, pump.found && pump.pumping, measure);
             // <dev>
             if (s.pump_log) {
@@ -2783,7 +2817,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
                           : std::format("{} values put back.", count);
         }
         if (v == "reset" && lower(arg(0)) == "tricks") {
-            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = 1.0f;
+            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = s.manual_height = 1.0f;
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_trick.fill(1.0f);
@@ -2812,7 +2846,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             }
             s.saved.clear();
             s.active.clear();
-            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = 1.0f;
+            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = s.manual_height = 1.0f;
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_trick.fill(1.0f);
@@ -2970,11 +3004,12 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             if (!value) return "error: " + name + " needs a multiplier, 1 = the game's own speed.";
             if (!editable(&why)) return "error: " + why;
             *option = std::clamp(static_cast<float>(*value), flip_low, flip_high);
-        } else if (name == "hippy_height" || name == "nocomply_height" || name == "boneless_height" || name == "offboard_height") {
+        } else if (name == "hippy_height" || name == "nocomply_height" || name == "boneless_height" || name == "offboard_height" || name == "manual_height") {
             const auto value = number(arg(1));
             if (!value) return "error: " + name + " needs a multiplier, 1 = the game's own height.";
             if (!editable(&why)) return "error: " + why;
-            (name == "hippy_height" ? s.hippy_height : name == "nocomply_height" ? s.nocomply_height : name == "offboard_height" ? s.offboard_height : s.boneless_height) =
+            (name == "hippy_height" ? s.hippy_height : name == "nocomply_height" ? s.nocomply_height : name == "offboard_height" ? s.offboard_height
+             : name == "manual_height" ? s.manual_height : s.boneless_height) =
                 std::clamp(static_cast<float>(*value), height_low, height_high);
         } else if (name == "pump_power") {
             const auto value = number(arg(1));
@@ -3439,6 +3474,30 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         const auto top = s.telemetry.top_speed;
         s.telemetry.top_speed = 0;
         return std::format("Top speed since last asked: {:.2f} m/s ({:.1f} km/h); now {:.2f} m/s.", top, top * 3.6f, s.telemetry.speed);
+    }
+    if (v == "bodyflip") {
+        // trainer bodyflip [speed <x>|rate <x>|off]...: read the off-board flip states; hold one at a number every tick.
+        auto &b = dev_body_flip;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            const auto word = lower(a[i]);
+            if (word == "off") b.hold_speed = b.hold_rate = false;
+            else if (word == "speed" && i + 1 < a.size()) { b.speed = std::stof(a[++i]); b.hold_speed = true; }
+            else if (word == "rate" && i + 1 < a.size()) { b.rate = std::stof(a[++i]); b.hold_rate = true; }
+        }
+        auto text = std::format("speed {} now {:.4g} (seen {:.4g}..{:.4g}){}, rate {} now {:.4g} (seen {:.4g}..{:.4g}){}.",
+            b.last.speed_at ? "found" : "NOT found", b.last.speed, b.low_speed, b.high_speed, b.hold_speed ? std::format(", held at {:.4g}", b.speed) : "",
+            b.last.rate_at ? "found" : "NOT found", b.last.rate, b.low_rate, b.high_rate, b.hold_rate ? std::format(", held at {:.4g}", b.rate) : "");
+        b.low_speed = b.low_rate = 1e9f;
+        b.high_speed = b.high_rate = -1e9f;
+        return text;
+    }
+    if (v == "launches") return trajectory_calls();
+    if (v == "launchdump") return trajectory_parameters();
+    if (v == "launchtest") {
+        // trainer launchtest <ollie launch scale> [<float slot> <value>]
+        const auto scale = number(arg(0)), slot = number(arg(1)), value = number(arg(2));
+        trajectory_test(scale ? static_cast<float>(*scale) : 1.0f, slot && value ? static_cast<int>(*slot) : -1, value ? static_cast<float>(*value) : 0.0f);
+        return std::format("Ollie launch x{:.2f}, slot {}.", scale ? *scale : 1.0, slot && value ? static_cast<int>(*slot) : -1);
     }
     if (v == "dp") {
         // trainer dp [on|off] [release <s>] [extra <m/s>] [probe on|off]: Dark Pop's switches, for scripted tests.

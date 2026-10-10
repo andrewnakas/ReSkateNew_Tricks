@@ -83,6 +83,7 @@ struct View {
     float hippy_height{1};
     // The same for the no comply and the boneless.
     float nocomply_height{1}, boneless_height{1};
+    float manual_height{1}; // the pop out of a manual
     float revert_boost{}; // strength of the speed given back on an auto revert; 0: off
     float pump_power{1};  // x what pumping a transition gains
     bool pump_live{};     // the game's pumping states are found: the pump power acts

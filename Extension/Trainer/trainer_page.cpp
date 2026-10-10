@@ -31,7 +31,7 @@ struct Page {
     std::array<char, 49> preset_name{};
     std::array<float, 3> teleport{};
     double speed_edit{-1}, speed_until{};
-    float hippy_edit{1}, nocomply_edit{1}, boneless_edit{1}, offboard_edit{1}, flip_edit{1}, pump_edit{1};
+    float manual_edit{1}, hippy_edit{1}, nocomply_edit{1}, boneless_edit{1}, offboard_edit{1}, flip_edit{1}, pump_edit{1};
     std::array<float, trainer::flip_tricks.size()> trick_edit{}; // the speed of each flip trick
     std::array<bool, trainer::flip_tricks.size()> trick_editing{};
     float revert_edit{};
@@ -39,7 +39,7 @@ struct Page {
     // The Tricklining list: rows of the value table per group, for one snapshot.
     std::array<std::vector<std::size_t>, 5> trick_rows;
     std::uint64_t trick_revision{~0ull};
-    bool hippy_editing{}, nocomply_editing{}, boneless_editing{}, offboard_editing{}, flip_editing{}, pump_editing{};
+    bool manual_editing{}, hippy_editing{}, nocomply_editing{}, boneless_editing{}, offboard_editing{}, flip_editing{}, pump_editing{};
     std::uint64_t open_serial{}; // the last `trainer open` acted on
     std::uint64_t share_serial{}; // the last `preset export` put on the clipboard
     bool share_seen{};
@@ -516,6 +516,8 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         if (view.catch_at && view.flip_gate_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here.");
         else if (on && !view.flip_gate_found) ImGui::TextDisabled("Not found in the game yet: it takes effect a few seconds after a level loads.");
     }
+    slider("Manual pop height", "manual_height", view.manual_height, p.manual_edit, p.manual_editing,
+           "How high you pop out of a manual or a nose manual. 1 is the game's own (lower than a riding ollie). Ollie height raises both.");
     slider("No comply height", "nocomply_height", view.nocomply_height, p.nocomply_edit, p.nocomply_editing, "How high a no comply pops. 1 is the game's own.");
     slider("Boneless height", "boneless_height", view.boneless_height, p.boneless_edit, p.boneless_editing, "How high a boneless pops. 1 is the game's own.");
     slider("Hippy jump height", "hippy_height", view.hippy_height, p.hippy_edit, p.hippy_editing, "How high you jump off the board in a hippy jump. 1 is the game's own.");
@@ -557,7 +559,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
     }
     if (ImGui::Button("Reset tricks")) {
         p.revert_editing = false;
-        p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = false;
+        p.manual_editing = p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = false;
         p.trick_editing = {};
         trainer_command(menu, callbacks, "reset tricks");
     }
@@ -950,7 +952,7 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     // A guest under the host's physics would only wipe a setup they cannot see at work here.
     ImGui::BeginDisabled(!callbacks.queue_console_command || view->session_enforced);
     if (ImGui::Button("RESET EVERYTHING")) {
-        p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = p.revert_editing = false;
+        p.manual_editing = p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = p.revert_editing = false;
         p.trick_editing = {};
         trainer_command(menu, callbacks, "reset everything");
     }

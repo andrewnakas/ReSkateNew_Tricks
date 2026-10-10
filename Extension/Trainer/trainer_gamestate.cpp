@@ -56,7 +56,15 @@ StateObject pump_strength_object{{0x54, 0xc6, 0x59, 0x6a, 0xbb, 0xad, 0xfc, 0x05
                                  "Animation/Dingo/Float.Intent.UserTriggeredPumpStrength"};
 StateObject pump_assist_object{{0xcb, 0xdf, 0x5b, 0x53, 0x14, 0x53, 0xc8, 0x29, 0x53, 0x5b, 0xdf, 0xcb, 0x53, 0x14, 0x29, 0xc8},
                                "Animation/Dingo/Float.Anim.PumpingAssistAmount"};
-StateObject *const objects[]{&flip_speed_object, &flip_trick_object, &pumping_object, &pump_strength_object, &pump_assist_object};
+// Off the board: how fast a flip in the air (jump, then RB and the left stick) turns, and how quickly it gets there.
+StateObject body_flip_speed_object{{0xbc, 0x5b, 0x7b, 0x1d, 0x12, 0xd8, 0xa1, 0x2a, 0x1d, 0x7b, 0x5b, 0xbc, 0xd8, 0x12, 0x2a, 0xa1},
+                                   "Animation/Dingo/Float.Intent.BodyFlipSpeedMod"};
+StateObject body_flip_rate_object{{0x74, 0x34, 0x08, 0x3f, 0x5e, 0x6f, 0xb4, 0xfa, 0x3f, 0x08, 0x34, 0x74, 0x6f, 0x5e, 0xfa, 0xb4},
+                                  "Animation/Dingo/Float.Intent.BodyFlipAccelerationRate"};
+// Which manual the player is asking for (0: none).
+StateObject manual_object{{0x77, 0x52, 0xaa, 0x61, 0x87, 0xb9, 0xfb, 0xaa, 0x61, 0xaa, 0x52, 0x77, 0xb9, 0x87, 0xaa, 0xfb}, "Animation/Dingo/Enum.Intent.Manual"};
+StateObject *const objects[]{&manual_object, &flip_speed_object, &flip_trick_object, &pumping_object, &pump_strength_object, &pump_assist_object,
+                             &body_flip_speed_object, &body_flip_rate_object};
 
 // The object behind an asset id seen at `id_at`, when it is that state's (its name says so).
 bool is_object(const StateObject &object, std::uintptr_t id_at) noexcept {
@@ -172,6 +180,31 @@ PumpState read_pump_state(std::uintptr_t base, std::uintptr_t entity) noexcept {
     if (const auto at = value_address(pump_assist_object, block); at && peek(at, number) && std::isfinite(number)) state.assist = number;
     return state;
 }
+BodyFlipState read_body_flip_state(std::uintptr_t base, std::uintptr_t entity) noexcept {
+    BodyFlipState state;
+    if (!body_flip_speed_object.at.load(std::memory_order_relaxed) && !body_flip_rate_object.at.load(std::memory_order_relaxed)) return state;
+    const auto block = states_block(base, entity);
+    if (!block) return state;
+    float number{};
+    if (const auto at = value_address(body_flip_speed_object, block); at && peek(at, number) && std::isfinite(number)) {
+        state.speed_at = at;
+        state.speed = number;
+    }
+    if (const auto at = value_address(body_flip_rate_object, block); at && peek(at, number) && std::isfinite(number)) {
+        state.rate_at = at;
+        state.rate = number;
+    }
+    return state;
+}
+std::int32_t read_manual_intent(std::uintptr_t base, std::uintptr_t entity) noexcept {
+    if (!manual_object.at.load(std::memory_order_relaxed)) return -1;
+    const auto block = states_block(base, entity);
+    std::uint32_t value{};
+    if (!block) return -1;
+    const auto at = value_address(manual_object, block);
+    return at && peek(at, value) && value < 64 ? static_cast<std::int32_t>(value) : -1;
+}
+bool write_state_number(std::uintptr_t at, float value) noexcept { return at && std::isfinite(value) && put(at, value); }
 std::array<std::uintptr_t, 6> state_pages(std::uintptr_t base, std::uintptr_t entity) noexcept {
     std::array<std::uintptr_t, 6> pages{};
     if (const auto block = states_block(base, entity))
