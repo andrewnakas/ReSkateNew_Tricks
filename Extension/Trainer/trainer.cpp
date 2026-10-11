@@ -26,6 +26,7 @@
 #include "Extension/UI/Overlay/overlay.h"
 #include <windows.h>
 #include <shlobj.h>
+#include <xinput.h>
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -44,6 +45,10 @@ extern "C" std::uint64_t DingoSDKOverlayScriptControllerBlanked();
 // </dev>
 
 // Game thread only. See trainer.h for how the menu reaches this.
+extern "C" void DingoSDKOverlaySetGrindStickMirror(float amount) noexcept;
+extern "C" std::uint64_t DingoSDKOverlayGrindStickMirrored() noexcept;
+extern "C" void DingoSDKOverlaySetGrindStickTurn(bool on, float x, float y_add, float y_scale) noexcept;
+extern "C" void DingoSDKOverlayGrindStickSent(float *values) noexcept;
 namespace dingosdk::trainer {
 namespace {
 namespace tuning = dingosdk::physics_tuning;
@@ -243,6 +248,8 @@ struct State {
     // "Advanced trick speed": each flip trick also turns at a speed of its own (flip_tricks, trainer_gamestate.h).
     bool flip_advanced{};
     bool flip_pop{}; // a slowed flip trick pops higher, so it has the air time it needs
+    bool flip_flick{}; // a slow flick of the stick turns the board as fast as a full one
+    bool grind_watch{}; // the grind card is asking what the game's switches read (`trainer grind watch`)
     std::array<float, flip_tricks.size()> flip_trick = [] {
         std::array<float, flip_tricks.size()> ones{};
         ones.fill(1.0f);
@@ -252,9 +259,12 @@ struct State {
     struct FlipDrive {
         bool active{};
         float game{}, written{};
+        float clamped{}; // the impossible's own speed state as the flight began
         float factor{1}; // the flip speed times the turning trick's own
         std::uint32_t trick{}; // the trick it was last driven for
     } flip_drive;
+    float flip_game_seen{}; // the game's own number in the last driven flight (for the flight log)
+    float flip_clamped_seen{-1}; // and what the impossible's own speed state read (-1: not found)
     bool flip_live{};
     std::uint32_t flip_trick_seen{}; // the last trick that turned (CurrentFlipTrick)
     bool catch_at{};           // flips are caught at catch_percent of the jump's air time
@@ -265,6 +275,32 @@ struct State {
     // The no comply and the boneless are launched by the trick scripts too (trainer_jump.cpp).
     float nocomply_height{1}, boneless_height{1};
     float manual_height{1}; // the pop out of a manual
+    float grind_side{1};    // the sideways part of a pop out of a grind or slide
+    float grind_push{};     // Skate 3's pop: this many m/s sideways at full stick, the way the stick points (0: none)
+    // Skate 3's one stick on a grind: the left stick also leans (skate. leans with the right stick), times this (0: off).
+    float grind_lean{};
+    // How fast the stick turns / tips the board on a grind (the game's two control multipliers); 0: the game's own.
+    float grind_turn{}, grind_tip{};
+    // Skate 3's turn on a grind: the left stick alone turns the board, up to this many degrees either way (0: off, the
+    // game's own, which follows where the right stick points). Negative turns the other way.
+    float grind_range{};
+    float grind_yaw{};          // Skate 3's eased stick, -0.614..0.614
+    float grind_heading{};      // what the game is answered with (radians)
+    std::uint32_t grind_heading_asked{};
+    // The angle the game turns the right stick by before it steers the board (it reads the stick from the camera's side):
+    // measured from what it was shown against what its GrindControlLR / UD then read.
+    float grind_frame_cos{1}, grind_frame_sin{};
+    std::uint64_t grind_yaw_at{};
+    // The grind exit switches (grind_switches, trainer_gamestate.h): -1 the game's own, 0 held off, 1 held on; and what each read.
+    std::array<std::int8_t, grind_switches.size()> grind_mode = [] { std::array<std::int8_t, grind_switches.size()> a{}; a.fill(-1); return a; }();
+    std::array<std::int8_t, grind_switches.size()> grind_live = grind_mode;
+    // The game's own grind settings (grind_settings, trainer_gamestate.h): -1 the game's own, 0 forced off, 1 forced on.
+    std::array<std::int8_t, grind_settings.size()> grind_setting = [] { std::array<std::int8_t, grind_settings.size()> a{}; a.fill(-1); return a; }();
+    // What the game had a held switch at before the trainer first wrote it (-1: not held, or not read yet). The game
+    // sets most of them once and never again (measured 2026-10-11: released, a switch stayed where it was held), so
+    // "the game's own" has to put this back.
+    std::array<std::int8_t, grind_switches.size()> grind_stock = grind_mode;
+    std::uint32_t grind_multiplier_asked[2]{};
     float revert_boost{};            // 0: off
     float pump_power{1};             // x what pumping a transition gains
     bool pump_live{};                // the game's pumping states are found
@@ -434,10 +470,22 @@ void load_store() {
             s.hippy_height = std::clamp(o.value("hippy_height", 1.0f), height_low, height_high);
             s.nocomply_height = std::clamp(o.value("nocomply_height", 1.0f), height_low, height_high);
             s.manual_height = std::clamp(o.value("manual_height", 1.0f), height_low, height_high);
+            s.grind_side = std::clamp(o.value("grind_side", 1.0f), 0.0f, 1000.0f);
+            s.grind_push = std::clamp(o.value("grind_push", 0.0f), -50.0f, 50.0f);
+            s.grind_lean = std::clamp(o.value("grind_lean", 0.0f), -1.0f, 1.0f);
+            s.grind_turn = std::clamp(o.value("grind_turn", 0.0f), 0.0f, 1000.0f);
+            s.grind_range = std::clamp(o.value("grind_range", 0.0f), -360.0f, 360.0f);
+            s.grind_tip = std::clamp(o.value("grind_tip", 0.0f), 0.0f, 1000.0f);
+            for (std::size_t i = 0; i < grind_settings.size(); ++i)
+                s.grind_setting[i] = static_cast<std::int8_t>(std::clamp(o.value("grind.set." + std::string(grind_settings[i].key), -1), -1, 1));
+            for (std::size_t i = 0; i < grind_switches.size(); ++i)
+                s.grind_mode[i] = grind_switches[i].read_only ? std::int8_t{-1}
+                                                               : static_cast<std::int8_t>(std::clamp(o.value("grind." + std::string(grind_switches[i].key), -1), -1, 1));
             s.offboard_height = std::clamp(o.value("offboard_height", 1.0f), height_low, height_high);
             s.flip_speed = std::clamp(o.value("flip_speed", 1.0f), flip_low, flip_high);
             s.flip_advanced = o.value("flip_advanced", false);
             s.flip_pop = o.value("flip_pop", false);
+            s.flip_flick = o.value("flip_flick", false);
             for (std::size_t i = 0; i < flip_tricks.size(); ++i)
                 s.flip_trick[i] = std::clamp(o.value(std::string(flip_tricks[i].key), 1.0f), flip_low, flip_high);
             s.catch_at = false; // "Catch flips at a set point of the jump" was removed in 0.5.0
@@ -500,10 +548,21 @@ void save_store() {
         options["hippy_height"] = s.hippy_height;
         options["nocomply_height"] = s.nocomply_height;
         options["manual_height"] = s.manual_height;
+        options["grind_side"] = s.grind_side;
+        options["grind_push"] = s.grind_push;
+        options["grind_lean"] = s.grind_lean;
+        options["grind_turn"] = s.grind_turn;
+        options["grind_range"] = s.grind_range;
+        options["grind_tip"] = s.grind_tip;
+        for (std::size_t i = 0; i < grind_settings.size(); ++i)
+            if (s.grind_setting[i] >= 0) options["grind.set." + std::string(grind_settings[i].key)] = static_cast<int>(s.grind_setting[i]);
+        for (std::size_t i = 0; i < grind_switches.size(); ++i)
+            if (s.grind_mode[i] >= 0) options["grind." + std::string(grind_switches[i].key)] = static_cast<int>(s.grind_mode[i]);
         options["offboard_height"] = s.offboard_height;
         options["flip_speed"] = s.flip_speed;
         options["flip_advanced"] = s.flip_advanced;
         options["flip_pop"] = s.flip_pop;
+        options["flip_flick"] = s.flip_flick;
         for (std::size_t i = 0; i < flip_tricks.size(); ++i)
             if (s.flip_trick[i] != 1.0f) options[std::string(flip_tricks[i].key)] = s.flip_trick[i];
         options["catch_at"] = s.catch_at;
@@ -1438,10 +1497,66 @@ void drive_dev_body_flip(std::uintptr_t base) {
     }
 }
 // </dev>
+// The left stick's sideways position on the controller, -1 (left) to 1 (right), 0 inside a small dead zone: Skate 3's
+// grind pop reads it raw (its PhysGrindStabilityNudge is left stick X). The game state of the same name in skate.
+// (Float.Intent.GrindStabilityNudge) read 0 at every pop in the playtest of 2026-10-11, so the controller is asked.
+bool left_stick_raw(float &x, float &y) noexcept;
+// "Grinds like Skate 3" starts the board's turn speed here (the game's own is 0.2, its legacy grinds use 8): a first
+// setting, to be dialled against Skate 3's own turn (about 24 degrees, eased over a fifth of a second).
+constexpr float skate3_grind_turn = 1.0f;
+// And how far the left stick turns the board at its end. Skate 3's own code reads as about 24 degrees; the owner
+// remembers turning all the way to the next grind, so the preset starts at a quarter turn.
+constexpr float skate3_grind_range = 90.0f;
+float left_stick_x() noexcept {
+    float x{}, y{};
+    if (!left_stick_raw(x, y)) return 0;
+    constexpr float dead = 0.2f;
+    return std::abs(x) <= dead ? 0.0f : (x - std::copysign(dead, x)) / (1.0f - dead);
+}
+// The left stick as the controller reports it, each axis -1 to 1 (up and right are positive). False without a controller.
+bool left_stick_raw(float &x, float &y) noexcept {
+    using GetState = DWORD(WINAPI *)(DWORD, XINPUT_STATE *);
+    static const GetState get_state = []() -> GetState {
+        for (const auto name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"}) {
+            const auto module = LoadLibraryExW(name, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (!module) continue;
+            if (const auto entry = GetProcAddress(module, "XInputGetState")) {
+                GetState function{};
+                std::memcpy(&function, &entry, sizeof(function));
+                return function;
+            }
+            FreeLibrary(module);
+        }
+        return nullptr;
+    }();
+    x = y = 0;
+    if (!get_state) return false;
+    bool any = false;
+    float most = -1;
+    for (DWORD user = 0; user < 4; ++user) {
+        XINPUT_STATE pad{};
+        if (get_state(user, &pad) != ERROR_SUCCESS) continue;
+        any = true;
+        const float px = std::clamp(static_cast<float>(pad.Gamepad.sThumbLX) / 32767.0f, -1.0f, 1.0f);
+        const float py = std::clamp(static_cast<float>(pad.Gamepad.sThumbLY) / 32767.0f, -1.0f, 1.0f);
+        if (const float size = px * px + py * py; size > most) {
+            most = size;
+            x = px;
+            y = py;
+        }
+    }
+    return any;
+}
 // Test value (`trainer flipland <seconds>`): this long before the landing a slowed flip goes back to the game's own speed.
 float flip_land_window = 0;
 // Test value (`trainer flipturn <seconds>`): the turn time below, for every trick.
 float flip_turn_test = 0;
+// With "Flick tricks at full speed" the game's own flip speed counts as at least this (`trainer flipleast <n>` to
+// test). The game sets that speed from how fast the stick was flicked, and every trick's clip turns for the same 20
+// ticks, so a trick with a slow flick (the front foot impossible, the nollie impossibles, the 360 pop shuvits: 11 of 11
+// still turning at the landing in the playtest of 2026-10-11, at under half a clean impossible's turn rate) needs more
+// air than "Slow flips pop higher" allows for. Held up to this, they turn in the time that pop gives every other trick.
+float flip_least_game = 1.0f;
 // The least upward speed a pop into `trick`, slowed to `speed`, needs to land on time (0: the game's own will do).
 // Every flip trick turns for about 0.31 s at the game's speed and 0.31 s / speed slowed (playtest of 2026-10-10: 14
 // tricks, speeds 0.1 to 0.5), and scripted kickflips landed clean with 0.2 s more air than that. Shuvits and impossibles
@@ -1450,12 +1565,7 @@ float flip_turn_test = 0;
 float slow_flip_up(std::uint32_t trick, float speed) {
     if (!(speed < 1.0f)) return 0;
     const auto name = flip_trick_name(trick);
-    const auto has = [&](std::string_view part) { return name.find(part) != name.npos; };
-    float turn = has("Shuvit") || has("Impossible") ? 0.38f : 0.34f;
-    // The front foot impossible, the nollie impossibles and the 360 pop shuvits were still turning at every landing with
-    // that (playtest of 2026-10-11: 11 of 11 landed low, turning for more than 0.58 s / speed): a longer turn for them, not
-    // measured to its end yet.
-    if (has("FrontFoot") || has("BackFoot") || has("N_Impossible") || has("360PopShuvit")) turn = 0.65f;
+    float turn = name.find("Shuvit") != name.npos || name.find("Impossible") != name.npos ? 0.38f : 0.34f;
     if (flip_turn_test > 0) turn = flip_turn_test;
     const float air = 0.20f + turn / std::max(speed, 0.05f);
     return std::min(4.9f * (air - 0.04f), 16.5f);
@@ -1463,6 +1573,9 @@ float slow_flip_up(std::uint32_t trick, float speed) {
 // CurrentFlipTrick values that are a pop with no flip in it (the nollie, the ollie pops, the boned ollie, the wallies):
 // the flip speed leaves them alone, as it does the ollie.
 constexpr bool plain_pop(std::uint32_t trick) { return trick <= 1 || trick == 16 || trick == 31 || trick == 32 || (trick >= 33 && trick <= 35) || trick == 42; }
+// The ollies among those (ollie, nollie, their pops, the boned ollie). With "Slow flips pop higher" they are slowed and
+// popped like a flip trick (the owner's ask of 2026-10-11): the pop gives them the air a slowed clip hangs for.
+constexpr bool ollie_pop(std::uint32_t trick) { return trick == 1 || trick == 16 || trick == 31 || trick == 32 || trick == 42; }
 void drive_flip_speed(std::uintptr_t base, bool airborne, float to_landing) {
     auto &s = state();
     auto &drive = s.flip_drive;
@@ -1471,10 +1584,13 @@ void drive_flip_speed(std::uintptr_t base, bool airborne, float to_landing) {
     set_launch_trick(now ? now.trick : 0xffu, now ? now.trick_at : 0); // for the launch hook: the trick the game has in mind this tick
     // A plain ollie (trick 1) plays the same clip and reads the same number: slowed, it hangs in
     // the air (measured: 0.60 s of air at 1, 0.65 s at 0.5, 0.77 to 0.88 s at 0.25). Only a flip
-    // trick is driven.
-    const bool flipping = now && !plain_pop(now.trick);
+    // trick is driven, and the ollies where "Slow flips pop higher" gives them that air.
+    const bool flipping = now && (!plain_pop(now.trick) || (ollie_pop(now.trick) && s.flip_pop && !extras_blocked()));
     if (!now || !airborne || !flipping) {
-        if (now && drive.active && now.speed == drive.written && drive.written != drive.game) (void)write_flip_speed(now, drive.game);
+        if (now && drive.active && now.speed == drive.written && drive.written != drive.game) {
+            (void)write_flip_speed(now, drive.game);
+            if (now.clamped_at) (void)write_state_number(now.clamped_at, drive.clamped);
+        }
         drive = {};
         return;
     }
@@ -1500,10 +1616,14 @@ void drive_flip_speed(std::uintptr_t base, bool airborne, float to_landing) {
     if (factor < 1 && flip_land_window > 0 && to_landing < flip_land_window) factor = 1;
     // A number that is not the trainer's own is the game's: the flight's first, or a new trick's.
     if (!drive.active || now.speed != drive.written) drive.game = now.speed;
+    if (!drive.active) drive.clamped = now.clamped;
     drive.active = true;
     drive.factor = factor;
-    drive.written = std::clamp(drive.game * factor, 0.0f, 1000.0f);
-    if (now.speed != drive.written) (void)write_flip_speed(now, drive.written);
+    const bool held_up = s.flip_flick && !extras_blocked();
+    s.flip_game_seen = drive.game;
+    s.flip_clamped_seen = now.clamped_at ? now.clamped : -1.0f;
+    drive.written = std::clamp((held_up ? std::max(drive.game, flip_least_game) : drive.game) * factor, 0.0f, 1000.0f);
+    if (now.speed != drive.written || (now.clamped_at && now.clamped != drive.written)) (void)write_flip_speed(now, drive.written);
 }
 void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     auto &s = state();
@@ -1844,8 +1964,8 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
                     if (x.time > apex_at && x.height < lowest) { lowest = x.height; lowest_at = x.time; }
                 }
                 say(logging::Level::info, std::format("Trainer flipheight #{}: air {:.3f} s, up {:.2f} m/s, apex {:.2f} m at {:.2f} s, lowest {:.2f} m at {:.2f} s, "
-                                                      "flip speed {:.2f}, trick {}.", s.flip_serial, air, s.flip_takeoff_up, apex, apex_at, lowest, lowest_at,
-                                                      s.boosts.flip, s.flip_trick_seen));
+                                                      "flip speed {:.2f}, trick {}, game's speed {:.3f}, clamped {:.3f}.", s.flip_serial, air, s.flip_takeoff_up, apex, apex_at, lowest, lowest_at,
+                                                      s.boosts.flip, s.flip_trick_seen, s.flip_game_seen, s.flip_clamped_seen));
             }
             try {
                 std::ofstream out(data_directory() / "flips.csv", std::ios::app);
@@ -2433,10 +2553,20 @@ void build_view() {
     next->hippy_height = s.hippy_height;
     next->nocomply_height = s.nocomply_height;
     next->manual_height = s.manual_height;
+    next->grind_side = s.grind_side;
+    next->grind_push = s.grind_push;
+    next->grind_lean = s.grind_lean;
+    next->grind_turn = s.grind_turn;
+    next->grind_range = s.grind_range;
+    next->grind_tip = s.grind_tip;
+    next->grind_mode = s.grind_mode;
+    next->grind_setting = s.grind_setting;
+    next->grind_live = s.grind_live;
     next->offboard_height = s.offboard_height;
     next->flip_speed = s.flip_speed;
     next->flip_advanced = s.flip_advanced;
     next->flip_pop = s.flip_pop;
+    next->flip_flick = s.flip_flick;
     next->flip_trick = s.flip_trick;
     next->flip_advanced_blocked = s.flip_advanced && extras_blocked();
     next->flip_live = s.flip_live;
@@ -2464,7 +2594,10 @@ void build_view() {
     if (s.waypoint) next->waypoint = *s.waypoint;
     next->open_serial = s.open_serial;
     next->stock = s.revert == RevertTuning{} && !next->touched && s.active.empty() && std::ranges::none_of(s.entries, &Entry::frozen) &&
-                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); }) && !s.catch_at && !s.flip_advanced;
+                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); }) && !s.catch_at && !s.flip_advanced &&
+                  !s.flip_pop && !s.flip_flick && s.grind_side == 1.0f && s.grind_push == 0.0f && s.grind_lean == 0.0f && s.grind_turn == 0.0f && s.grind_tip == 0.0f && s.grind_range == 0.0f &&
+                  std::ranges::all_of(s.grind_mode, [](std::int8_t mode) { return mode < 0; }) &&
+                  std::ranges::all_of(s.grind_setting, [](std::int8_t mode) { return mode < 0; });
     next->share_text = s.share_text;
     next->share_serial = s.share_serial;
     next->open_tab = s.open_tab;
@@ -2658,6 +2791,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             s.entity = 0;
         }
         (void)start_trick_heights(base);
+        (void)start_state_holds(base);
         if (take_class_list_shown()) s.class_list_wanted = true;
         // The search reads all of the game's writable memory, so it runs only for a player with
         // a use for it: one of the classes' values or the flip speed is not the game's own
@@ -2676,7 +2810,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
                 find_classes();
             }
         }
-        flip_speed_in_use(s.boosts.flip != 1.0f || s.flip_advanced);
+        flip_speed_in_use(s.boosts.flip != 1.0f || s.flip_advanced || s.flip_flick);
         // The speed itself goes straight to the trick in the air (drive_flip_speed); the flip curves
         // are only scaled where that number cannot be reached.
         want_flip_speed(s.flip_live ? 1.0f : s.boosts.flip);
@@ -2738,7 +2872,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         // mind when it launches: measured, a kickflip reads 2 and an ollie 1 at that call).
         for (std::uint32_t trick = 0; trick < 64; ++trick) {
             float up = 0;
-            if (s.flip_pop && !extras_blocked() && !plain_pop(trick)) {
+            if (s.flip_pop && !extras_blocked() && (!plain_pop(trick) || ollie_pop(trick))) {
                 float factor = s.boosts.flip;
                 if (s.flip_advanced)
                     if (const auto index = flip_trick_index(trick); index >= 0) factor *= s.flip_trick[static_cast<std::size_t>(index)];
@@ -2748,6 +2882,38 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         }
         set_manual_pop(s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 1.0f : s.manual_height,
                        read_manual_intent(s.base, static_cast<std::uintptr_t>(s.entity)));
+        {
+            // The sideways part of a pop out of a grind, against the way the skater was travelling on it.
+            const auto watch = watched_physics_state();
+            const bool on_grind = watch.valid && watch.state >= 400 && watch.state < 500;
+            // The controller is only asked while it matters: on a grind, with the stick push in use or being logged.
+            const float stick = on_grind && (s.grind_push != 0.0f || s.hud_jump || s.logging) ? left_stick_x() : 0.0f;
+            // One stick on a grind: only while the skater is on one, and never where the session's rules apply.
+            DingoSDKOverlaySetGrindStickMirror(on_grind && !extras_blocked() ? s.grind_lean : 0.0f);
+            // <dev>
+            // What the stick does to the board on a grind, six times a second: for matching Skate 3's response.
+            // Thirty times a second while the stick is held: the turn's speed is read off these lines.
+            static std::uint32_t grind_ticks = 0;
+            float raw_x{}, raw_y{};
+            if (dev_capture && on_grind) (void)left_stick_raw(raw_x, raw_y);
+            if (dev_capture && on_grind && ++grind_ticks % (std::abs(raw_x) > 0.2f ? 2 : 10) == 0) {
+                const auto mirrored = DingoSDKOverlayGrindStickMirrored();
+                const auto c = read_grind_control(s.base, static_cast<std::uintptr_t>(s.entity));
+                const float travel = std::atan2(s.motion.velocity[0], s.motion.velocity[2]) * 180.0f / std::numbers::pi_v<float>;
+                say(logging::Level::info, std::format("Trainer grindctl: state {}, type {} / {}, stick {:.2f} {:.2f}, LR {:.3f} UD {:.3f}, heading {:.3f} x {:.2f} base {:.3f}, "
+                                                      "pitch {:.3f} x {:.2f} base {:.3f}, active {}, body {:.0f} deg, travel {:.0f} deg, {:.1f} km/h, found {:x}, lean polls {}.",
+                                                      watch.state, c.grind_type, c.skate_grind_type, raw_x, raw_y, c.lr, c.ud, c.heading, c.heading_multiplier, c.base_heading,
+                                                      c.pitch, c.pitch_multiplier, c.base_pitch, c.active_input, s.telemetry.heading, travel, s.telemetry.speed * 3.6f, c.found, mirrored) + std::format(" Trainer heading {:.3f}, stick x {:.2f}, y scale {:.2f}.", s.grind_heading, s.grind_frame_cos, s.grind_frame_sin));
+            }
+            // </dev>
+            set_grind_side(extras_blocked() ? 1.0f : s.grind_side, s.motion.velocity[0], s.motion.velocity[2], watch.valid && watch.state >= 400 && watch.state < 500,
+                           extras_blocked() ? 0.0f : s.grind_push, stick);
+            float along{}, side{}, nudge{};
+            if (take_grind_pop(along, side, nudge) && (s.hud_jump || s.logging || s.grind_side != 1.0f || s.grind_push != 0.0f))
+                say(logging::Level::info, std::format("Trainer grind pop: the game's launch {:.2f} m/s along the grind, {:.2f} m/s sideways (side force x {:.2f}); "
+                                                      "stick {:.2f}, stick push {:.2f} m/s.", along, side, extras_blocked() ? 1.0f : s.grind_side, nudge,
+                                                      extras_blocked() ? 0.0f : nudge * s.grind_push));
+        }
         // The speeds pushes aim for are the push class's (value_links ties them to the tuning's top
         // pushing speed, which only gates whether a push may start).
         const auto *top_speed = find_entry("physicspush.maxpushablespeed");
@@ -2769,7 +2935,76 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             measure = s.pump_log;
             searching = dev_capture; // the capture reads the off-board flip states
             // </dev>
-            states_in_use(s.pump_power != 1.0f || s.manual_height != 1.0f || measure || searching);
+            const bool grind_held = std::ranges::any_of(s.grind_mode, [](std::int8_t mode) { return mode >= 0; });
+            for (std::size_t i = 0; i < grind_settings.size(); ++i) force_grind_setting(i, extras_blocked() ? -1 : s.grind_setting[i]);
+            states_in_use(s.pump_power != 1.0f || s.manual_height != 1.0f || grind_held || s.grind_watch || s.grind_push != 0.0f || s.grind_turn > 0.0f || s.grind_tip > 0.0f || s.grind_range != 0.0f || measure || searching);
+            {
+                const auto watch = watched_physics_state();
+                const bool grinding = watch.valid && watch.state >= 400 && watch.state < 500;
+                hold_grind_multipliers(base, static_cast<std::uintptr_t>(s.entity), extras_blocked() ? 0.0f : s.grind_turn, extras_blocked() ? 0.0f : s.grind_tip,
+                                       grinding, s.grind_multiplier_asked);
+                // Skate 3's turn (retail sub_82D89F58): nothing inside a quarter of the stick, the rest stretched, x 0.85,
+                // cubed, eased 0.91 / 0.09 a sixtieth of a second; the end of the stick is `grind_range` degrees.
+                const bool turning = grinding && s.grind_range != 0.0f && !extras_blocked();
+                const auto turn_now = GetTickCount64();
+                if (turning) {
+                    float x{}, y{};
+                    (void)left_stick_raw(x, y);
+                    const float past = std::abs(x) <= 0.25f ? 0.0f : (std::abs(x) - 0.25f) * (4.0f / 3.0f) * (x < 0 ? -1.0f : 1.0f);
+                    const float wanted = std::pow(std::clamp(past * 0.85f, -0.85f, 0.85f), 3.0f);
+                    const float steps = s.grind_yaw_at ? std::clamp(static_cast<float>(turn_now - s.grind_yaw_at) * 0.06f, 0.0f, 6.0f) : 1.0f;
+                    s.grind_yaw += (wanted - s.grind_yaw) * (1.0f - std::pow(0.91f, steps));
+                    if (std::abs(s.grind_yaw) < 0.0001f && wanted == 0.0f) s.grind_yaw = 0.0f;
+                    s.grind_heading = s.grind_yaw / 0.614125f * s.grind_range * std::numbers::pi_v<float> / 180.0f;
+                    // The game's scripts cannot be answered (they do not go through the lookups), so its own grind control
+                    // is steered: it turns the board to about atan2(LR, |UD|) of the right stick it sees, after turning
+                    // that stick by an angle of its own. The stick it is shown: the turn, turned back by that angle; the
+                    // player's own up and down (the tip), shortened so the turn and the tip together stay on the rim.
+                    // (The sideways sign the game flips while the stick is down is undone where the stick is made up.)
+                    // Nothing is ever added to the player's up and down: a made-up move there reads as a pop or a flip.
+                    // It is only shortened so the turn can pass 45 degrees: freely while the stick is up (nose grind),
+                    // to no less than 0.6 while it is down (5-0), where letting go of the stick is the pop.
+                    float sent[3]{};
+                    DingoSDKOverlayGrindStickSent(sent);
+                    const float own_y = sent[2];
+                    float stick_x = std::clamp(s.grind_heading / 1.66f, -1.0f, 1.0f), y_scale = 1.0f; // flat: about 95 degrees at the end
+                    if (std::abs(own_y) > 0.3f) {
+                        const float heading = std::clamp(s.grind_heading, -1.4f, 1.4f);
+                        y_scale = std::max(own_y > 0 ? 0.17f : 0.6f, std::cos(heading));
+                        stick_x = std::clamp(std::tan(heading) * y_scale, -1.0f, 1.0f);
+                    }
+                    DingoSDKOverlaySetGrindStickTurn(true, stick_x, 0.0f, y_scale);
+                    s.grind_frame_cos = stick_x; // for the log: the stick's sideways part as asked for
+                    s.grind_frame_sin = y_scale;
+                } else {
+                    s.grind_yaw = s.grind_heading = 0.0f;
+                    DingoSDKOverlaySetGrindStickTurn(false, 0.0f, 0.0f, 1.0f);
+                }
+                s.grind_yaw_at = turning ? turn_now : 0;
+                s.grind_heading_asked = hold_grind_heading(base, static_cast<std::uintptr_t>(s.entity), false, 0.0f);
+            }
+            {
+                auto modes = s.grind_mode, live = s.grind_live;
+                if (extras_blocked()) modes.fill(-1);
+                for (std::size_t i = 0; i < modes.size(); ++i)
+                    if (modes[i] < 0 && s.grind_stock[i] >= 0) {
+                        modes[i] = s.grind_stock[i]; // released: the game's own value back, once
+                        s.grind_stock[i] = -1;
+                    }
+                hold_grind_switches(base, static_cast<std::uintptr_t>(s.entity), modes.data(), live.data());
+                for (std::size_t i = 0; i < modes.size(); ++i)
+                    if (s.grind_mode[i] >= 0 && !extras_blocked() && s.grind_stock[i] < 0 && live[i] >= 0) s.grind_stock[i] = live[i]; // read before the first write
+                if (live != s.grind_live) {
+                    // <dev>
+                    for (std::size_t i = 0; i < live.size(); ++i)
+                        if (dev_capture && live[i] != s.grind_live[i])
+                            say(logging::Level::info, std::format("Trainer capture: {} {} -> {}, physics state {}.", grind_switches[i].state, s.grind_live[i], live[i],
+                                                                  watched_physics_state().state));
+                    // </dev>
+                    s.grind_live = live;
+                    s.view_due = true;
+                }
+            }
             set_pump_power(client, s.entity, extras_blocked() ? 1.0f : s.pump_power, pump.found && pump.pumping, measure);
             // <dev>
             if (s.pump_log) {
@@ -2929,9 +3164,16 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         }
         if (v == "reset" && lower(arg(0)) == "tricks") {
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = s.manual_height = 1.0f;
+            s.grind_side = 1.0f;
+            s.grind_push = 0.0f;
+            s.grind_lean = 0.0f;
+            s.grind_turn = s.grind_tip = s.grind_range = 0.0f;
+            s.grind_mode.fill(-1);
+            s.grind_setting.fill(-1);
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_pop = false;
+            s.flip_flick = false;
             s.flip_trick.fill(1.0f);
             s.revert_boost = 0.0f;
             changed();
@@ -2959,9 +3201,16 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.saved.clear();
             s.active.clear();
             s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = s.manual_height = 1.0f;
+            s.grind_side = 1.0f;
+            s.grind_push = 0.0f;
+            s.grind_lean = 0.0f;
+            s.grind_turn = s.grind_tip = s.grind_range = 0.0f;
+            s.grind_mode.fill(-1);
+            s.grind_setting.fill(-1);
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_pop = false;
+            s.flip_flick = false;
             s.flip_trick.fill(1.0f);
             s.revert_boost = 0.0f;
             s.revert = {};
@@ -3095,6 +3344,121 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         if (!s.waypoint) return "error: no waypoint on the map. Open the pause map and place one first.";
         return land_at((*s.waypoint)[0], (*s.waypoint)[2], (*s.waypoint)[1], "your map waypoint");
     }
+    if (v == "grind") {
+        // trainer grind | grind watch 0|1 | grind side <x> | grind <key>|all game|off|on
+        const auto what = lower(arg(0)), to = lower(arg(1));
+        const auto word = [](std::int8_t value) { return value < 0 ? "-" : value ? "on" : "off"; };
+        if (what.empty()) {
+            std::string out = std::format("Side force off grinds x {:.2f}.", s.grind_side);
+            {
+                const auto c = read_grind_control(s.base, static_cast<std::uintptr_t>(s.entity));
+                out += std::format("\nturn speed {:.3f}, tip speed {:.3f} (0: the game's own); the game's multipliers read {:.3f} / {:.3f}; asked {} / {} times last tick",
+                                   s.grind_turn, s.grind_tip, c.heading_multiplier, c.pitch_multiplier, s.grind_multiplier_asked[0], s.grind_multiplier_asked[1]);
+            }
+            for (std::size_t i = 0; i < grind_settings.size(); ++i)
+                out += std::format("\n{} (setting {}, the game's default {}): {}; asked {} times since last listed", grind_settings[i].key, grind_settings[i].setting,
+                                   grind_settings[i].stock ? "on" : "off",
+                                   s.grind_setting[i] < 0 ? "game's own" : s.grind_setting[i] ? "forced on" : "forced off", grind_setting_asked(i));
+            for (std::size_t i = 0; i < grind_switches.size(); ++i)
+            {
+                std::uint32_t handle{};
+                const int status = grind_switch_status(s.base, static_cast<std::uintptr_t>(s.entity), i, handle);
+                std::uint32_t asked{}, answered{};
+                grind_switch_asked(i, asked, answered);
+                out += std::format("\n{} ({}): {}, the game reads {} [{}, handle {:x}; asked {} times since last listed, {} answered held]", grind_switches[i].key,
+                                   grind_switches[i].state, s.grind_mode[i] < 0 ? "game's own" : s.grind_mode[i] ? "held on" : "held off", word(s.grind_live[i]),
+                                   status == 0 ? "state not found" : status == 1 ? "no handle" : status == 2 ? "no value for this skater" : "ok", handle, asked, answered);
+            }
+            return out;
+        }
+        if (what == "feel") {
+            // trainer grind feel skate|skate3: the game's own grinds, or without what skate. added to leaving a grind.
+            std::string why;
+            const bool skate3 = to == "skate3" || to == "3";
+            if (!skate3 && to != "skate" && to != "stock") return "error: usage: trainer grind feel skate|skate3";
+            if (skate3 && !editable(&why)) return "error: " + why;
+            for (std::size_t i = 0; i < grind_switches.size(); ++i) s.grind_mode[i] = skate3 ? skate3_grind_mode(i) : std::int8_t{-1};
+            for (std::size_t i = 0; i < grind_settings.size(); ++i) s.grind_setting[i] = skate3 ? grind_settings[i].skate3 : std::int8_t{-1};
+            s.grind_push = skate3 ? 1.8f : 0.0f; // Skate 3's pop goes sideways with the left stick, 1.8 m/s at full stick
+            // Skate 3's left stick turns the board; the right stick only tips it (5-0, nose grind) and pops.
+            s.grind_lean = 0.0f;
+            s.grind_range = skate3 ? skate3_grind_range : 0.0f;
+            // The left stick turns the board through skate.'s own grind control (its legacy grinds snap between grinds
+            // instead); the game's own turn speed, 0.2, is far slower than Skate 3's.
+            s.grind_turn = skate3 ? skate3_grind_turn : 0.0f;
+            s.grind_tip = 0.0f;
+            changed();
+            return std::string{skate3 ? "Grinds like Skate 3: lean exits and skate.'s own ways off a grind off, the pop goes sideways with the stick."
+                                      : "Grinds like skate.: every setting and switch is the game's own."};
+        }
+        if (what == "watch") {
+            s.grind_watch = to == "1" || to == "on";
+            return std::string{s.grind_watch ? "Reading the grind switches." : "No longer reading the grind switches."};
+        }
+        std::string why;
+        if (what == "turn" || what == "tip") {
+            const auto value = number(arg(1));
+            if (!value || *value < 0)
+                return "error: usage: trainer grind turn|tip <speed>, 0 = the game's own (0.2 turn / 0.8 tip; 8 / 2 with legacy grinds on).";
+            if (*value != 0 && !editable(&why)) return "error: " + why;
+            (what == "turn" ? s.grind_turn : s.grind_tip) = std::clamp(static_cast<float>(*value), 0.0f, 1000.0f);
+            changed();
+            return std::format("Board {} speed on a grind: {:.3f}{}.", what, *value, *value == 0 ? " (the game's own)" : "");
+        }
+        if (what == "range") {
+            const auto value = number(arg(1));
+            if (!value) return "error: usage: trainer grind range <degrees>, 0 = off (the game's own turn, by the right stick); negative turns the other way.";
+            if (*value != 0 && !editable(&why)) return "error: " + why;
+            s.grind_range = std::clamp(static_cast<float>(*value), -360.0f, 360.0f);
+            changed();
+            return std::format("Left stick turns the board on a grind: up to {:.1f} degrees{}.", s.grind_range, s.grind_range == 0 ? " (off)" : "");
+        }
+        if (what == "lean") {
+            const auto value = number(arg(1));
+            if (!value) return "error: usage: trainer grind lean <amount>, 0 = off (skate.: the right stick leans), 1 = the left stick leans too (Skate 3); negative mirrors it.";
+            if (*value != 0 && !editable(&why)) return "error: " + why;
+            s.grind_lean = std::clamp(static_cast<float>(*value), -1.0f, 1.0f);
+            changed();
+            return std::format("Left stick also leans on a grind: {:.2f} ({} polls given so far).", s.grind_lean, DingoSDKOverlayGrindStickMirrored());
+        }
+        if (what == "push") {
+            const auto value = number(arg(1));
+            if (!value) return "error: usage: trainer grind push <m/s at full stick>, 0 = none, 1.8 = Skate 3's; a negative number pushes the other way.";
+            if (*value != 0 && !editable(&why)) return "error: " + why;
+            s.grind_push = std::clamp(static_cast<float>(*value), -50.0f, 50.0f);
+            changed();
+            return std::format("Sideways pop with the stick: {:.2f} m/s at full stick.", s.grind_push);
+        }
+        if (what == "side") {
+            const auto value = number(arg(1));
+            if (!value || *value < 0) return "error: usage: trainer grind side <multiplier>, 1 = the game's own.";
+            if (!editable(&why)) return "error: " + why;
+            s.grind_side = std::clamp(static_cast<float>(*value), 0.0f, 1000.0f);
+            changed();
+            return std::format("Side force off grinds x {:.2f}.", s.grind_side);
+        }
+        const int mode = to == "on" || to == "1" ? 1 : to == "off" || to == "0" ? 0 : to == "game" || to == "-1" ? -1 : -2;
+        if (mode == -2) return "error: usage: trainer grind <switch>|all game|off|on, trainer grind side <multiplier>, trainer grind (lists them)";
+        if (mode >= 0 && !editable(&why)) return "error: " + why;
+        bool any = false;
+        for (std::size_t i = 0; i < grind_settings.size(); ++i)
+            if (what == "all" || what == grind_settings[i].key) {
+                s.grind_setting[i] = static_cast<std::int8_t>(mode);
+                any = true;
+            }
+        for (std::size_t i = 0; i < grind_switches.size(); ++i)
+            if (what == "all" || what == grind_switches[i].key) {
+                if (grind_switches[i].read_only && mode >= 0) {
+                    if (what != "all") return "error: " + what + " can only be watched: held, it leaves the skater in the grind state on the ground.";
+                    continue;
+                }
+                s.grind_mode[i] = static_cast<std::int8_t>(mode);
+                any = true;
+            }
+        if (!any) return "error: no grind switch is called \"" + what + "\". `trainer grind` lists them.";
+        changed();
+        return what + ": " + (mode < 0 ? "the game's own" : mode ? "held on" : "held off") + ".";
+    }
     if (v == "tp") {
         const auto x = number(arg(0)), y = number(arg(1)), z = number(arg(2));
         if (!x || !y || !z) return "error: usage: trainer tp <x> <y> <z>";
@@ -3144,7 +3508,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             if (!value) return "error: return_delay needs seconds.";
             s.return_delay = std::clamp(static_cast<float>(*value), 0.0f, 10.0f);
         } else if (!flag(arg(1), on)) {
-            return "error: usage: trainer option hud|hud_jump|auto_return|pad|pad_menu|flip_advanced|flip_pop|log 0|1";
+            return "error: usage: trainer option hud|hud_jump|auto_return|pad|pad_menu|flip_advanced|flip_pop|flip_flick|log 0|1";
         } else if (name == "hud") s.hud = on;
         else if (name == "hud_jump") s.hud_jump = on;
         else if (name == "auto_return") s.auto_return = on;
@@ -3157,6 +3521,9 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         } else if (name == "flip_pop") {
             if (on && !editable(&why)) return "error: " + why;
             s.flip_pop = on;
+        } else if (name == "flip_flick") {
+            if (on && !editable(&why)) return "error: " + why;
+            s.flip_flick = on;
         } else if (name == "flip_advanced") {
             if (on && !editable(&why)) return "error: " + why;
             s.flip_advanced = on;
@@ -3626,6 +3993,10 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
     if (v == "flipturn") {
         flip_turn_test = number(arg(0)) ? static_cast<float>(*number(arg(0))) : 0.0f;
         return std::format("Flip turn time for the pop: {:.2f} s (0: by trick).", flip_turn_test);
+    }
+    if (v == "flipleast") {
+        flip_least_game = number(arg(0)) ? static_cast<float>(*number(arg(0))) : 1.0f;
+        return std::format("With 'Flick tricks at full speed' the game's flip speed counts as at least {:.2f} (0: as flicked).", flip_least_game);
     }
     if (v == "launchtest") {
         // trainer launchtest <ollie launch scale> [<float slot> <value>]

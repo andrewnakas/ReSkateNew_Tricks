@@ -56,6 +56,11 @@ struct Hooked {
     std::atomic<float> raise_to{};
     std::atomic<int> raised{}; // 1 done, -1 failed; taken by the trainer
     bool attempted{}, ready{};
+    // The pop out of a grind: the sideways multiplier, the travel on the grind, and the newest pop as the game made it.
+    std::atomic<float> grind_side{1}, travel_x{}, travel_z{};
+    std::atomic<float> pop_along{}, pop_side{}, pop_nudge{};
+    std::atomic<float> grind_push{}, grind_nudge{};
+    std::atomic<std::uint32_t> pop_serial{}, pop_taken{};
 // <dev>
     // Every call of the setter (caller, the local skater's state and the one before, upward speed).
     struct Call { std::atomic<std::uint64_t> where{}, speed{}; std::atomic<std::uint32_t> trick{}; };
@@ -166,6 +171,30 @@ void set_trajectory_hook(std::uintptr_t trajectory, float *parameters) {
     if (parameters && caller == no_comply_call + 5) {
         const auto watch = watched_physics_state();
         grind = watch.valid && watch.state == pop_state && watch.previous >= 400 && watch.previous < 500;
+    }
+    if (grind) {
+        const float tx = h.travel_x.load(std::memory_order_relaxed), tz = h.travel_z.load(std::memory_order_relaxed);
+        const float length = std::sqrt(tx * tx + tz * tz);
+        float &vx = parameters[velocity_y - 1], &vz = parameters[velocity_y + 1];
+        if (length > 0.3f && std::isfinite(vx) && std::isfinite(vz)) {
+            const float nx = tx / length, nz = tz / length, along = vx * nx + vz * nz;
+            const float sx = vx - along * nx, sz = vz - along * nz, side = std::sqrt(sx * sx + sz * sz);
+            h.pop_along.store(along, std::memory_order_relaxed);
+            h.pop_side.store(side, std::memory_order_relaxed);
+            h.pop_serial.fetch_add(1, std::memory_order_release);
+            const float factor = h.grind_side.load(std::memory_order_relaxed);
+            if (factor != 1 && factor >= 0 && side * factor < 60.0f) {
+                vx = along * nx + sx * factor;
+                vz = along * nz + sz * factor;
+            }
+            // Skate 3's pop: the stick's sideways push times a speed, to the side the stick points.
+            const float push = h.grind_push.load(std::memory_order_relaxed), nudge = std::clamp(h.grind_nudge.load(std::memory_order_relaxed), -1.0f, 1.0f);
+            h.pop_nudge.store(nudge, std::memory_order_relaxed);
+            if (push != 0 && std::abs(push) < 60.0f && std::abs(nudge) > 0.05f) {
+                vx += -nz * nudge * push;
+                vz += nx * nudge * push;
+            }
+        }
     }
     // The ollie's launch, out of a manual (the game pops lower from one; see set_manual_pop).
     if (ollie && GetTickCount64() < h.manual_until.load(std::memory_order_relaxed)) {
@@ -369,6 +398,26 @@ void set_flip_launch(std::uint32_t trick, float up) noexcept {
 void set_launch_trick(std::uint32_t trick, std::uintptr_t at) noexcept {
     hooked().launch_trick.store(trick, std::memory_order_relaxed);
     hooked().trick_at.store(at, std::memory_order_relaxed);
+}
+void set_grind_side(float side, float travel_x, float travel_z, bool grinding, float push, float nudge) noexcept {
+    auto &h = hooked();
+    h.grind_side.store(std::isfinite(side) ? side : 1.0f, std::memory_order_relaxed);
+    h.grind_push.store(std::isfinite(push) ? push : 0.0f, std::memory_order_relaxed);
+    if (grinding && std::isfinite(travel_x) && std::isfinite(travel_z)) {
+        h.travel_x.store(travel_x, std::memory_order_relaxed);
+        h.travel_z.store(travel_z, std::memory_order_relaxed);
+        // The stick as it was on the grind: the game's scripts put the state back to nothing when the grind ends.
+        h.grind_nudge.store(std::isfinite(nudge) ? nudge : 0.0f, std::memory_order_relaxed);
+    }
+}
+bool take_grind_pop(float &along, float &side, float &nudge) noexcept {
+    auto &h = hooked();
+    const auto serial = h.pop_serial.load(std::memory_order_acquire);
+    if (serial == h.pop_taken.exchange(serial, std::memory_order_relaxed)) return false;
+    along = h.pop_along.load(std::memory_order_relaxed);
+    side = h.pop_side.load(std::memory_order_relaxed);
+    nudge = h.pop_nudge.load(std::memory_order_relaxed);
+    return true;
 }
 void set_manual_pop(float height, std::int32_t intent) noexcept {
     auto &h = hooked();

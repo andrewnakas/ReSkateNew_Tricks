@@ -34,6 +34,11 @@ struct Page {
     float manual_edit{1}, hippy_edit{1}, nocomply_edit{1}, boneless_edit{1}, offboard_edit{1}, flip_edit{1}, pump_edit{1};
     std::array<float, trainer::flip_tricks.size()> trick_edit{}; // the speed of each flip trick
     std::array<bool, trainer::flip_tricks.size()> trick_editing{};
+    float grind_side_edit{1}, grind_push_edit{};
+    float grind_turn_edit{}, grind_tip_edit{}, grind_range_edit{};
+    bool grind_turn_editing{}, grind_tip_editing{}, grind_range_editing{};
+    bool grind_push_editing{};
+    bool grind_side_editing{}, grind_watching{};
     float revert_edit{};
     bool revert_editing{};
     // The Tricklining list: rows of the value table per group, for one snapshot.
@@ -479,22 +484,32 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
            "flip is slow from the start and is not hurried round before you land: with too little air you land on a board that is still turning. "
            "It takes about 15 seconds to take hold after every level load: the trainer has to find the game's flip animations again first.",
            3.0f);
-    if (!view.flip_live && (view.flip_speed != 1.0f || view.flip_advanced) && wanted("Flip trick speed"))
+    if (!view.flip_live && (view.flip_speed != 1.0f || view.flip_advanced || view.flip_flick) && wanted("Flip trick speed"))
         ImGui::TextDisabled("Finding the flip animations: flip speeds take hold about 15 seconds after a level loads.");
-    if (wanted("Flip trick speed") || wanted("Slow flips pop higher")) {
+    if (wanted("Flip trick speed") || wanted("Slow flips pop higher") || wanted("Flick tricks at full speed")) {
         bool pop = view.flip_pop;
         if (ImGui::Checkbox("Slow flips pop higher, so they land clean", &pop)) trainer_command(menu, callbacks, std::format("option flip_pop {}", pop ? 1 : 0));
         if (ImGui::IsItemHovered())
             wrapped_tooltip("%s", "A slowed flip needs more time than a normal pop gives: without this the game holds the landing back and the "
                                   "skater sinks before riding away. With it every pop into a slowed flip trick (riding, out of a manual, out of a "
                                   "grind or slide) goes at least as high as the trick needs: about 0.9 m at x 0.5 and 2.9 m at x 0.25, where the "
-                                  "game's own pop is 0.4 m. Plain ollies are untouched.");
+                                  "game's own pop is 0.4 m. Ollies, nollies and boned ollies are slowed and popped the same way while this is on "
+                                  "(without it the flip trick speed leaves them alone).");
+        bool flick = view.flip_flick;
+        if (ImGui::Checkbox("Flick tricks at full speed", &flick)) trainer_command(menu, callbacks, std::format("option flip_flick {}", flick ? 1 : 0));
+        if (ImGui::IsItemHovered())
+            wrapped_tooltip("%s", "The game turns the board slower the slower the stick was flicked, so tricks with a long stick motion (front foot "
+                                  "and nollie impossibles, 360 pop shuvits) turn slower than a kickflip at the same flip trick speed and land "
+                                  "half way round. With this every flip trick turns as if the flick was a full one: with 'Slow flips pop higher' "
+                                  "they all get the same pop and all come round in it. It works at every flip trick speed. With it on a slow "
+                                  "flick no longer gives a slow flip.");
     }
     if (wanted(advanced_label)) {
         bool on = view.flip_advanced;
         if (ImGui::Checkbox("Advanced trick speed", &on)) trainer_command(menu, callbacks, std::format("option flip_advanced {}", on ? 1 : 0));
         tip("Gives every flip trick a speed of its own, on top of the flip trick speed above: a kickflip at 1.0 and a 360 flip at 0.6, say. "
-            "A trick turns at the speed above times its own. Nollie tricks use their regular trick's speed. Pop height is not changed. "
+            "A trick turns at the speed above times its own. Nollie tricks use their regular trick's speed (the nollie impossibles have their own). The ollie's speed only acts "
+            "with 'Slow flips pop higher' on. Pop height is not changed. "
             "Unticked, the speeds below are kept but not used. Like the speed above, they take hold about 15 seconds after every level load.");
         if (view.flip_advanced_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here.");
         if (on && ImGui::TreeNodeEx("Speed of each flip trick", ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -726,6 +741,185 @@ void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &c
     ImGui::EndDisabled();
     dark_pop_controls(menu, model, callbacks);
     ImGui::BeginDisabled(!can_edit);
+    begin_card(menu, "grind-exits", "GRIND EXITS AND TRANSFERS", "The game's own switches for leaving a grind, each left to the game or held off or on");
+    {
+        if (!p.grind_watching) {
+            trainer_command(menu, callbacks, "grind watch 1");
+            p.grind_watching = true;
+        }
+        {
+            // The two feels: every switch the game's own, or skate.'s own ways off a grind held off.
+            bool like_skate = true, like_skate3 = true;
+            for (std::size_t i = 0; i < trainer::grind_switches.size(); ++i) {
+                if (view.grind_mode[i] >= 0) like_skate = false;
+                if (view.grind_mode[i] != trainer::skate3_grind_mode(i)) like_skate3 = false;
+            }
+            for (std::size_t i = 0; i < trainer::grind_settings.size(); ++i) {
+                if (view.grind_setting[i] >= 0) like_skate = false;
+                if (view.grind_setting[i] != trainer::grind_settings[i].skate3) like_skate3 = false;
+            }
+            if (view.grind_push != 0.0f) like_skate = false;
+            if (std::abs(view.grind_push - 1.8f) > 0.005f) like_skate3 = false;
+            if (view.grind_lean != 0.0f) like_skate = false;
+            if (view.grind_turn != 0.0f || view.grind_tip != 0.0f) like_skate = false;
+            if (view.grind_turn == 0.0f) like_skate3 = false; // any turn speed of your own keeps it Skate 3
+            if (view.grind_range != 0.0f) like_skate = false;
+            if (view.grind_range == 0.0f) like_skate3 = false; // any range of your own keeps it Skate 3
+            field(menu, "Grinds feel like");
+            if (ImGui::RadioButton("skate.", like_skate)) trainer_command(menu, callbacks, "grind feel skate");
+            tip("Every switch below is left to the game.");
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Skate 3", like_skate3)) trainer_command(menu, callbacks, "grind feel skate3");
+            tip("Turns off what skate. added to leaving a grind: leaning off without a pop, the sideways ollie, "
+                "exits onto another grind, double grinds, stronger and camera-relative exits, linear drive. The left stick still turns and tips the "
+                "board on the grind, as it did in Skate 3. Change any row below afterwards to make your own mix.");
+        }
+        field(menu, "Side force of a pop off a grind");
+        float side = p.grind_side_editing ? p.grind_side_edit : view.grind_side;
+        const float side_box = px(64);
+        ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - side_box - ImGui::GetStyle().ItemSpacing.x));
+        if (ImGui::SliderFloat("##grind-side", &side, 0.0f, 10.0f, "x %.2f")) {
+            p.grind_side_edit = side;
+            p.grind_side_editing = true;
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) trainer_command(menu, callbacks, std::format("grind side {:.2f}", p.grind_side_edit));
+        if (!ImGui::IsItemActive() && p.grind_side_editing && std::abs(view.grind_side - p.grind_side_edit) < 0.006f) p.grind_side_editing = false;
+        if (!ImGui::IsItemActive())
+            tip("Multiplies the part of a grind or slide pop that goes sideways off the edge, measured against the way you were travelling on it. "
+                "1 is the game's own, 0 pops straight along the edge. Type any number in the box: the slider's ends are not a limit.");
+        ImGui::SameLine();
+        float side_typed = view.grind_side;
+        ImGui::SetNextItemWidth(side_box);
+        if (ImGui::InputFloat("##grind-side-typed", &side_typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue) && side_typed >= 0) {
+            p.grind_side_editing = false;
+            trainer_command(menu, callbacks, std::format("grind side {}", side_typed));
+        }
+        if (ImGui::IsItemHovered()) wrapped_tooltip("%s", "Type any multiplier and press Enter: the slider's end is not a limit.");
+        {
+            field(menu, "Sideways pop with the stick");
+            float push = p.grind_push_editing ? p.grind_push_edit : view.grind_push;
+            const float push_box = px(64);
+            ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - push_box - ImGui::GetStyle().ItemSpacing.x));
+            if (ImGui::SliderFloat("##grind-push", &push, -5.0f, 5.0f, "%.2f m/s")) {
+                p.grind_push_edit = push;
+                p.grind_push_editing = true;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) trainer_command(menu, callbacks, std::format("grind push {:.2f}", p.grind_push_edit));
+            if (!ImGui::IsItemActive() && p.grind_push_editing && std::abs(view.grind_push - p.grind_push_edit) < 0.006f) p.grind_push_editing = false;
+            if (!ImGui::IsItemActive())
+                tip("Skate 3's rule: a pop off a grind goes sideways the way the left stick is held, by this many m/s at full stick. Skate 3's own number "
+                    "is 1.8; 0 is off. A negative number pushes the other way. Type any number in the box.");
+            ImGui::SameLine();
+            float push_typed = view.grind_push;
+            ImGui::SetNextItemWidth(push_box);
+            if (ImGui::InputFloat("##grind-push-typed", &push_typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue)) {
+                p.grind_push_editing = false;
+                trainer_command(menu, callbacks, std::format("grind push {}", push_typed));
+            }
+            if (ImGui::IsItemHovered()) wrapped_tooltip("%s", "Type any speed and press Enter: the slider's ends are not a limit.");
+        }
+        {
+            field(menu, "Left stick turns the board on a grind");
+            bool lean = view.grind_lean != 0.0f;
+            if (ImGui::Checkbox("##grind-lean", &lean)) trainer_command(menu, callbacks, lean ? "grind lean 1" : "grind lean 0");
+            tip("Skate 3 turns the board on a grind with the left stick; skate. turns it with the right stick's sideways push. With this on the left "
+                "stick turns it while you are on a grind (the game is shown the left stick's sideways push on the right stick, unless you are pushing "
+                "the right stick sideways yourself). The left stick's up and down tips the board too (5-0, nose grind); the right stick still tips it and still pops. "
+                "`trainer grind lean -1` mirrors it if the board turns the wrong way.");
+        }
+        {
+            // The two speeds the stick moves the board at on a grind: slider, and a box for any number.
+            struct Speed { const char *label, *key, *help; float view; float *edit; bool *editing; float low{0}, high{10}; const char *zero{"game's own"}; };
+            const Speed speeds[]{
+                {"Left stick turns the board this far", "range",
+                 "Skate 3's turn on a grind: the left stick alone turns the board, with Skate 3's own dead zone, curve and easing, up to this many degrees "
+                 "at the end of the stick. The right stick's sideways push no longer turns it; its up and down still tips the board (5-0, nose grind) and "
+                 "pops. 0 is off: skate.'s own turn, which follows where the right stick points. A negative number turns the other way.", view.grind_range,
+                 &p.grind_range_edit, &p.grind_range_editing, -180.0f, 180.0f, "off"},
+                {"Board turn speed on a grind", "turn",
+                 "How fast the stick turns the board on a grind. 0 leaves the game's own, 0.2 (8 with Legacy grinds on). Skate 3 starts at 1: raise or "
+                 "lower it until the board follows the left stick the way Skate 3's does.", view.grind_turn, &p.grind_turn_edit,
+                 &p.grind_turn_editing},
+                {"Board tip speed on a grind", "tip",
+                 "How fast the stick tips the board up or down on a grind (5-0, nose grind). 0 leaves the game's own: 0.8 on its newer grinds, 2 with Legacy "
+                 "grinds on.", view.grind_tip, &p.grind_tip_edit, &p.grind_tip_editing},
+            };
+            for (const auto &one : speeds) {
+                field(menu, one.label);
+                ImGui::PushID(one.key);
+                float value = *one.editing ? *one.edit : one.view;
+                const float box = px(64);
+                ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - box - ImGui::GetStyle().ItemSpacing.x));
+                if (ImGui::SliderFloat("##speed", &value, one.low, one.high, value == 0.0f ? one.zero : "%.2f")) {
+                    *one.edit = value;
+                    *one.editing = true;
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit()) trainer_command(menu, callbacks, std::format("grind {} {:.2f}", one.key, *one.edit));
+                if (!ImGui::IsItemActive() && *one.editing && std::abs(one.view - *one.edit) < 0.006f) *one.editing = false;
+                if (!ImGui::IsItemActive()) tip(one.help);
+                ImGui::SameLine();
+                float typed = one.view;
+                ImGui::SetNextItemWidth(box);
+                if (ImGui::InputFloat("##typed", &typed, 0, 0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    *one.editing = false;
+                    trainer_command(menu, callbacks, std::format("grind {} {}", one.key, std::max(one.low, typed)));
+                }
+                if (ImGui::IsItemHovered()) wrapped_tooltip("%s", "Type any speed and press Enter: the slider's end is not a limit.");
+                ImGui::PopID();
+            }
+        }
+        // The game's own settings first: they change which grind code runs.
+        for (std::size_t i = 0; i < trainer::grind_settings.size(); ++i) {
+            const auto &one = trainer::grind_settings[i];
+            const std::string label(one.label), help = std::string(one.help) + " (The game's setting " + std::string(one.setting) + ", " +
+                                                       (one.stock ? "on" : "off") + " by default.) Tick or untick to force it; Game's own gives it back.";
+            field(menu, label.c_str());
+            ImGui::PushID(static_cast<int>(100 + i));
+            const bool forced = view.grind_setting[i] >= 0;
+            bool on = forced ? view.grind_setting[i] != 0 : one.stock;
+            if (ImGui::Checkbox("##on", &on)) trainer_command(menu, callbacks, std::format("grind {} {}", one.key, on ? "on" : "off"));
+            tip(help.c_str());
+            ImGui::SameLine();
+            if (forced) {
+                ImGui::TextUnformatted(view.grind_setting[i] ? "forced on" : "forced off");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Game's own")) trainer_command(menu, callbacks, std::format("grind {} game", one.key));
+            } else {
+                ImGui::TextDisabled("%s", "game's own");
+            }
+            ImGui::PopID();
+        }
+        for (std::size_t i = 0; i < trainer::grind_switches.size(); ++i) {
+            const auto &one = trainer::grind_switches[i];
+            const std::string label(one.label), help = std::string(one.help) + " (" + std::string(one.state) + ".) Game's own leaves it to the game; Off and On hold it there.";
+            field(menu, label.c_str());
+            ImGui::PushID(static_cast<int>(i));
+            if (one.read_only) {
+                ImGui::TextDisabled("%s", view.grind_live[i] < 0 ? "not in use yet" : view.grind_live[i] ? "happening now" : "not now");
+                tip(help.c_str());
+                ImGui::PopID();
+                continue;
+            }
+            // A tick box: what is in force now (held, or the game's own). A click holds it the other way.
+            const bool held = view.grind_mode[i] >= 0;
+            bool on = held ? view.grind_mode[i] != 0 : view.grind_live[i] > 0;
+            if (ImGui::Checkbox("##on", &on)) trainer_command(menu, callbacks, std::format("grind {} {}", one.key, on ? "on" : "off"));
+            tip(help.c_str());
+            ImGui::SameLine();
+            if (held) {
+                ImGui::TextUnformatted(view.grind_mode[i] ? "held on" : "held off");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Game's own")) trainer_command(menu, callbacks, std::format("grind {} game", one.key));
+            } else {
+                ImGui::TextDisabled("%s", view.grind_live[i] < 0 ? "game's own (not in use yet)" : view.grind_live[i] ? "game's own: on" : "game's own: off");
+            }
+            ImGui::PopID();
+        }
+        note("Tick or untick a switch to hold it there; Game's own gives it back to the game. These are the game's names for its own switches: what each one "
+             "changes in play has not been measured yet. A switch has no value until the game first uses it (most appear "
+             "once you are on the board, the rest on the first grind), and they take hold about 15 seconds after a level loads.");
+    }
+    end_card();
 
     // Rows of the value table by id, looked up once per snapshot.
     static constexpr const char *groups[][2]{

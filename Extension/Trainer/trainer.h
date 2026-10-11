@@ -84,6 +84,13 @@ struct View {
     // The same for the no comply and the boneless.
     float nocomply_height{1}, boneless_height{1};
     float manual_height{1}; // the pop out of a manual
+    float grind_side{1};    // the sideways part of a pop out of a grind
+    float grind_push{};     // Skate 3's pop: m/s sideways at full stick (0: none)
+    float grind_lean{};     // Skate 3's one stick: the left stick also leans on a grind, times this (0: off)
+    float grind_range{}; // Skate 3's turn: the left stick turns the board on a grind up to this many degrees (0: off)
+    float grind_turn{}, grind_tip{}; // how fast the stick turns / tips the board on a grind (the game's multipliers); 0: the game's own
+    std::array<std::int8_t, grind_settings.size()> grind_setting{}; // the game's own grind settings: -1 its own / 0 off / 1 on
+    std::array<std::int8_t, grind_switches.size()> grind_mode{}, grind_live{}; // -1 the game's own / 0 off / 1 on; what each reads (-1: not found)
     float revert_boost{}; // strength of the speed given back on an auto revert; 0: off
     float pump_power{1};  // x what pumping a transition gains
     bool pump_live{};     // the game's pumping states are found: the pump power acts
@@ -93,6 +100,7 @@ struct View {
     float flip_speed{1};      // board flip tricks: x of the game's own speed
     bool flip_advanced{};     // each flip trick also has a speed of its own
     bool flip_pop{};          // a slowed flip trick pops higher
+    bool flip_flick{};        // a slow flick turns the board as fast as a full one
     std::array<float, flip_tricks.size()> flip_trick{}; // those, in the order of flip_tricks
     bool flip_advanced_blocked{};       // ticked, but this session's rules keep the game's own flips
     bool flip_live{};                   // the game's flip states are found: the speeds act

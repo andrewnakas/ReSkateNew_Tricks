@@ -3,6 +3,7 @@
 #include "Extension/Progression/local_entitlement_trigger_runtime.h"
 #include "local_gameplay_settings.h"
 #include "local_user_settings.h"
+#include "Extension/Trainer/trainer_gamestate.h"
 #include <optional>
 #include <string_view>
 #include <array>
@@ -97,6 +98,8 @@ void save_gameplay_setting(const void* reference, const dingosdk::Json& value) {
 }
 
 bool gameplay_get_bool(std::uintptr_t m, const void* a) {
+    // The trainer's grind settings ("Grinds feel like Skate 3"): forced for as long as the trainer holds them.
+    if (const auto forced = dingosdk::trainer::forced_gameplay_bool(a)) return *forced;
     if (const auto value = saved_gameplay_setting<bool>(a)) return *value;
     return gameplay_settings().get_bool(m, a);
 }

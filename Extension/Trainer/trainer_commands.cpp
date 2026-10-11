@@ -29,6 +29,7 @@ void register_trainer_commands(Commands &registry) {
         {"ground", "Teleport to the topmost surface at a map position", "<x> <z>", false},
         {"spot", "Go to one of the map author's spots", "<number>", false},
         {"option", "Trainer options", "hud|hud_jump|auto_return|pad|log 0|1, return_delay <seconds>, hippy_height|nocomply_height|boneless_height|manual_height|offboard_height|flip_speed <x>", true},
+        {"grind", "The grind exit switches and the side force of a pop off a grind", "[<switch>|all game|off|on] | side <multiplier> | watch 0|1", false},
         {"profile", "The preset this map applies on load", "set <preset>|clear", false},
         {"jumps", "The last measured jump", nullptr, false},
         {"where", "The skater's position, heading and speed", nullptr, false},
