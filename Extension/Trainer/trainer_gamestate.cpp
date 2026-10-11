@@ -163,6 +163,7 @@ FlipState read_flip_state(std::uintptr_t base, std::uintptr_t entity) noexcept {
     // Anything else there means this is not the layout this was written for.
     if (state.trick >= trick_count || !std::isfinite(state.speed) || state.speed < 0 || state.speed > 1000) return {};
     state.speed_at = speed_at;
+    state.trick_at = trick_at;
     return state;
 }
 PumpState read_pump_state(std::uintptr_t base, std::uintptr_t entity) noexcept {

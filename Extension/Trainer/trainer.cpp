@@ -253,6 +253,7 @@ struct State {
         bool active{};
         float game{}, written{};
         float factor{1}; // the flip speed times the turning trick's own
+        std::uint32_t trick{}; // the trick it was last driven for
     } flip_drive;
     bool flip_live{};
     std::uint32_t flip_trick_seen{}; // the last trick that turned (CurrentFlipTrick)
@@ -1421,8 +1422,8 @@ void drive_dev_body_flip(std::uintptr_t base) {
         TrajectoryCall call;
         for (int i = 0; i < 32 && take_trajectory_call(call); ++i) {
             if (call.caller == 0x482f64b && call.up <= 0.05f) continue; // the falling updates
-            say(logging::Level::info, std::format("Trainer capture: launch from {:x}, state {} after {}, up {:.2f} m/s, buttons {:x}, trick then {}.", call.caller,
-                                                  call.state, call.previous, call.up, buttons, call.trick));
+            say(logging::Level::info, std::format("Trainer capture: launch from {:x}, state {} after {}, up {:.2f} m/s, buttons {:x}, trick then {} (live {}).", call.caller,
+                                                  call.state, call.previous, call.up, buttons, call.trick, call.live));
         }
     }
     if (now.speed_at) {
@@ -1439,17 +1440,20 @@ void drive_dev_body_flip(std::uintptr_t base) {
 // </dev>
 // Test value (`trainer flipland <seconds>`): this long before the landing a slowed flip goes back to the game's own speed.
 float flip_land_window = 0;
-// How much faster a flip trick slowed to `speed` has to leave the ground to land on time. Measured with scripted
-// kickflips on flat ground (2026-10-10): the smallest launch at which the landing came when the arc came down,
-// x 1 at 0.75, x 1.4 at 0.5, x 1.8 at 0.35, x 2.5 at 0.25. Height goes with the square: 2 times at 0.5, 6.4 at 0.25.
-float slow_flip_launch(float speed) {
-    static constexpr float points[][2]{{0.75f, 1.0f}, {0.5f, 1.4f}, {0.35f, 1.8f}, {0.25f, 2.5f}};
-    if (!(speed < 0.75f)) return 1.0f;
-    if (speed <= 0.25f) return std::min(0.625f / std::max(speed, 0.05f), 6.0f);
-    for (std::size_t i = 1; i < std::size(points); ++i)
-        if (speed >= points[i][0])
-            return points[i][1] + (points[i - 1][1] - points[i][1]) * (speed - points[i][0]) / (points[i - 1][0] - points[i][0]);
-    return 2.5f;
+// Test value (`trainer flipturn <seconds>`): the turn time below, for every trick.
+float flip_turn_test = 0;
+// The least upward speed a pop into `trick`, slowed to `speed`, needs to land on time (0: the game's own will do).
+// Every flip trick turns for about 0.31 s at the game's speed and 0.31 s / speed slowed (playtest of 2026-10-10: 14
+// tricks, speeds 0.1 to 0.5), and scripted kickflips landed clean with 0.2 s more air than that. Shuvits and impossibles
+// were still turning when they landed in that playtest (scripted pop shuvits were not), so they get a little more. The air a launch gives on flat ground is
+// 0.04 s more than twice its upward speed over 9.8.
+float slow_flip_up(std::uint32_t trick, float speed) {
+    if (!(speed < 1.0f)) return 0;
+    const auto name = flip_trick_name(trick);
+    float turn = name.find("Shuvit") != name.npos || name.find("Impossible") != name.npos ? 0.38f : 0.34f;
+    if (flip_turn_test > 0) turn = flip_turn_test;
+    const float air = 0.20f + turn / std::max(speed, 0.05f);
+    return std::min(4.9f * (air - 0.04f), 16.5f);
 }
 // CurrentFlipTrick values that are a pop with no flip in it (the nollie, the ollie pops, the boned ollie, the wallies):
 // the flip speed leaves them alone, as it does the ollie.
@@ -1459,7 +1463,7 @@ void drive_flip_speed(std::uintptr_t base, bool airborne, float to_landing) {
     auto &drive = s.flip_drive;
     const auto now = read_flip_state(base, static_cast<std::uintptr_t>(s.entity));
     s.flip_live = static_cast<bool>(now);
-    set_launch_trick(now ? now.trick : 0xffu); // for the launch hook: the trick the game has in mind this tick
+    set_launch_trick(now ? now.trick : 0xffu, now ? now.trick_at : 0); // for the launch hook: the trick the game has in mind this tick
     // A plain ollie (trick 1) plays the same clip and reads the same number: slowed, it hangs in
     // the air (measured: 0.60 s of air at 1, 0.65 s at 0.5, 0.77 to 0.88 s at 0.25). Only a flip
     // trick is driven.
@@ -1473,6 +1477,19 @@ void drive_flip_speed(std::uintptr_t base, bool airborne, float to_landing) {
     float factor = s.boosts.flip;
     if (s.flip_advanced && !extras_blocked())
         if (const auto index = flip_trick_index(now.trick); index >= 0) factor *= s.flip_trick[static_cast<std::size_t>(index)];
+    // "Slow flips pop higher" for a trick the game chose after the pop (seen out of manuals and grinds).
+    if (s.flip_pop && !extras_blocked() && (!drive.active || drive.trick != now.trick)) {
+        float was{}, time{};
+        if (const float up = slow_flip_up(now.trick, factor); up > 0 && raise_flight(up, was, time))
+            say(logging::Level::info, std::format("Trainer: slow flip chosen {:.3f} s after the pop: up speed {:.2f} -> {:.2f} m/s.", time, was, up));
+        // <dev>
+        else if (dev_capture && up > was + 0.05f) say(logging::Level::info, "Trainer capture: no raise; " + flight_dump());
+        // </dev>
+    }
+    drive.trick = now.trick;
+    // <dev>
+    if (const int raised = take_flight_raise()) say(logging::Level::info, raised > 0 ? "Trainer capture: launched again." : "Trainer capture: launching again failed.");
+    // </dev>
     // A slowed clip also plays its landing slowly, so the skater lands late and sinks (measured: 0.07 s late at x 0.5,
     // 0.25 to 0.57 s at x 0.25). Close to the ground the clip goes back to the game's own speed.
     if (factor < 1 && flip_land_window > 0 && to_landing < flip_land_window) factor = 1;
@@ -2715,14 +2732,14 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         // "Slow flips pop higher": the launch of each flip trick, by the speed it will turn at (the game has the trick in
         // mind when it launches: measured, a kickflip reads 2 and an ollie 1 at that call).
         for (std::uint32_t trick = 0; trick < 64; ++trick) {
-            float scale = 1;
+            float up = 0;
             if (s.flip_pop && !extras_blocked() && !plain_pop(trick)) {
                 float factor = s.boosts.flip;
                 if (s.flip_advanced)
                     if (const auto index = flip_trick_index(trick); index >= 0) factor *= s.flip_trick[static_cast<std::size_t>(index)];
-                scale = slow_flip_launch(factor);
+                up = slow_flip_up(trick, factor);
             }
-            set_flip_launch(trick, scale);
+            set_flip_launch(trick, up);
         }
         set_manual_pop(s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 1.0f : s.manual_height,
                        read_manual_intent(s.base, static_cast<std::uintptr_t>(s.entity)));
@@ -3592,6 +3609,19 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
     }
     if (v == "launches") return trajectory_calls();
     if (v == "launchdump") return trajectory_parameters();
+    if (v == "launchpoke") {
+        const auto slot = number(arg(0)), value = number(arg(1));
+        return slot && value ? trajectory_poke(static_cast<int>(*slot), static_cast<float>(*value)) : std::string{"launchpoke <slot> <value>"};
+    }
+    if (v == "flightdump") return flight_dump();
+    if (v == "nofloor") {
+        trajectory_no_floor(number(arg(0)) && *number(arg(0)) != 0);
+        return std::string{"Launch floor test switch set."};
+    }
+    if (v == "flipturn") {
+        flip_turn_test = number(arg(0)) ? static_cast<float>(*number(arg(0))) : 0.0f;
+        return std::format("Flip turn time for the pop: {:.2f} s (0: by trick).", flip_turn_test);
+    }
     if (v == "launchtest") {
         // trainer launchtest <ollie launch scale> [<float slot> <value>]
         const auto scale = number(arg(0)), slot = number(arg(1)), value = number(arg(2));

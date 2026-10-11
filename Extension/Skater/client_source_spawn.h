@@ -20,6 +20,8 @@ struct JumpScaleResult {
     float up_speed{}; // before scaling
 };
 JumpScaleResult take_jump_scale_result() noexcept;
+// Trainer: a function to run on the physics thread after each of the skater's physics updates (nullptr: none).
+void set_physics_step_callback(void (*callback)() noexcept) noexcept;
 // Trainer: the local skater's push speed as a multiple of the game's own (1 leaves the skater
 // alone); `stock` is the game's top pushing speed in m/s. `cruise` above 0 is auto push: a
 // rolling skater that is not braking gains speed up to it (m/s). Publish every client tick: it

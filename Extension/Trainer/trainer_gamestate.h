@@ -14,6 +14,7 @@ namespace dingosdk::trainer {
 struct FlipState {
     std::uintptr_t speed_at{}; // where the live flip speed is; 0: not found
     std::uint32_t trick{};     // CurrentFlipTrick
+    std::uintptr_t trick_at{}; // where that is
     float speed{};
     explicit operator bool() const noexcept { return speed_at != 0; }
 };

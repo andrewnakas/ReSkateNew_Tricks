@@ -1,6 +1,7 @@
 #include "trainer_jump.h"
 #include "Engine/Core/Hooks/hooks.h"
 #include "Engine/Core/Log/logging.h"
+#include "Extension/Skater/client_source_spawn.h"
 #include "Extension/Skater/no_bail.h"
 #include <windows.h>
 #include <array>
@@ -39,11 +40,21 @@ struct Hooked {
     std::atomic<std::int32_t> manual_intent{-1};
     bool ollie_known{};
     std::atomic<std::uint32_t> launch_trick{0xff}; // CurrentFlipTrick as the trainer read it last tick
-    std::array<std::atomic<float>, 64> flip_launch{}; // launch speed factor by trick; 0 or 1: the game's own
+    std::atomic<std::uintptr_t> trick_at{};        // where the game keeps that number (0: not known)
+    std::array<std::atomic<float>, 64> flip_launch{}; // least upward launch speed by trick, m/s; 0: the game's own
     // The last few launches, for the trainer's log line: written by the physics thread, read
     // by the client tick.
     std::array<std::atomic<std::uint64_t>, 8> seen{};
     std::atomic<std::uint32_t> written{}, read{};
+    // The newest pop (ollie, manual, grind): its trajectory object, when, and the upward speed it left with.
+    std::atomic<std::uintptr_t> flight_object{};
+    std::atomic<std::uint64_t> flight_tick{};
+    std::atomic<float> flight_up{};
+    // What that pop was launched with (physics thread only), and a higher upward speed to launch it again with.
+    std::array<float, 256> flight_parameters{};
+    bool flight_kept{};
+    std::atomic<float> raise_to{};
+    std::atomic<int> raised{}; // 1 done, -1 failed; taken by the trainer
     bool attempted{}, ready{};
 // <dev>
     // Every call of the setter (caller, the local skater's state and the one before, upward speed).
@@ -54,6 +65,7 @@ struct Hooked {
     std::array<float, 64> last_parameters{}; // of the newest call (a torn copy is fine for looking)
     std::array<float, 96> last_trajectory{}; // the trajectory object after that call
     std::atomic<float> test_scale{1};        // multiplies the upward speed of the ollie launch (caller 0x4824f84)
+    std::atomic<bool> test_no_floor{};       // the launch leaves flip tricks alone, so the trainer has to raise them in the air
     std::atomic<int> test_slot{-1};          // a float of the parameters to overwrite at every call ...
     std::atomic<float> test_value{};         // ... with this
 // </dev>
@@ -62,9 +74,53 @@ Hooked &hooked() {
     static auto *value = new Hooked;
     return *value;
 }
+// The trick the game has in mind right now (the trainer's own reading is a tick old: out of a manual or a grind the
+// trick is often chosen in the tick of the pop).
+std::uint32_t live_trick(std::uintptr_t at) noexcept {
+    if (!at) return 0xff;
+    __try {
+        return *reinterpret_cast<const std::uint32_t *>(at);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0xff;
+    }
+}
+bool keep_floats(const float *from, float *to, std::size_t count) noexcept {
+    __try {
+        std::memcpy(to, from, count * sizeof(float));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool call_guarded(SetTrajectory function, std::uintptr_t trajectory, float *parameters) noexcept {
+    __try {
+        function(trajectory, parameters);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// After a physics update: a pop that has to go higher after all is launched again, from where it started (it is a tick
+// or two old), with the higher upward speed. Writing the trajectory object does nothing (measured): the setter has to run.
+void raise_step() noexcept {
+    auto &h = hooked();
+    const float up = h.raise_to.exchange(0, std::memory_order_acq_rel);
+    if (!(up > 0)) return;
+    const auto original = h.original.load(std::memory_order_acquire);
+    const auto object = h.flight_object.load(std::memory_order_relaxed);
+    if (!original || !object || !h.flight_kept || GetTickCount64() - h.flight_tick.load(std::memory_order_relaxed) > 400) {
+        h.raised.store(-1, std::memory_order_release);
+        return;
+    }
+    h.flight_parameters[velocity_y] = up;
+    const bool done = call_guarded(original, object, h.flight_parameters.data());
+    if (done) h.flight_up.store(up, std::memory_order_relaxed);
+    h.raised.store(done ? 1 : -1, std::memory_order_release);
+}
 void set_trajectory_hook(std::uintptr_t trajectory, float *parameters) {
     auto &h = hooked();
     const auto caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress()) - h.base;
+    const auto trick_then = h.launch_trick.load(std::memory_order_relaxed), trick_live = live_trick(h.trick_at.load(std::memory_order_relaxed));
 // <dev>
     if (parameters) {
         const auto watch = watched_physics_state();
@@ -76,7 +132,7 @@ void set_trajectory_hook(std::uintptr_t trajectory, float *parameters) {
         call.where.store((std::uint64_t{caller & 0xffffffffu} << 32) | (std::uint64_t{watch.valid ? watch.state & 0xffffu : 0xffffu} << 16) |
                          (watch.valid ? watch.previous & 0xffffu : 0xffffu), std::memory_order_relaxed);
         call.speed.store((std::uint64_t{bits[0]} << 32) | bits[1], std::memory_order_relaxed);
-        call.trick.store(h.launch_trick.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        call.trick.store((trick_then & 0xffu) | ((trick_live & 0xffu) << 8), std::memory_order_relaxed);
         std::memcpy(h.last_parameters.data(), parameters, sizeof(float) * h.last_parameters.size());
         if (caller == 0x4824f84) parameters[velocity_y] *= h.test_scale.load(std::memory_order_relaxed);
         if (const int slot = h.test_slot.load(std::memory_order_relaxed); slot >= 0 && slot < 64)
@@ -104,16 +160,34 @@ void set_trajectory_hook(std::uintptr_t trajectory, float *parameters) {
             h.seen[h.written.fetch_add(1, std::memory_order_relaxed) % h.seen.size()].store(packed, std::memory_order_release);
         }
     }
-    // The ollie's launch into a flip trick that is set to turn slowly: more air for it (see set_flip_launch).
-    if (parameters && h.ollie_known && caller == ollie_call + 5) {
-        const auto trick = h.launch_trick.load(std::memory_order_relaxed);
-        const float up = parameters[velocity_y], factor = trick < h.flip_launch.size() ? h.flip_launch[trick].load(std::memory_order_relaxed) : 1.0f;
-        if (factor > 1 && factor <= 6 && std::isfinite(up) && up > 0.05f && up * factor < 200.0f) parameters[velocity_y] = up * factor;
+    const bool ollie = parameters && h.ollie_known && caller == ollie_call + 5;
+    // The pop out of a grind or a slide comes through the no comply's call, with a 400s state before it (playtest of 2026-10-10).
+    bool grind = false;
+    if (parameters && caller == no_comply_call + 5) {
+        const auto watch = watched_physics_state();
+        grind = watch.valid && watch.state == pop_state && watch.previous >= 400 && watch.previous < 500;
     }
     // The ollie's launch, out of a manual (the game pops lower from one; see set_manual_pop).
-    if (parameters && h.ollie_known && caller == ollie_call + 5 && GetTickCount64() < h.manual_until.load(std::memory_order_relaxed)) {
+    if (ollie && GetTickCount64() < h.manual_until.load(std::memory_order_relaxed)) {
         const float up = parameters[velocity_y], factor = h.manual.load(std::memory_order_relaxed);
         if (factor != 1 && std::isfinite(up) && up > 0.05f && up * factor < 200.0f) parameters[velocity_y] = up * factor;
+    }
+    // A pop into a flip trick that is set to turn slowly: at least the air it needs (see set_flip_launch).
+    bool floor = ollie || grind;
+// <dev>
+    if (h.test_no_floor.load(std::memory_order_relaxed)) floor = false;
+// </dev>
+    if (floor) {
+        const auto floor_of = [&](std::uint32_t trick) { return trick < h.flip_launch.size() ? h.flip_launch[trick].load(std::memory_order_relaxed) : 0.0f; };
+        const float up = parameters[velocity_y], least = std::max(floor_of(trick_live), floor_of(trick_then));
+        if (least > 0 && least <= 20.0f && std::isfinite(up) && up > 0.05f && up < least) parameters[velocity_y] = least;
+    }
+    if (ollie || grind) {
+        h.flight_object.store(trajectory, std::memory_order_relaxed);
+        h.flight_up.store(parameters[velocity_y], std::memory_order_relaxed);
+        h.flight_tick.store(GetTickCount64(), std::memory_order_relaxed);
+        h.raise_to.store(0, std::memory_order_relaxed);
+        h.flight_kept = keep_floats(parameters, h.flight_parameters.data(), h.flight_parameters.size());
     }
     if (const auto original = h.original.load(std::memory_order_acquire)) original(trajectory, parameters);
 // <dev>
@@ -161,6 +235,7 @@ bool start_trick_heights(std::uintptr_t base) noexcept {
         }
         h.original.store(reinterpret_cast<SetTrajectory>(original), std::memory_order_release);
         if (hook_enable(target) != HookOk) return false;
+        set_physics_step_callback(&raise_step);
         h.ready = true;
         logging::write(logging::Level::info, logging::Channel::skater, "Trainer: no comply and boneless heights ready.");
     } catch (...) {}
@@ -203,7 +278,8 @@ bool take_trajectory_call(TrajectoryCall &out) noexcept {
     const auto where = call.where.load(std::memory_order_relaxed), speed = call.speed.load(std::memory_order_relaxed);
     const std::uint32_t bits[2]{static_cast<std::uint32_t>(speed >> 32), static_cast<std::uint32_t>(speed)};
     out.caller = static_cast<std::uint32_t>(where >> 32);
-    out.trick = call.trick.load(std::memory_order_relaxed);
+    out.trick = call.trick.load(std::memory_order_relaxed) & 0xffu;
+    out.live = (call.trick.load(std::memory_order_relaxed) >> 8) & 0xffu;
     out.state = static_cast<std::uint32_t>((where >> 16) & 0xffff);
     out.previous = static_cast<std::uint32_t>(where & 0xffff);
     std::memcpy(&out.up, &bits[0], 4);
@@ -230,12 +306,70 @@ void trajectory_test(float scale, int slot, float value) noexcept {
     hooked().test_value.store(value, std::memory_order_relaxed);
     hooked().test_slot.store(slot, std::memory_order_relaxed);
 }
-// </dev>
-void set_flip_launch(std::uint32_t trick, float scale) noexcept {
-    auto &h = hooked();
-    if (trick < h.flip_launch.size()) h.flip_launch[trick].store(std::isfinite(scale) ? scale : 1.0f, std::memory_order_relaxed);
+bool copy_floats(std::uintptr_t at, float *out, std::size_t count) noexcept {
+    __try {
+        std::memcpy(out, reinterpret_cast<const void *>(at), count * sizeof(float));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
-void set_launch_trick(std::uint32_t trick) noexcept { hooked().launch_trick.store(trick, std::memory_order_relaxed); }
+std::string flight_dump() {
+    auto &h = hooked();
+    std::array<float, 96> f{};
+    const auto object = h.flight_object.load(std::memory_order_relaxed);
+    if (!object || !copy_floats(object, f.data(), f.size())) return "no flight object";
+    char item[48];
+    std::snprintf(item, sizeof item, "up %.3f, %llu ms ago:", static_cast<double>(h.flight_up.load()), static_cast<unsigned long long>(GetTickCount64() - h.flight_tick.load()));
+    std::string text = item;
+    for (std::size_t i = 0; i < f.size(); ++i) {
+        std::snprintf(item, sizeof item, "%s%.4g", i % 4 ? " " : " | ", static_cast<double>(f[i]));
+        text += item;
+    }
+    return text;
+}
+void trajectory_no_floor(bool on) noexcept { hooked().test_no_floor.store(on, std::memory_order_relaxed); }
+bool poke_float(std::uintptr_t at, float value, float &before) noexcept {
+    __try {
+        before = *reinterpret_cast<float *>(at);
+        *reinterpret_cast<float *>(at) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+std::string trajectory_poke(int slot, float value) {
+    auto &h = hooked();
+    const auto object = h.flight_object.load(std::memory_order_relaxed);
+    if (!object || slot < 0 || slot >= 96) return "no launch yet, or a slot outside 0..95";
+    float before{};
+    const bool done = poke_float(object + static_cast<std::uintptr_t>(slot) * 4, value, before);
+    char text[96];
+    std::snprintf(text, sizeof text, "%s: slot %d was %.4g, launch %llu ms ago", done ? "written" : "not writable", slot, static_cast<double>(before),
+                  static_cast<unsigned long long>(GetTickCount64() - h.flight_tick.load(std::memory_order_relaxed)));
+    return text;
+}
+// </dev>
+// The trajectory object, as floats (read after the setter, 2026-10-10): the start point at 44..46, the launch velocity
+// at 48..50, gravity at 52..54 and the step at 57 (0..2 looks like where it will come down).
+bool raise_flight(float up, float &was, float &time) noexcept {
+    auto &h = hooked();
+    was = h.flight_up.load(std::memory_order_relaxed);
+    const auto age = GetTickCount64() - h.flight_tick.load(std::memory_order_relaxed);
+    time = static_cast<float>(age) / 1000.0f;
+    if (!h.flight_object.load(std::memory_order_relaxed) || age > 250 || !(was > 0.05f) || !(up > was + 0.05f) || up > 20.0f) return false;
+    h.raise_to.store(up, std::memory_order_release);
+    return true;
+}
+int take_flight_raise() noexcept { return hooked().raised.exchange(0, std::memory_order_acq_rel); }
+void set_flip_launch(std::uint32_t trick, float up) noexcept {
+    auto &h = hooked();
+    if (trick < h.flip_launch.size()) h.flip_launch[trick].store(std::isfinite(up) && up > 0 ? up : 0.0f, std::memory_order_relaxed);
+}
+void set_launch_trick(std::uint32_t trick, std::uintptr_t at) noexcept {
+    hooked().launch_trick.store(trick, std::memory_order_relaxed);
+    hooked().trick_at.store(at, std::memory_order_relaxed);
+}
 void set_manual_pop(float height, std::int32_t intent) noexcept {
     auto &h = hooked();
     h.manual.store(std::isfinite(height) && height > 0 ? std::sqrt(std::min(height, 1.0e6f)) : 1.0f, std::memory_order_relaxed);

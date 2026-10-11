@@ -222,6 +222,8 @@ void noclip_apply_velocity(std::uintptr_t core) noexcept {
     } catch (const SourceGuard& issue) { debug_stop_noclip(debug); debug.status = issue.message; }
       catch (...) { debug_stop_noclip(debug); debug.status = "Flight stopped after a physics error."; }
 }
+// Trainer: called after each physics update (see set_physics_step_callback).
+std::atomic<void (*)() noexcept> physics_step_callback{};
 struct JumpScale {
     std::atomic<bool> pending{};
     std::uintptr_t client{}, entity{}, core{};
@@ -572,6 +574,7 @@ void noclip_physics_update(std::uintptr_t core) {
     if (original) original(core);
     noclip_apply_velocity(core);
     trainer_apply_jump_scale(core);
+    if (const auto callback = physics_step_callback.load(std::memory_order_acquire)) callback();
     trainer_push_speed(core);
     trainer_pump_power(core);
     trainer_revert_boost(core);
@@ -673,6 +676,7 @@ void noclip_skater_motion(std::uintptr_t rig, std::uintptr_t context,
 namespace dingosdk {
 using namespace client_source::detail;
 
+void set_physics_step_callback(void (*callback)() noexcept) noexcept { physics_step_callback.store(callback, std::memory_order_release); }
 bool queue_jump_scale(std::uintptr_t client, std::uintptr_t entity, float factor) noexcept {
     SourceLastError error;
     try {

@@ -485,9 +485,10 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         bool pop = view.flip_pop;
         if (ImGui::Checkbox("Slow flips pop higher, so they land clean", &pop)) trainer_command(menu, callbacks, std::format("option flip_pop {}", pop ? 1 : 0));
         if (ImGui::IsItemHovered())
-            wrapped_tooltip("%s", "A flip slowed below x 0.75 needs more time than a normal pop gives: without this the game holds the landing back and "
-                                  "the skater sinks before riding away. With it the pop of a slowed flip trick is raised just enough for the trick: about "
-                                  "twice the height at x 0.5, 3.4 times at x 0.35, 6.4 times at x 0.25. Plain ollies and flips at x 0.75 or faster are untouched.");
+            wrapped_tooltip("%s", "A slowed flip needs more time than a normal pop gives: without this the game holds the landing back and the "
+                                  "skater sinks before riding away. With it every pop into a slowed flip trick (riding, out of a manual, out of a "
+                                  "grind or slide) goes at least as high as the trick needs: about 0.9 m at x 0.5 and 2.9 m at x 0.25, where the "
+                                  "game's own pop is 0.4 m. Plain ollies are untouched.");
     }
     if (wanted(advanced_label)) {
         bool on = view.flip_advanced;
