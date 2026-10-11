@@ -1450,7 +1450,12 @@ float flip_turn_test = 0;
 float slow_flip_up(std::uint32_t trick, float speed) {
     if (!(speed < 1.0f)) return 0;
     const auto name = flip_trick_name(trick);
-    float turn = name.find("Shuvit") != name.npos || name.find("Impossible") != name.npos ? 0.38f : 0.34f;
+    const auto has = [&](std::string_view part) { return name.find(part) != name.npos; };
+    float turn = has("Shuvit") || has("Impossible") ? 0.38f : 0.34f;
+    // The front foot impossible, the nollie impossibles and the 360 pop shuvits were still turning at every landing with
+    // that (playtest of 2026-10-11: 11 of 11 landed low, turning for more than 0.58 s / speed): a longer turn for them, not
+    // measured to its end yet.
+    if (has("FrontFoot") || has("BackFoot") || has("N_Impossible") || has("360PopShuvit")) turn = 0.65f;
     if (flip_turn_test > 0) turn = flip_turn_test;
     const float air = 0.20f + turn / std::max(speed, 0.05f);
     return std::min(4.9f * (air - 0.04f), 16.5f);
