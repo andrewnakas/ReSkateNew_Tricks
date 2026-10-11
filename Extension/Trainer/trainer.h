@@ -91,6 +91,11 @@ struct View {
     float grind_turn{}, grind_tip{}; // how fast the stick turns / tips the board on a grind (the game's multipliers); 0: the game's own
     std::array<std::int8_t, grind_settings.size()> grind_setting{}; // the game's own grind settings: -1 its own / 0 off / 1 on
     std::array<std::int8_t, grind_switches.size()> grind_mode{}, grind_live{}; // -1 the game's own / 0 off / 1 on; what each reads (-1: not found)
+    // Transition skating: the trainer's own help (0 / false: off) and the game's own settings (-1 its own / 0 off / 1 on).
+    float tr_lean{}, tr_carry{}, tr_drop{1}, tr_unstick{}, tr_lockout{}, tr_plant{};
+    bool tr_spine{};
+    std::array<std::int8_t, transition_settings.size()> tr_setting{};
+    std::array<int, transition_options.size()> tr_option{}; // the game's own options, as the game holds them now
     float revert_boost{}; // strength of the speed given back on an auto revert; 0: off
     float pump_power{1};  // x what pumping a transition gains
     bool pump_live{};     // the game's pumping states are found: the pump power acts

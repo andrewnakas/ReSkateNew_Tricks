@@ -70,6 +70,35 @@ struct RevertBoostReport {
     const char *outcome = ""; // "boost", or why not
 };
 RevertBoostReport revert_boost_report() noexcept;
+// The trainer's help back into a ramp off a coping grind, a stall or a handplant (client_noclip.cpp). Publish every
+// client tick: it expires after 500 ms. `edge` and `ramp` are level unit vectors (x, z): along the coping, and from
+// the coping into the ramp.
+struct TransitionAssist {
+    float carry{};      // 0..1: how much of the speed along the coping is put back when a coping grind ends without a pop (0: off)
+    float drop_speed{}; // m/s: the most speed across the coping, into the ramp, while it is put back (0: no limit)
+    float unstick{};    // strength of the push out of a hang-up (0: off)
+    float plant{};      // 0..1: a handplant's exit speed moved toward Skate 3's (0: off)
+    bool coping{};      // the skater is on a coping grind or stall
+    bool transition{};  // the skater rode steep ground in the last seconds
+    bool measure{};     // report even with everything off
+    std::array<float, 2> edge{}, ramp{};
+};
+void set_transition_assist(std::uintptr_t client, std::uintptr_t entity, const TransitionAssist &assist) noexcept;
+// The last coping grind left without a pop (kind 1), handplant (2) or hung landing off a transition (3), for the
+// trainer's log. Speeds in m/s: `in_*` on the last step on the coping, `game_*` what the game made of it a third of a
+// second later, `out_*` what the skater had then (the same unless the trainer changed it).
+struct TransitionReport {
+    std::uint64_t sequence{}; // one more per report; 0: none yet
+    int kind{};
+    std::uint32_t from{}, to{}, to_last{}; // physics states: on the coping, the first after it, and when the watch ended
+    float in_along{}, in_across{}, in_down{};
+    float game_along{}, game_across{};
+    float out_along{}, out_across{}, out_down{};
+    float drop{}, fall{};      // metres lost by then; for a handplant: inside the plant, and a second and a half after it
+    std::uint32_t hung{};      // physics steps spent slower than 1.1 m/s in the second and a half after
+    std::uint32_t carried{}, kicked{}; // steps on which the trainer changed the velocity
+};
+TransitionReport transition_report() noexcept;
 // Engine-thread-only interactive controls. Presentation callbacks only queue requests.
 overlay::DebugModel on_client_debug_tick(std::uintptr_t base, std::uintptr_t client,
     bool can_control, bool camera_phase_observed, const overlay::DebugRequest* request = nullptr,

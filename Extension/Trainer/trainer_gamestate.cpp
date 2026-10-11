@@ -101,6 +101,19 @@ StateObject grind_objects[]{
     {{0x5a, 0xf8, 0x53, 0xe2, 0x2f, 0x5b, 0x89, 0x02, 0xe2, 0x53, 0xf8, 0x5a, 0x5b, 0x2f, 0x02, 0x89}, "Animation/Dingo/Bool.Intent.DisableLegacyCopingGrinds"},
     {{0x8c, 0x0f, 0xfd, 0x43, 0x45, 0x81, 0xa8, 0xc4, 0x43, 0xfd, 0x0f, 0x8c, 0x81, 0x45, 0xc4, 0xa8}, "Animation/Dingo/Bool.Intent.AllowAirToGrind"},
 };
+// Transition skating: what the physics says about the lip, in the order of TransitionState (four flags, a number, an
+// enumeration, three vectors).
+StateObject transition_objects[]{
+    {{0x7d, 0xbc, 0xc5, 0x80, 0xd7, 0xd9, 0xb2, 0xed, 0x80, 0xc5, 0xbc, 0x7d, 0xd9, 0xd7, 0xed, 0xb2}, "Animation/Dingo/Bool.Physics.FoundLipTrick"},
+    {{0xf7, 0x40, 0x6e, 0xeb, 0x30, 0x84, 0x8a, 0x2f, 0xeb, 0x6e, 0x40, 0xf7, 0x84, 0x30, 0x2f, 0x8a}, "Animation/Dingo/Bool.Physics.IsLipTricking"},
+    {{0xf4, 0xe2, 0x75, 0xd3, 0x3a, 0xb6, 0x36, 0x20, 0xd3, 0x75, 0xe2, 0xf4, 0xb6, 0x3a, 0x20, 0x36}, "Animation/Dingo/Bool.Physics.IsHandplanting"},
+    {{0xa0, 0x93, 0xef, 0x64, 0xcd, 0xf1, 0xd7, 0xfc, 0x64, 0xef, 0x93, 0xa0, 0xf1, 0xcd, 0xfc, 0xd7}, "Animation/Dingo/Bool.Physics.IsTrajectoryTargetingVert"},
+    {{0x4d, 0x51, 0x11, 0xcd, 0x2f, 0xad, 0x80, 0x9c, 0xcd, 0x11, 0x51, 0x4d, 0xad, 0x2f, 0x9c, 0x80}, "Animation/Dingo/Float.Intent.TransitionInput"},
+    {{0x00, 0xdf, 0x0d, 0x4f, 0xfa, 0x34, 0x89, 0x81, 0x4f, 0x0d, 0xdf, 0x00, 0x34, 0xfa, 0x81, 0x89}, "Animation/Dingo/EnumGS.Physics.LipDropInType"},
+    {{0x91, 0x7e, 0x62, 0x00, 0xa7, 0xe0, 0x4d, 0x9c, 0x00, 0x62, 0x7e, 0x91, 0xe0, 0xa7, 0x9c, 0x4d}, "Animation/Dingo/Vec3.Physics.LipDirection"},
+    {{0x09, 0xda, 0x55, 0x9c, 0xe0, 0x97, 0x4a, 0xa8, 0x9c, 0x55, 0xda, 0x09, 0x97, 0xe0, 0xa8, 0x4a}, "Animation/Dingo/Vec3.Physics.LipNearestPoint"},
+    {{0x27, 0x56, 0x8a, 0xee, 0x40, 0x00, 0x61, 0xce, 0xee, 0x8a, 0x56, 0x27, 0x00, 0x40, 0xce, 0x61}, "Animation/Dingo/Vec3.Prediction.ReckoningGroundNormal"},
+};
 bool put_flag(std::uintptr_t address, bool value) noexcept {
     __try {
         *reinterpret_cast<volatile std::uint8_t *>(address) = value ? 1 : 0;
@@ -200,6 +213,7 @@ void find_state_objects(std::uintptr_t start, std::size_t size) noexcept {
             for (auto *object : objects) look(*object, i);
             for (auto &object : grind_objects) look(object, i);
             for (auto &object : grind_control_objects) look(object, i);
+            for (auto &object : transition_objects) look(object, i);
         }
     } __except (1) {}
 }
@@ -299,8 +313,8 @@ struct ForcedSetting {
     std::atomic<int> mode{-1};
     std::atomic<std::uint32_t> asked{};
 };
-ForcedSetting forced_settings[grind_settings.size()];
-// Which of grind_settings the setting asset at `asset` is (its key is the string at + 0x60); -1: none of them.
+ForcedSetting forced_settings[grind_settings.size() + transition_settings.size()]; // the grind settings, then the transition ones
+// Which of forced_settings the setting asset at `asset` is (its key is the string at + 0x60); -1: none of them.
 int grind_setting_of(std::uintptr_t asset) noexcept {
     std::uintptr_t name{};
     char text[48]{};
@@ -314,6 +328,8 @@ int grind_setting_of(std::uintptr_t asset) noexcept {
     text[sizeof(text) - 1] = 0;
     for (std::size_t i = 0; i < grind_settings.size(); ++i)
         if (_stricmp(text, std::string(grind_settings[i].setting).c_str()) == 0) return static_cast<int>(i);
+    for (std::size_t i = 0; i < transition_settings.size(); ++i)
+        if (_stricmp(text, std::string(transition_settings[i].setting).c_str()) == 0) return static_cast<int>(grind_settings.size() + i);
     return -1;
 }
 
@@ -412,6 +428,40 @@ void force_grind_setting(std::size_t index, int mode) noexcept {
 }
 std::uint32_t grind_setting_asked(std::size_t index) noexcept {
     return index < grind_settings.size() ? forced_settings[index].asked.exchange(0, std::memory_order_relaxed) : 0;
+}
+void force_transition_setting(std::size_t index, int mode) noexcept {
+    if (index < transition_settings.size()) forced_settings[grind_settings.size() + index].mode.store(mode, std::memory_order_relaxed);
+}
+std::uint32_t transition_setting_asked(std::size_t index) noexcept {
+    return index < transition_settings.size() ? forced_settings[grind_settings.size() + index].asked.exchange(0, std::memory_order_relaxed) : 0;
+}
+TransitionState read_transition_state(std::uintptr_t base, std::uintptr_t entity) noexcept {
+    TransitionState state;
+    const auto block = states_block(base, entity);
+    if (!block) return state;
+    bool *const flags[]{&state.lip_found, &state.lip_tricking, &state.handplanting, &state.targeting_vert};
+    std::array<float, 3> *const vectors[]{&state.lip_direction, &state.lip_nearest, &state.ground_normal};
+    for (std::size_t i = 0; i < std::size(transition_objects); ++i) {
+        const auto at = value_address(transition_objects[i], block);
+        if (!at) continue;
+        if (i < 4) {
+            std::uint8_t value{};
+            if (!peek(at, value)) continue;
+            *flags[i] = value != 0;
+        } else if (i == 4) {
+            float value{};
+            if (!peek(at, value) || !std::isfinite(value)) continue;
+            state.transition_input = value;
+        } else if (i == 5) {
+            if (!peek(at, state.drop_in_type)) continue;
+        } else {
+            std::array<float, 3> value{};
+            if (!peek(at, value) || !std::isfinite(value[0]) || !std::isfinite(value[1]) || !std::isfinite(value[2])) continue;
+            *vectors[i - 6] = value;
+        }
+        state.found |= 1u << i;
+    }
+    return state;
 }
 std::optional<bool> forced_gameplay_bool(const void *reference) noexcept {
     std::uintptr_t asset{};

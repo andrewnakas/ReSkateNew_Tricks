@@ -98,6 +98,11 @@ void set_local_values(const std::vector<std::pair<std::string, Json>>& values) n
 // ReSkate menu scale, clamped to a legible range. Cached so the overlay can
 // read it every frame without touching the database.
 float local_menu_scale() noexcept;
+// One of the game's OWN gameplay options (the ones its Settings menu edits, by the game's key for it), as the local
+// profile holds it: the same value the game's scripts are answered with. Empty while the player never changed it (the
+// game's default applies). Setting it is the same as changing it in the game's menu.
+std::optional<double> local_game_option(std::string_view key) noexcept;
+bool set_local_game_option(std::string_view key, double value, bool boolean) noexcept;
 bool set_local_menu_scale(float value) noexcept;
 }
 PlayerCardModel local_profile_player_card();

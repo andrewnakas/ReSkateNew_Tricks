@@ -132,6 +132,51 @@ std::string_view essential_name(std::string_view key, int *rank, std::uint8_t *m
         {"wallrun.wallrungravity", "Wallrun: gravity", f},
         {"physicstrucks.truckzposfront", "Front truck position (next respawn)", r},
         {"physicstrucks.truckzposback", "Back truck position (next respawn)", r},
+        // The TRANSITION list's rows: named, on neither short list.
+        {"physicsgrind.nonpopexitangledeg", "Leaving a grind without a pop: angle (deg)", 0},
+        {"physicsgrind.grindreckoningsmoothnessonexit", "Leaving a grind: how slowly the body follows the board (0 to 1)", 0},
+        {"physicsgrind.grindreckoningsmoothnessdropin", "Dropping in off a grind: how slowly the body follows (0 to 1)", 0},
+        {"physicshandplant.exitanglerangestart", "Handplant exit: directions tried from (deg off the coping)", 0},
+        {"physicshandplant.exitanglerangeend", "Handplant exit: directions tried up to (deg; 90 = straight in)", 0},
+        {"physicshandplant.minnormalvel", "Handplant exit: least speed into the ramp (m/s)", 0},
+        {"physicshandplant.maxnormalvel", "Handplant exit: most speed into the ramp (m/s)", 0},
+        {"physicshandplant.maxparallelvel", "Handplant exit: most speed kept along the coping (m/s)", 0},
+        {"physicshandplant.maxverticalvel", "Handplant exit: most vertical speed (m/s)", 0},
+        {"physicshandplant.minlipclearance", "Handplant: least height above the lip (m)", 0},
+        {"physicshandplant.maxlipclearance", "Handplant: most height above the lip (m)", 0},
+        {"physicshandplant.maxangleofapproach", "Handplant: widest approach to the lip (deg)", 0},
+        {"physicshandplant.waitforanimtime", "Handplant: wait for the animation (s)", 0},
+        {"physicsliptrick.liptrickcomapexheight", "Lip trick: body height above the lip (m)", 0},
+        {"physicsliptrick.lipquerymaxlipdistance", "Lip trick: how far ahead a lip is looked for (m)", 0},
+        {"physicsliptrick.lipquerymaxdirectionchangedegrees", "Lip trick: most turn to reach the lip (deg)", 0},
+        {"physicsliptrick.launchgroundslopethreshold", "Lip trick: least slope to start from (deg)", 0},
+        {"physicsliptrick.lipquerylipslopethreshold", "Lip trick: steepest lip that counts (deg)", 0},
+        {"physicsliptrick.lipquerygroundslopethreshold", "Lip trick: least slope under the lip (deg)", 0},
+        {"physicsliptrick.maxrotationpersecond", "Lip trick: fastest board rotation", 0},
+        {"physicsrollin.maxrollintime", "Roll in: longest it may take (s)", 0},
+        {"physicsrollin.skateboardrollinduration", "Roll in: time the board takes to tip in (s)", 0},
+        {"physicsrollin.minlipbashdownwardspeed", "Roll in: downward speed that counts as hitting the lip (m/s)", 0},
+        {"physicsrollin.undershootamount", "Roll in: how far short of the wall it aims", 0},
+        {"physicsreckoning.vertjumpalignmaxgroundnormaly", "Vert pop: how steep a wall must be (0 = wall, 1 = flat)", 0},
+        {"physicsreckoning.vertjumpalignmaxangle", "Vert pop: how far the stick tips it in or out", 0},
+        {"physicsreckoning.vertjumpalignminjumpdiry", "Vert pop: how upward the pop must point", 0},
+        {"physicsreckoning.vertjumpalignfactor", "Vert pop: strength of the straightening", 0},
+        {"physicstrajectory.naturalairoffvertsscalar", "Rolling off a vert lip without a pop: speed kept out from the wall", 0},
+        {"physicstrajectory.scoretransition", "Landing choice: weight of coming back into the transition", 0},
+        {"physicstrajectory.mintimeafterapexfortransition", "Landing choice: soonest after the top of the air (s)", 0},
+        {"physicstrajectory.scoregrind", "Landing choice: weight of an edge to grind", 0},
+        {"physicstrajectory.scoremiddlebonus", "Landing choice: bonus for the middle of the fan", 0},
+        {"physicstrajectory.scorelandingdirection", "Landing choice: weight of facing the way you travel", 0},
+        {"physicstrajectory.maxtrajectoryadjust", "In the air: most speed added to reach the landing (m/s)", 0},
+        {"physicstrajectory.coneanglex", "Landing search: fan width up and down (deg)", 0},
+        {"physicstrajectory.coneanglez", "Landing search: fan width side to side (deg)", 0},
+        {"physicstrajectory.mintimefortrajectorytobevalid", "Shortest air that gets a planned landing (s)", 0},
+        {"physicsairstates.naturalairmaxdist", "Rolling off an edge: longest gap still ridden over (m)", 0},
+        {"physicsgrindsair.maxdist50_50", "Grind lock-on: reach for 50-50s (m)", 0},
+        {"physicsgrindsair.maxdist5_0", "Grind lock-on: reach for 5-0s and nose grinds (m)", 0},
+        {"physicstrajectory.grindlandingmaxangle", "Grind lock-on: widest angle onto the edge (deg)", 0},
+        {"physicspumping.pumpoutoftransitionscalar", "Pumping: push out of the top of a transition", 0},
+        {"physicsantipumping.maxdownwardangledeg", "Anti-pump: steepest downward push that costs speed (deg)", 0},
     };
     const auto found = std::ranges::find(names, key, &Name::key);
     const bool known = found != std::end(names);
@@ -190,6 +235,15 @@ std::string_view essential_help(std::string_view key) {
         {"jump.basejumpheight", "How high a jump on foot goes, in metres."},
         {"locomotion.sprintspeed", "Sprinting speed on foot, in m/s."},
         {"wipeout.spreadeaglegravity", "Gravity while gliding spread-eagle. -8 is the game's own; nearer 0 falls slower."},
+        {"physicshandplant.exitanglerangestart", "A handplant looks for a wall to come down on in a fan of directions. This is where the fan starts: 0 is along the coping."},
+        {"physicshandplant.exitanglerangeend", "Where the fan of exit directions ends: 90 is straight down the ramp. Skate 3 stopped at 69."},
+        {"physicshandplant.minnormalvel", "Skate 3 left a plant at 0.9 m/s or more."},
+        {"physicshandplant.maxparallelvel", "Skate 3 kept up to 2 m/s."},
+        {"physicshandplant.maxlipclearance", "Skate 3's plant topped out 0.76 m above the lip."},
+        {"physicsreckoning.vertjumpalignmaxgroundnormaly", "A pop off a wall this steep or steeper is straightened to go up the wall. 0.4 is the game's own; Skate 3 used 0.2, so only near-vert walls counted."},
+        {"physicsreckoning.vertjumpalignmaxangle", "Stick neutral a vert pop comes back into the ramp; pushed up it goes out over the deck. This is how far it tips."},
+        {"physicstrajectory.scoretransition", "In the air the game scores the landings it could reach. This is what coming back down the wall you left is worth."},
+        {"physicstrajectory.scoregrind", "What landing on an edge is worth against landing on ground. At a million, an edge in reach always wins."},
     };
     const auto found = std::ranges::find(help, key, &Help::key);
     return found == std::end(help) ? std::string_view{} : found->text;
@@ -323,6 +377,16 @@ const std::vector<BuiltinPreset> &builtin_presets() {
         {"Skate 3 Hardcore", "Skate 3 on Hardcore: lower pops, weaker pushes, tight grind lock-on, slow auto spins.",
          skate3_rules(skate3_hardcore)},
         {"Skate 3 Easy", "Skate 3 on Easy: full-height pops, strong pushes, generous grind lock-on.", skate3_rules(skate3_easy)},
+        // The tuning part of "Transition feels like Skate 3" (`trainer transition feel skate3`): Skate 3's timers for
+        // the lean that ends a coping grind (off, -1, in skate.) and its handplant exit fan.
+        // Not its pumping: with the game's legacy pumping forced on nothing pumped at all (owner, 2026-10-11).
+        // Not its vert pop and landing numbers (VertJumpAlignMaxGroundNormalY 0.2, NaturalAirMaxDist 0.12, ScoreMiddleBonus
+        // 40, MinTimeForTrajectoryToBeValid 0.25): with them and the air grind hold on, 6 of 6 popped airs landed 3 to 4 m
+        // out on the deck (0 of them aimed back at the wall), against 5 of 5 back within half a metre on the game's own
+        // (owner's log, 2026-10-11). The pop's rule itself is already Skate 3's in skate.: same formula, same 0.08 / 0.25 / 500.
+        {"Transition: Skate 3", "Skate 3's numbers for coping grinds and handplants.",
+         {{"physicsgrind.copingexitstarttime", false, 0.1, false, true}, {"physicsgrind.fairlysteepexitstarttime", false, 0.8, false, true},
+          {"physicshandplant.exitanglerangeend", false, 69.0, false, true}}},
     };
     return presets;
 }

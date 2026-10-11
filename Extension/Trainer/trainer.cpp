@@ -49,6 +49,9 @@ extern "C" void DingoSDKOverlaySetGrindStickMirror(float amount) noexcept;
 extern "C" std::uint64_t DingoSDKOverlayGrindStickMirrored() noexcept;
 extern "C" void DingoSDKOverlaySetGrindStickTurn(bool on, float x, float y_add, float y_scale) noexcept;
 extern "C" void DingoSDKOverlayGrindStickSent(float *values) noexcept;
+extern "C" void DingoSDKOverlaySetGrindStickLean(bool on, float x, float y) noexcept;
+extern "C" bool DingoSDKOverlayGrindStickLeanRaw(float *values) noexcept;
+extern "C" std::uint64_t DingoSDKOverlayGrindStickLeaned() noexcept;
 namespace dingosdk::trainer {
 namespace {
 namespace tuning = dingosdk::physics_tuning;
@@ -301,6 +304,39 @@ struct State {
     // "the game's own" has to put this back.
     std::array<std::int8_t, grind_switches.size()> grind_stock = grind_mode;
     std::uint32_t grind_multiplier_asked[2]{};
+    // Transition skating (bowls, quarter pipes, vert): the trainer's own help, each 0 / false when off.
+    float tr_lean{};         // 0..1: how hard the skater leans into the ramp on a coping grind
+    float tr_carry{};        // 0..1: how much of the speed along the coping is kept rolling off it
+    float tr_drop{1.0f};     // m/s: the most speed across the coping, into the ramp, while that speed is kept
+    float tr_unstick{};      // strength of the push out of a hang-up
+    float tr_lockout{};      // seconds the coping cannot be caught again after a coping grind
+    bool tr_spine{};         // a flight straight up and over a lip does not reach for the coping
+    float tr_plant{};        // 0..1: a handplant leaves the lip the way Skate 3's did
+    // The game's own transition settings (transition_settings, trainer_gamestate.h): -1 the game's own, 0 forced off, 1 forced on.
+    // The game's own Settings options shown with them (transition_options): what the game holds, read twice a second.
+    std::array<int, transition_options.size()> tr_option = [] {
+        std::array<int, transition_options.size()> a{};
+        for (std::size_t i = 0; i < a.size(); ++i) a[i] = transition_options[i].stock;
+        return a;
+    }();
+    std::uint64_t tr_option_at{};
+    std::array<std::int8_t, transition_settings.size()> tr_setting = [] { std::array<std::int8_t, transition_settings.size()> a{}; a.fill(-1); return a; }();
+    // What the trainer knows of the transition the skater is on, from one tick to the next.
+    struct TransitionTrack {
+        std::uint64_t steep_at{};          // when the skater last rode steep ground
+        std::array<float, 2> steep_out{};  // level direction out of that wall, into the ramp
+        bool coping{};                     // on a coping grind or stall now
+        bool grinding{}, flying{};         // at the last tick
+        std::array<float, 2> edge{}, ramp{}; // level unit vectors: along the coping, and from it into the ramp
+        float in_angle{}, in_speed{};      // how the grind began: degrees between the travel and the coping, m/s
+        std::uint64_t left_at{};           // when the last coping grind ended without a pop
+        std::uint64_t flight_off_until{};  // a flight up and over a lip: no reaching for edges until then
+        bool flight_off{};
+        bool air_grinds_off{};             // the air grind reach is held at 0 now
+        float lean{};                      // the lean in force, eased
+        std::uint64_t reports{};           // physics-step reports told so far
+        std::uint64_t log_at{};
+    } tr;
     float revert_boost{};            // 0: off
     float pump_power{1};             // x what pumping a transition gains
     bool pump_live{};                // the game's pumping states are found
@@ -481,6 +517,15 @@ void load_store() {
             for (std::size_t i = 0; i < grind_switches.size(); ++i)
                 s.grind_mode[i] = grind_switches[i].read_only ? std::int8_t{-1}
                                                                : static_cast<std::int8_t>(std::clamp(o.value("grind." + std::string(grind_switches[i].key), -1), -1, 1));
+            s.tr_lean = std::clamp(o.value("transition.lean", 0.0f), -1.0f, 1.0f);
+            s.tr_carry = std::clamp(o.value("transition.carry", 0.0f), 0.0f, 1.0f);
+            s.tr_drop = std::clamp(o.value("transition.drop", 1.0f), 0.0f, 100.0f);
+            s.tr_unstick = std::clamp(o.value("transition.unstick", 0.0f), 0.0f, 100.0f);
+            s.tr_lockout = std::clamp(o.value("transition.lockout", 0.0f), 0.0f, 60.0f);
+            s.tr_spine = o.value("transition.spine", false);
+            s.tr_plant = std::clamp(o.value("transition.plant", 0.0f), 0.0f, 1.0f);
+            for (std::size_t i = 0; i < transition_settings.size(); ++i)
+                s.tr_setting[i] = static_cast<std::int8_t>(std::clamp(o.value("transition.set." + std::string(transition_settings[i].key), -1), -1, 1));
             s.offboard_height = std::clamp(o.value("offboard_height", 1.0f), height_low, height_high);
             s.flip_speed = std::clamp(o.value("flip_speed", 1.0f), flip_low, flip_high);
             s.flip_advanced = o.value("flip_advanced", false);
@@ -558,6 +603,15 @@ void save_store() {
             if (s.grind_setting[i] >= 0) options["grind.set." + std::string(grind_settings[i].key)] = static_cast<int>(s.grind_setting[i]);
         for (std::size_t i = 0; i < grind_switches.size(); ++i)
             if (s.grind_mode[i] >= 0) options["grind." + std::string(grind_switches[i].key)] = static_cast<int>(s.grind_mode[i]);
+        options["transition.lean"] = s.tr_lean;
+        options["transition.carry"] = s.tr_carry;
+        options["transition.drop"] = s.tr_drop;
+        options["transition.unstick"] = s.tr_unstick;
+        options["transition.lockout"] = s.tr_lockout;
+        options["transition.spine"] = s.tr_spine;
+        options["transition.plant"] = s.tr_plant;
+        for (std::size_t i = 0; i < transition_settings.size(); ++i)
+            if (s.tr_setting[i] >= 0) options["transition.set." + std::string(transition_settings[i].key)] = static_cast<int>(s.tr_setting[i]);
         options["offboard_height"] = s.offboard_height;
         options["flip_speed"] = s.flip_speed;
         options["flip_advanced"] = s.flip_advanced;
@@ -1514,7 +1568,7 @@ float left_stick_x() noexcept {
     return std::abs(x) <= dead ? 0.0f : (x - std::copysign(dead, x)) / (1.0f - dead);
 }
 // The left stick as the controller reports it, each axis -1 to 1 (up and right are positive). False without a controller.
-bool left_stick_raw(float &x, float &y) noexcept {
+bool pad_sticks(float &x, float &y, float &right_x, float &right_y) noexcept {
     using GetState = DWORD(WINAPI *)(DWORD, XINPUT_STATE *);
     static const GetState get_state = []() -> GetState {
         for (const auto name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"}) {
@@ -1529,7 +1583,7 @@ bool left_stick_raw(float &x, float &y) noexcept {
         }
         return nullptr;
     }();
-    x = y = 0;
+    x = y = right_x = right_y = 0;
     if (!get_state) return false;
     bool any = false;
     float most = -1;
@@ -1543,9 +1597,21 @@ bool left_stick_raw(float &x, float &y) noexcept {
             most = size;
             x = px;
             y = py;
+            right_x = std::clamp(static_cast<float>(pad.Gamepad.sThumbRX) / 32767.0f, -1.0f, 1.0f);
+            right_y = std::clamp(static_cast<float>(pad.Gamepad.sThumbRY) / 32767.0f, -1.0f, 1.0f);
         }
     }
+    // While the trainer leans the skater into a ramp the game's polls see a made-up left stick, and so would this
+    // read: the player's own stick is what the last poll had before that.
+    if (float own[2]{}; DingoSDKOverlayGrindStickLeanRaw(own)) {
+        x = own[0];
+        y = own[1];
+    }
     return any;
+}
+bool left_stick_raw(float &x, float &y) noexcept {
+    float right_x{}, right_y{};
+    return pad_sticks(x, y, right_x, right_y);
 }
 // Test value (`trainer flipland <seconds>`): this long before the landing a slowed flip goes back to the game's own speed.
 float flip_land_window = 0;
@@ -2483,6 +2549,213 @@ void run_selftest(std::uint64_t now) {
     }
 }
 
+// ---- transition skating ------------------------------------------------------------------------
+// Bowls, quarter pipes, vert and spines: the trainer's own help back into the ramp, and Skate 3's numbers for it.
+// What is known of skate. here comes from its data, not from play (2026-10-11): the timed lean into the ramp Skate 3
+// ended a coping grind with is still in the game but switched off (the exit timers are -1), a grind's exit points
+// straight across the coping, and nothing measured says what a hang-up is. So every lever below reports what it saw
+// (`Trainer transition:` lines) and each is a first setting.
+constexpr std::string_view transition_preset = "Transition: Skate 3";
+// "Transition feels like Skate 3": the lean is the share of the stick the game is shown (0.8 at most: past 0.9 the
+// game takes the lean as the wish to leave the grind); Skate 3 kept all the speed along the coping and nudged the board
+// at most 1 m/s across it; its hang-up push; 70 frames before the same edge could be caught again; its handplant exit.
+constexpr float skate3_tr_lean = 0.6f, skate3_tr_carry = 1.0f, skate3_tr_drop = 1.0f, skate3_tr_unstick = 1.0f, skate3_tr_lockout = 1.17f, skate3_tr_plant = 1.0f;
+// The sign of each stick axis the lean is sent on (`trainer transition leanframe <x> <y>`): the camera's axes as the
+// game reads the stick against them. Not measured yet.
+float lean_frame_x = 1.0f, lean_frame_y = 1.0f;
+bool transition_stock() {
+    auto &s = state();
+    return s.tr_lean == 0.0f && s.tr_carry == 0.0f && s.tr_unstick == 0.0f && s.tr_lockout == 0.0f && !s.tr_spine && s.tr_plant == 0.0f &&
+           std::ranges::all_of(s.tr_setting, [](std::int8_t mode) { return mode < 0; });
+}
+void reset_transition() {
+    auto &s = state();
+    s.tr_lean = s.tr_carry = s.tr_unstick = s.tr_lockout = s.tr_plant = 0.0f;
+    s.tr_drop = 1.0f;
+    s.tr_spine = false;
+    s.tr_setting.fill(-1);
+}
+// How far the skater reaches for an edge from the air, and what an edge is worth as a landing. Held at 0 for a moment
+// (after a coping grind, during a flight up and over a lip) the far coping of a spine or the coping just left cannot
+// catch the board; the player's own numbers come back after.
+constexpr std::string_view air_grind_values[]{"physicstrajectory.scoregrind", "physicsgrindsair.maxdist50_50", "physicsgrindsair.maxdist5_0",
+                                              "physicsgrindsair.maxdisttipslide", "physicsgrindsair.maxdistboardslide"};
+void hold_air_grinds(bool off) {
+    auto &s = state();
+    if (!s.ready || s.enforced) return;
+    bool wrote = false;
+    for (const auto key : air_grind_values) {
+        const auto *e = find_entry(key);
+        if (!e || e->class_field >= 0 || e->kind != Kind::real || static_cast<std::size_t>(e->offset) + e->size > s.want.image.size()) continue;
+        const double wanted = off ? 0.0 : e->touched ? e->value : e->stock;
+        if (read_field(s.want.image, *e) == static_cast<double>(static_cast<float>(wanted))) continue;
+        write_field(s.want.image, *e, wanted);
+        wrote = true;
+    }
+    if (wrote) s.write_due = true;
+    s.tr.air_grinds_off = off;
+}
+void drive_transition(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
+    auto &s = state();
+    auto &t = s.tr;
+    const auto &m = s.motion;
+    const bool blocked = extras_blocked();
+    for (std::size_t i = 0; i < transition_settings.size(); ++i) force_transition_setting(i, blocked ? -1 : s.tr_setting[i]);
+    if (now >= s.tr_option_at) {
+        // The game's own options: whatever its Settings menu (or the trainer) last set.
+        s.tr_option_at = now + 500;
+        for (std::size_t i = 0; i < transition_options.size(); ++i) {
+            const auto held = profile_runtime::local_game_option(transition_options[i].setting);
+            const int value = held ? static_cast<int>(std::lround(*held)) : transition_options[i].stock;
+            if (value != s.tr_option[i]) {
+                s.tr_option[i] = value;
+                s.view_due = true;
+            }
+        }
+    }
+    const auto watch = watched_physics_state();
+    const std::uint32_t physics = watch.valid && s.telemetry.skater && m.valid ? watch.state : 0;
+    const bool riding = physics >= 100 && physics < 200, grinding = (physics >= 400 && physics < 500) || physics == 603;
+    const bool flying = physics >= 200 && physics < 300;
+    const auto &v = m.velocity;
+    const float over = std::hypot(v[0], v[2]), speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    // Steep ground: the skater stands out from the wall, so the level part of their up axis points into the ramp. A
+    // skater held upright on a wall still climbs or drops steeply: the wall is then ahead going up and behind coming down.
+    if (riding && m.axes_valid) {
+        float out_x = m.up[0], out_z = m.up[2], length = std::hypot(out_x, out_z);
+        bool steep = m.up[1] < 0.8f && length > 0.1f;
+        if (!steep && speed > 1.5f && std::abs(v[1]) > 0.6f * speed && over > 0.2f) {
+            const float away = v[1] > 0 ? -1.0f : 1.0f;
+            out_x = away * v[0];
+            out_z = away * v[2];
+            length = over;
+            steep = true;
+        }
+        if (steep) {
+            t.steep_at = now;
+            t.steep_out = {out_x / length, out_z / length};
+        }
+    }
+    const bool on_transition = t.steep_at && now - t.steep_at < 3000;
+    // The speed along the lip (level, square to the way out of the wall) and across it (up the wall and over).
+    const float out_speed = v[0] * t.steep_out[0] + v[2] * t.steep_out[1];
+    const float lip_along = std::hypot(v[0] - out_speed * t.steep_out[0], v[2] - out_speed * t.steep_out[1]);
+    if (grinding && !t.grinding) {
+        // A grind that begins within a second of steep ground is on a coping.
+        t.coping = t.steep_at && now - t.steep_at < 1000;
+        if (t.coping) {
+            t.ramp = t.steep_out;
+            t.edge = {-t.ramp[1], t.ramp[0]};
+            t.in_speed = speed;
+            t.in_angle = std::atan2(std::hypot(out_speed, v[1]), std::max(lip_along, 0.001f)) * 180.0f / std::numbers::pi_v<float>;
+        }
+    }
+    if (grinding && t.coping) {
+        // The coping runs the way the skater travels on it (a bowl's coping curves); the ramp stays on the side it was on.
+        if (over > 1.0f) t.edge = {v[0] / over, v[2] / over};
+        const float lean_on_edge = t.ramp[0] * t.edge[0] + t.ramp[1] * t.edge[1];
+        const float side_x = t.ramp[0] - lean_on_edge * t.edge[0], side_z = t.ramp[1] - lean_on_edge * t.edge[1];
+        if (const float length = std::hypot(side_x, side_z); length > 0.2f) t.ramp = {side_x / length, side_z / length};
+    } else if (!grinding) {
+        if (t.coping && t.grinding && physics != 200 && physics != 300 && !(physics >= 500 && physics < 600)) t.left_at = now;
+        t.coping = false;
+        // For a handplant, and for a flight: the wall last ridden.
+        t.ramp = t.steep_out;
+        t.edge = {-t.ramp[1], t.ramp[0]};
+    }
+    // A flight straight up and over a lip (an air, a spine transfer): little of its speed runs along the lip. A carve
+    // into a coping grind leaves the wall along the lip and keeps its reach for the coping.
+    if (flying && !t.flying) t.flight_off = s.tr_spine && !blocked && on_transition && v[1] > 2.0f && lip_along < 0.5f * speed;
+    if (t.flight_off && !flying) {
+        if (t.flying) t.flight_off_until = now + 300;
+        else if (now >= t.flight_off_until) t.flight_off = false;
+    }
+    const bool locked = s.tr_lockout > 0.0f && !blocked && t.left_at && now - t.left_at < static_cast<std::uint64_t>(s.tr_lockout * 1000.0f);
+    const bool air_off = locked || (t.flight_off && s.tr_spine && !blocked);
+    if (air_off != t.air_grinds_off || air_off) hold_air_grinds(air_off);
+    // The lean: the left stick the game is shown, pushed toward the ramp, more the faster the grind runs along the
+    // coping. The game reads that stick against the camera, so the ramp's side is turned into the camera's axes.
+    const float along_speed = std::abs(v[0] * t.edge[0] + v[2] * t.edge[1]);
+    const float lean_wanted = t.coping && !blocked ? s.tr_lean * 0.8f * std::clamp((along_speed - 1.0f) / 4.0f, 0.0f, 1.0f) : 0.0f;
+    t.lean += (lean_wanted - t.lean) * 0.15f;
+    float lean_x = 0, lean_y = 0;
+    bool leaning = false;
+    if (t.coping && std::abs(t.lean) > 0.02f) {
+        std::array<float, 16> camera{};
+        if (read_local_camera_transform(base, client, camera)) {
+            // Rows: right, up, forward; a camera looks back along its forward row.
+            const float right = std::hypot(camera[0], camera[2]), ahead = std::hypot(camera[8], camera[10]);
+            if (right > 0.1f && ahead > 0.1f) {
+                lean_x = (t.ramp[0] * camera[0] + t.ramp[1] * camera[2]) / right * t.lean * lean_frame_x;
+                lean_y = -(t.ramp[0] * camera[8] + t.ramp[1] * camera[10]) / ahead * t.lean * lean_frame_y;
+                leaning = true;
+            }
+        }
+    }
+    DingoSDKOverlaySetGrindStickLean(leaning, lean_x, lean_y);
+    TransitionAssist assist;
+    if (!blocked) {
+        assist.carry = s.tr_carry;
+        assist.drop_speed = s.tr_drop;
+        assist.unstick = s.tr_unstick;
+        assist.plant = s.tr_plant;
+    }
+    assist.coping = t.coping;
+    assist.transition = on_transition;
+    assist.edge = t.edge;
+    assist.ramp = t.ramp;
+    assist.measure = s.hud_jump || s.logging;
+    // <dev>
+    assist.measure = assist.measure || dev_capture;
+    // </dev>
+    set_transition_assist(client, s.entity, assist);
+    if (const auto report = transition_report(); report.sequence != t.reports) {
+        t.reports = report.sequence;
+        const auto off_coping = [](float along, float across, float down) {
+            return std::atan2(std::hypot(across, down), std::max(std::abs(along), 0.001f)) * 180.0f / std::numbers::pi_v<float>;
+        };
+        if (report.kind == 1)
+            say(logging::Level::info, std::format("Trainer transition: coping grind left without a pop (state {} -> {}, then {}). It began at {:.0f} deg to the coping, {:.1f} m/s. "
+                                                  "Last step on it: {:.2f} m/s along, {:.2f} into the ramp. A third of a second later the game had {:.2f} along, {:.2f} into the ramp, "
+                                                  "{:.2f} down = {:.0f} deg off the coping; the skater left with {:.2f} along, {:.2f} into the ramp = {:.0f} deg. Hung {} steps; "
+                                                  "speed put back on {} steps, pushed on {}; {:.2f} m lower after a third of a second, {:.2f} m after one and a half.",
+                                                  report.from, report.to, report.to_last, t.in_angle, t.in_speed, report.in_along, report.in_across, report.game_along,
+                                                  report.game_across, report.out_down, off_coping(report.game_along, report.game_across, report.out_down), report.out_along,
+                                                  report.out_across, off_coping(report.out_along, report.out_across, report.out_down), report.hung, report.carried,
+                                                  report.kicked, report.drop, report.fall));
+        else if (report.kind == 2)
+            say(logging::Level::info, std::format("Trainer transition: handplant (state {} -> {}, then {}): {:.2f} m lost inside the plant; it let go at {:.2f} m/s into the ramp, "
+                                                  "{:.2f} along the lip, {:.2f} down; a fifth of a second later {:.2f} into the ramp (the game's own {:.2f}), {:.2f} along, "
+                                                  "{:.2f} down; {:.2f} m below the plant's top a second and a half after. Hung {} steps; speed changed on {} steps, pushed on {}.",
+                                                  report.from, report.to, report.to_last, report.drop, report.in_across, report.in_along, report.in_down, report.out_across,
+                                                  report.game_across, report.out_along, report.out_down, report.fall, report.hung, report.carried, report.kicked));
+        else if (report.kind == 3)
+            say(logging::Level::info, std::format("Trainer transition: a landing off a transition hung (state {} -> {}, then {}): {} steps slower than 1.1 m/s, pushed on {}; "
+                                                  "the flight came in at {:.2f} m/s over the ground, {:.2f} down.",
+                                                  report.from, report.to, report.to_last, report.hung, report.kicked, report.in_along, report.in_down));
+    }
+    // <dev>
+    // What the skater and the game's lip states do around a coping, a plant or a wall, thirty times a second.
+    static std::uint32_t transition_ticks = 0;
+    const bool near_it = (t.steep_at && now - t.steep_at < 2000) || grinding || physics >= 600 || (t.left_at && now - t.left_at < 2000);
+    if (dev_capture && near_it && physics && ++transition_ticks % 2 == 0) {
+        const auto g = read_transition_state(base, static_cast<std::uintptr_t>(s.entity));
+        float lx{}, ly{}, rx{}, ry{};
+        (void)pad_sticks(lx, ly, rx, ry);
+        say(logging::Level::info, std::format("Trainer trans: state {}, {:.1f} km/h, v {:.2f} {:.2f} {:.2f}, up {:.2f} {:.2f} {:.2f}, fwd {:.2f} {:.2f} {:.2f}, out {:.2f} {:.2f} ({} ms ago), "
+                                              "coping {}, edge {:.2f} {:.2f}, ramp {:.2f} {:.2f}, lip found {} tricking {} plant {} vert {} input {:.2f} dropin {}, lipdir {:.2f} {:.2f} {:.2f}, "
+                                              "nearest {:.1f} {:.1f} {:.1f}, ground {:.2f} {:.2f} {:.2f}, pos {:.1f} {:.1f} {:.1f}, L {:.2f} {:.2f} R {:.2f} {:.2f}, lean {:.2f} -> {:.2f} {:.2f} ({} polls), "
+                                              "air grinds off {}, found {:x}.",
+                                              physics, speed * 3.6f, v[0], v[1], v[2], m.up[0], m.up[1], m.up[2], m.forward[0], m.forward[1], m.forward[2], t.steep_out[0],
+                                              t.steep_out[1], t.steep_at ? now - t.steep_at : 0, t.coping, t.edge[0], t.edge[1], t.ramp[0], t.ramp[1], g.lip_found, g.lip_tricking,
+                                              g.handplanting, g.targeting_vert, g.transition_input, g.drop_in_type, g.lip_direction[0], g.lip_direction[1], g.lip_direction[2],
+                                              g.lip_nearest[0], g.lip_nearest[1], g.lip_nearest[2], g.ground_normal[0], g.ground_normal[1], g.ground_normal[2], m.position[0],
+                                              m.position[1], m.position[2], lx, ly, rx, ry, t.lean, lean_x, lean_y, DingoSDKOverlayGrindStickLeaned(), t.air_grinds_off, g.found));
+    }
+    // </dev>
+    t.grinding = grinding;
+    t.flying = flying;
+}
 void build_view() {
     auto &s = state();
     s.view_due = false;
@@ -2562,6 +2835,15 @@ void build_view() {
     next->grind_mode = s.grind_mode;
     next->grind_setting = s.grind_setting;
     next->grind_live = s.grind_live;
+    next->tr_lean = s.tr_lean;
+    next->tr_carry = s.tr_carry;
+    next->tr_drop = s.tr_drop;
+    next->tr_unstick = s.tr_unstick;
+    next->tr_lockout = s.tr_lockout;
+    next->tr_spine = s.tr_spine;
+    next->tr_plant = s.tr_plant;
+    next->tr_setting = s.tr_setting;
+    next->tr_option = s.tr_option;
     next->offboard_height = s.offboard_height;
     next->flip_speed = s.flip_speed;
     next->flip_advanced = s.flip_advanced;
@@ -2597,7 +2879,7 @@ void build_view() {
                   std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); }) && !s.catch_at && !s.flip_advanced &&
                   !s.flip_pop && !s.flip_flick && s.grind_side == 1.0f && s.grind_push == 0.0f && s.grind_lean == 0.0f && s.grind_turn == 0.0f && s.grind_tip == 0.0f && s.grind_range == 0.0f &&
                   std::ranges::all_of(s.grind_mode, [](std::int8_t mode) { return mode < 0; }) &&
-                  std::ranges::all_of(s.grind_setting, [](std::int8_t mode) { return mode < 0; });
+                  std::ranges::all_of(s.grind_setting, [](std::int8_t mode) { return mode < 0; }) && transition_stock();
     next->share_text = s.share_text;
     next->share_serial = s.share_serial;
     next->open_tab = s.open_tab;
@@ -3035,6 +3317,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             }
             // </dev>
         }
+        drive_transition(base, client, now);
         // The revert boost adds speed, so it keeps to the session's rule for boosts and to a host's physics.
         set_revert_boost(client, s.entity, s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 0.0f : s.revert_boost, s.revert);
         if (const auto report = revert_boost_report(); report.sequence != s.revert_boosts_seen) {
@@ -3143,6 +3426,127 @@ std::string trickline_command(const std::vector<std::string> &a) {
     return on ? "Tricklining extras on: the board bending boost, heavier revert and powerslide friction, no comply and boneless height x 1.5."
               : "Tricklining extras off.";
 }
+// trainer transition | transition feel skate|skate3 | transition lean|carry|drop|unstick|lockout|plant <n> |
+// transition spine on|off | transition <setting>|all game|off|on
+std::string transition_command(const std::vector<std::string> &a) {
+    auto &s = state();
+    const auto arg = [&](std::size_t i) { return i < a.size() ? a[i] : std::string{}; };
+    const auto what = lower(arg(0)), to = lower(arg(1));
+    std::string why;
+    if (what.empty()) {
+        const auto now = GetTickCount64();
+        std::string out = std::format("Lean into the ramp {:.2f}, speed kept along the coping {:.2f} (at most {:.2f} m/s across it), hang-up push {:.2f}, no catching the coping again for "
+                                      "{:.2f} s, flights clear the coping {}, handplant exit {:.2f}.",
+                                      s.tr_lean, s.tr_carry, s.tr_drop, s.tr_unstick, s.tr_lockout, s.tr_spine ? "on" : "off", s.tr_plant);
+        out += std::format("\nsteep ground {} ms ago, way out of the wall {:.2f} {:.2f}; on a coping: {}; coping {:.2f} {:.2f}, ramp {:.2f} {:.2f}; air grind reach held off: {}; "
+                           "lean polls given {}",
+                           s.tr.steep_at ? now - s.tr.steep_at : 0, s.tr.steep_out[0], s.tr.steep_out[1], s.tr.coping ? "yes" : "no", s.tr.edge[0], s.tr.edge[1], s.tr.ramp[0],
+                           s.tr.ramp[1], s.tr.air_grinds_off ? "yes" : "no", DingoSDKOverlayGrindStickLeaned());
+        for (std::size_t i = 0; i < transition_settings.size(); ++i)
+            out += std::format("\n{} (setting {}, the game's default {}): {}; asked {} times since last listed", transition_settings[i].key, transition_settings[i].setting,
+                               transition_settings[i].stock ? "on" : "off", s.tr_setting[i] < 0 ? "game's own" : s.tr_setting[i] ? "forced on" : "forced off",
+                               transition_setting_asked(i));
+        for (std::size_t i = 0; i < transition_options.size(); ++i)
+            out += std::format("\n{} (the game's own option {}, default {}): {}", transition_options[i].key, transition_options[i].setting, transition_options[i].stock, s.tr_option[i]);
+        return out;
+    }
+    if (what == "feel") {
+        const bool skate3 = to == "skate3" || to == "3";
+        if (!skate3 && to != "skate" && to != "stock") return "error: usage: trainer transition feel skate|skate3";
+        if (!editable(&why)) return "error: " + why;
+        if (std::ranges::find(s.active, transition_preset) != s.active.end()) (void)remove_preset(transition_preset);
+        // Values the preset set in earlier builds of this day and no longer does: back to the game's own where they
+        // still hold what it set.
+        static constexpr std::pair<std::string_view, double> dropped[]{
+            {"physicsreckoning.vertjumpalignmaxgroundnormaly", 0.2}, {"physicsairstates.naturalairmaxdist", 0.12}, {"physicstrajectory.scoremiddlebonus", 40.0},
+            {"physicstrajectory.mintimefortrajectorytobevalid", 0.25}, {"physicsmode.pumpeffectfactor", 18.0}, {"physicsmode.pumpmaxacceleration", 10.0},
+            {"physicsmode.unintentionalpumpscalar", 0.7}, {"physicspumping.pumpangle", 50.0}, {"physicspumping.pumpminfactor", 0.01}};
+        for (const auto &[key, value] : dropped)
+            if (auto *e = find_entry(key); e && e->touched && !is_locked(*e) && std::abs(e->value - value) < 1e-4) set_entry(*e, e->stock);
+        reset_transition();
+        if (skate3) {
+            s.tr_lean = skate3_tr_lean;
+            s.tr_carry = skate3_tr_carry;
+            s.tr_drop = skate3_tr_drop;
+            s.tr_unstick = skate3_tr_unstick;
+            s.tr_lockout = skate3_tr_lockout;
+            // "Airs clear the coping" is not part of it: the one session it was on in, every popped air landed on the deck.
+            s.tr_plant = skate3_tr_plant;
+            for (std::size_t i = 0; i < transition_settings.size(); ++i) s.tr_setting[i] = transition_settings[i].skate3;
+            (void)apply_preset(transition_preset);
+        }
+        changed();
+        return std::string{skate3 ? "Transition like Skate 3: lean into the ramp, roll off the coping at the angle you came in, no hang-ups, Skate 3's handplant exit, its "
+                                    "coping exit timers. Airs and pumping stay skate.'s own."
+                                  : "Transition like skate.: everything is the game's own."};
+    }
+    struct Number {
+        std::string_view key;
+        float *value;
+        float low, high;
+        std::string_view says;
+    };
+    const Number numbers[]{
+        {"lean", &s.tr_lean, -1.0f, 1.0f, "Lean into the ramp on a coping grind"},
+        {"carry", &s.tr_carry, 0.0f, 1.0f, "Speed kept along the coping rolling off it"},
+        {"drop", &s.tr_drop, 0.0f, 100.0f, "Most speed across the coping while it is kept (m/s)"},
+        {"unstick", &s.tr_unstick, 0.0f, 100.0f, "Push out of a hang-up"},
+        {"lockout", &s.tr_lockout, 0.0f, 60.0f, "Seconds the coping cannot be caught again"},
+        {"plant", &s.tr_plant, 0.0f, 1.0f, "Handplant exit like Skate 3's"},
+    };
+    for (const auto &one : numbers) {
+        if (what != one.key) continue;
+        const auto value = number(arg(1));
+        if (!value) return std::format("error: usage: trainer transition {} <number> ({} to {}; 0 = off)", one.key, one.low, one.high);
+        if (*value != 0 && !editable(&why)) return "error: " + why;
+        *one.value = std::clamp(static_cast<float>(*value), one.low, one.high);
+        changed();
+        return std::format("{}: {:.2f}.", one.says, *one.value);
+    }
+    for (std::size_t i = 0; i < transition_options.size(); ++i) {
+        // The game's own options: the same value its Settings menu shows and sets.
+        const auto &one = transition_options[i];
+        if (what != one.key) continue;
+        bool on{};
+        const auto value = one.boolean ? (flag(arg(1), on) ? std::optional<double>(on ? 1.0 : 0.0) : std::nullopt) : number(arg(1));
+        if (!value) return std::format("{} (the game's own option {}): {}. Set it with: trainer transition {} {}", one.label, one.setting, s.tr_option[i], one.key,
+                                       one.boolean ? "on|off" : "<number>");
+        if (!profile_runtime::set_local_game_option(one.setting, one.boolean ? *value : std::round(*value), one.boolean))
+            return "error: the game's settings could not be written (no local profile is active).";
+        s.tr_option_at = 0;
+        return std::format("{} = {} (the game's own option {}: its Settings menu shows the same).", one.label, one.boolean ? (*value != 0 ? "on" : "off") : std::format("{:.0f}", std::round(*value)),
+                           one.setting);
+    }
+    if (what == "spine") {
+        bool on{};
+        if (!flag(arg(1), on)) return "error: usage: trainer transition spine on|off";
+        if (on && !editable(&why)) return "error: " + why;
+        s.tr_spine = on;
+        changed();
+        return std::string{on ? "Flights up and over a lip no longer reach for the coping." : "Flights reach for the coping as the game has it."};
+    }
+    // <dev>
+    if (what == "leanframe") {
+        const auto x = number(arg(1)), y = number(arg(2));
+        if (!x || !y) return "error: usage: trainer transition leanframe <x sign> <y sign>";
+        lean_frame_x = static_cast<float>(*x);
+        lean_frame_y = static_cast<float>(*y);
+        return std::format("Lean stick axes x {:.1f}, y {:.1f}.", lean_frame_x, lean_frame_y);
+    }
+    // </dev>
+    const int mode = to == "on" || to == "1" ? 1 : to == "off" || to == "0" ? 0 : to == "game" || to == "-1" ? -1 : -2;
+    if (mode == -2) return "error: usage: trainer transition (lists everything) | feel skate|skate3 | lean|carry|drop|unstick|lockout|plant <n> | spine on|off | <setting>|all game|off|on";
+    if (mode >= 0 && !editable(&why)) return "error: " + why;
+    bool any = false;
+    for (std::size_t i = 0; i < transition_settings.size(); ++i)
+        if (what == "all" || what == transition_settings[i].key) {
+            s.tr_setting[i] = static_cast<std::int8_t>(mode);
+            any = true;
+        }
+    if (!any) return "error: no transition setting is called \"" + what + "\". `trainer transition` lists them.";
+    changed();
+    return what + ": " + (mode < 0 ? "the game's own" : mode ? "forced on" : "forced off") + ".";
+}
 std::string run(std::string_view verb, const std::vector<std::string> &a) {
     auto &s = state();
     const auto v = lower(verb);
@@ -3170,6 +3574,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.grind_turn = s.grind_tip = s.grind_range = 0.0f;
             s.grind_mode.fill(-1);
             s.grind_setting.fill(-1);
+            reset_transition();
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_pop = false;
@@ -3207,6 +3612,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.grind_turn = s.grind_tip = s.grind_range = 0.0f;
             s.grind_mode.fill(-1);
             s.grind_setting.fill(-1);
+            reset_transition();
             s.catch_at = false;
             s.flip_advanced = false;
             s.flip_pop = false;
@@ -3344,6 +3750,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         if (!s.waypoint) return "error: no waypoint on the map. Open the pause map and place one first.";
         return land_at((*s.waypoint)[0], (*s.waypoint)[2], (*s.waypoint)[1], "your map waypoint");
     }
+    if (v == "transition") return transition_command(a);
     if (v == "grind") {
         // trainer grind | grind watch 0|1 | grind side <x> | grind <key>|all game|off|on
         const auto what = lower(arg(0)), to = lower(arg(1));
@@ -3564,9 +3971,9 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
     if (v == "open") {
         const auto tab = lower(arg(0));
         // The last three are the Tune tab on one of its lists.
-        const std::array<std::string_view, 9> tabs{"tune", "presets", "practice", "map", "realistic", "fun", "everything", "movement", "trickline"};
+        const std::array<std::string_view, 10> tabs{"tune", "presets", "practice", "map", "realistic", "fun", "everything", "movement", "trickline", "transition"};
         const auto found = std::ranges::find(tabs, tab);
-        if (!tab.empty() && found == tabs.end()) return "error: usage: trainer open [tune|trickline|practice|map|movement|realistic|fun|everything]";
+        if (!tab.empty() && found == tabs.end()) return "error: usage: trainer open [tune|trickline|transition|practice|map|movement|realistic|fun|everything]";
         s.open_tab = tab.empty() ? 0 : static_cast<int>(found - tabs.begin());
         ++s.open_serial;
         s.view_due = true;

@@ -563,6 +563,26 @@ void mirror_grind_stick(XINPUT_GAMEPAD& pad) noexcept {
         pad.sThumbRY = static_cast<SHORT>(std::clamp(static_cast<int>(tipped * 32767.0f), -32767, 32767));
     grind_stick_mirrored().fetch_add(1, std::memory_order_relaxed);
 }
+// Leaning into the ramp on a coping grind: while on, the game's own polls see the left stick held at (x, y) for as long
+// as the player's own left stick is at rest (a stick the player moves is theirs). `raw_*` is the player's own stick as
+// the last poll had it, for the trainer's own reads of the left stick.
+struct GrindStickLean {
+    std::atomic<bool> on{};
+    std::atomic<float> x{}, y{}, raw_x{}, raw_y{};
+    std::atomic<std::uint64_t> given{0};
+};
+GrindStickLean& grind_stick_lean() { static auto* value = new GrindStickLean; return *value; }
+void lean_grind_stick(XINPUT_GAMEPAD& pad) noexcept {
+    auto& lean = grind_stick_lean();
+    if (!lean.on.load(std::memory_order_relaxed)) return;
+    lean.raw_x.store(static_cast<float>(pad.sThumbLX) / 32767.0f, std::memory_order_relaxed);
+    lean.raw_y.store(static_cast<float>(pad.sThumbLY) / 32767.0f, std::memory_order_relaxed);
+    constexpr int idle = 8000; // about a quarter of the stick
+    if (std::abs(int{pad.sThumbLX}) > idle || std::abs(int{pad.sThumbLY}) > idle) return;
+    pad.sThumbLX = static_cast<SHORT>(std::clamp(lean.x.load(std::memory_order_relaxed), -1.0f, 1.0f) * 32767.0f);
+    pad.sThumbLY = static_cast<SHORT>(std::clamp(lean.y.load(std::memory_order_relaxed), -1.0f, 1.0f) * 32767.0f);
+    lean.given.fetch_add(1, std::memory_order_relaxed);
+}
 std::int64_t dark_pop_clock() noexcept { LARGE_INTEGER now{}; QueryPerformanceCounter(&now); return now.QuadPart; }
 // The game's own poll: returns 1 if D-pad Right was added, 2 if it was taken away, 0 if the pad is unchanged.
 unsigned dark_pop_filter(WORD& buttons) noexcept {
@@ -628,6 +648,7 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
         if (changed) output->dwPacketNumber ^= changed << 29;
         dark_pop_release().flags.store(changed, std::memory_order_relaxed);
         mirror_grind_stick(output->Gamepad);
+        lean_grind_stick(output->Gamepad);
     }
     return result;
 }
@@ -1022,6 +1043,25 @@ extern "C" void DingoSDKOverlayGrindStickSent(float* values) noexcept {
     values[0] = turn.sent_x.load(std::memory_order_relaxed);
     values[1] = turn.sent_y.load(std::memory_order_relaxed);
     values[2] = turn.raw_y.load(std::memory_order_relaxed);
+}
+// Leaning into the ramp on a coping grind: the left stick the game's own polls see while the player's is at rest.
+extern "C" void DingoSDKOverlaySetGrindStickLean(bool on, float x, float y) noexcept {
+    auto& lean = dingosdk::overlay::detail::grind_stick_lean();
+    lean.x.store(x == x ? x : 0.0f, std::memory_order_relaxed);
+    lean.y.store(y == y ? y : 0.0f, std::memory_order_relaxed);
+    lean.on.store(on, std::memory_order_relaxed);
+}
+// The player's own left stick as the game's last poll had it, while the lean is on (false: it is off, read the controller).
+extern "C" bool DingoSDKOverlayGrindStickLeanRaw(float* values) noexcept {
+    auto& lean = dingosdk::overlay::detail::grind_stick_lean();
+    if (!lean.on.load(std::memory_order_relaxed)) return false;
+    values[0] = lean.raw_x.load(std::memory_order_relaxed);
+    values[1] = lean.raw_y.load(std::memory_order_relaxed);
+    return true;
+}
+// How many of the game's polls were given the lean so far.
+extern "C" std::uint64_t DingoSDKOverlayGrindStickLeaned() noexcept {
+    return dingosdk::overlay::detail::grind_stick_lean().given.load(std::memory_order_relaxed);
 }
 extern "C" std::uint64_t DingoSDKOverlayGrindStickMirrored() noexcept {
     return dingosdk::overlay::detail::grind_stick_mirrored().load(std::memory_order_relaxed);

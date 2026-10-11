@@ -157,6 +157,68 @@ std::optional<bool> forced_gameplay_bool(const void *reference) noexcept;
 // How often the game asked for that setting since last asked here.
 std::uint32_t grind_setting_asked(std::size_t index) noexcept;
 
+// Transition skating (bowls, quarter pipes, vert, spines): the game's own gameplay settings that decide which of its
+// lip trick, vert landing, handplant and pumping code runs. Forced the same way as the grind settings. What each one
+// changes in play is the game's name for it: none is measured yet.
+struct TransitionSetting {
+    std::string_view key;     // `trainer transition <key>`, saved as transition.set.<key>
+    std::string_view label;   // in the menu
+    std::string_view help;
+    std::string_view setting; // the game's key for it
+    bool stock{};             // the game's default
+    std::int8_t skate3{-1};   // what "Transition feels like Skate 3" forces it to (-1: left alone)
+    std::uint8_t card{};      // which card of the section shows it (transition_card_*)
+};
+inline constexpr std::uint8_t transition_card_coping = 0, transition_card_plant = 1, transition_card_lip = 2, transition_card_vert = 3, transition_card_pump = 4;
+inline constexpr std::array<TransitionSetting, 12> transition_settings{{
+    {"airtogrind", "Air to grind (trial)", "The game's own experimental switch for locking onto an edge straight out of the air.", "egf_airtogrind", false, -1, transition_card_coping},
+    {"airgrindintents", "Aim for grinds in the air", "The game's own setting: in the air the skater aims for an edge it could grind. Off, a flight over a coping should stop reaching for it.", "egf_airtogrindintents", true, -1, transition_card_coping},
+    {"spinetransfer", "Handplant spine transfer", "The game's own experimental switch: a handplant on a spine may come down the other side.", "egf_handplantspinetransfer", false, -1, transition_card_plant},
+    {"legacylip", "Legacy lip tricks", "The game's own switch for its older lip trick code (stalls and lip tricks on coping).", "egf_experimentallegacyliptricks", false, -1, transition_card_lip},
+    {"rollin", "Roll in from the ground", "The game's own setting: riding over a lip from the deck rolls the skater into the ramp.", "egf_groundroll_in", true, -1, transition_card_lip},
+    {"legacyvert", "Legacy vert landings", "The game's own switch for its older way of landing on vert: off, the newer landing corrections run.", "egf_exp_legacyvertlandings", false, -1, transition_card_vert},
+    {"enhancedsearch", "Enhanced landing search", "The game's own setting for how it looks for a landing while the skater is in the air.", "enh_traj", true, -1, transition_card_vert},
+    {"middle", "Force the middle landing", "The game's own experimental switch: of the landings it finds, the middle one is taken.", "egf_forcemiddletrajectory", false, -1, transition_card_vert},
+    {"legacypump", "Legacy pumping", "The game's own switch for its older, Skate 3 style pumping code. A trial: with it on, skate.'s own pumping and Pump power "
+     "stop, and in the first playtest (2026-10-11) nothing pumped at all. The strength and limit rows below belong to it.", "egf_enablelegacypumping", false, -1, transition_card_pump},
+    {"pumptuning", "Experimental pump tuning", "The game's own experimental switch for a second set of pumping numbers.", "exp_pumptuning_on", false, -1, transition_card_pump},
+    {"semiauto", "Semi-automatic pumping", "The game's own setting: pumps are helped along.", "enableSemiAutoPumping", false, -1, transition_card_pump},
+    {"antipump", "Anti-pumping", "The game's own setting: pushing down at the wrong moment on a transition takes speed away.", "egf_exp_antipumping", true, -1, transition_card_pump},
+}};
+// mode: -1 the game's own, 0 forced off, 1 forced on.
+void force_transition_setting(std::size_t index, int mode) noexcept;
+std::uint32_t transition_setting_asked(std::size_t index) noexcept;
+// Options of the game's OWN Settings menu that belong with transition skating. They are not the trainer's: it shows the
+// value the game holds and changing it here is the same as changing it there (and the other way round), so they are
+// not part of the trainer's "modified" state, its presets or its resets.
+struct TransitionOption {
+    std::string_view key;     // `trainer transition <key> <value>`
+    std::string_view label;   // in the menu
+    std::string_view help;
+    std::string_view setting; // the game's key for it
+    bool boolean{};
+    int stock{};              // the game's default
+    int low{}, high{};
+};
+inline constexpr std::array<TransitionOption, 3> transition_options{{
+    {"pumpassist", "Pump assist", "The game's own Pump Assist: how much of a pump you get without pressing for it. The game takes the larger of your left stick and this, "
+     "so at its default of 85 the stick only adds the last 15 percent. 0 is fully manual: no press, no pump. Skate 3 gave about 70 percent of a pump by "
+     "itself.", "egf_intentpumpingassistamount", false, 85, 0, 100},
+    {"pumpstrength", "Pump strength (game)", "The game's own Pumping Strength option.", "egf_pumpingstrength", false, 100, 0, 100},
+    {"forwardpush", "Forward to push", "The game's own control option: the left stick pushed forward pushes. With it on the stick's up and down is not passed on as "
+     "the transition input, so forward cannot pump or ask to fly out of a ramp.", "egf_pushforwardtopush", true, 0, 0, 1},
+}};
+// What the game's physics says about the lip the skater is at, and the stick that asks to fly out of a transition.
+// `found` has bit n set where value n was read, in the order of the members.
+struct TransitionState {
+    bool lip_found{}, lip_tricking{}, handplanting{}, targeting_vert{};
+    float transition_input{};
+    std::uint32_t drop_in_type{};
+    std::array<float, 3> lip_direction{}, lip_nearest{}, ground_normal{};
+    std::uint32_t found{};
+};
+TransitionState read_transition_state(std::uintptr_t base, std::uintptr_t entity) noexcept;
+
 // The game finds every state's value through one lookup (0x11dcdd0). Hooked, a held switch is answered with the
 // trainer's own value whoever asks and whenever: writing the value alone lost to the game's scripts, which set the
 // switches again on every mount and, for the exit without a pop, every tick of a grind (playtest of 2026-10-11).

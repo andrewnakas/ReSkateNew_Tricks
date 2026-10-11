@@ -12,7 +12,7 @@ void register_trainer_commands(Commands &registry) {
     };
     const Verb verbs[]{
         {"status", "What the trainer is doing", nullptr, false},
-        {"open", "Open the menu on the trainer page", "[tune|presets|practice|map|realistic|fun|everything]", false},
+        {"open", "Open the menu on the trainer page", "[tune|trickline|transition|presets|practice|map|movement|realistic|fun|everything]", false},
         {"set", "Set a physics tuning value live", "<value id> <number>", true},
         {"freeze", "Keep a value through presets and resets", "<value id> 0|1", true},
         {"reset", "Put a value (or all) back to stock", "<value id>|all", false},
@@ -30,6 +30,8 @@ void register_trainer_commands(Commands &registry) {
         {"spot", "Go to one of the map author's spots", "<number>", false},
         {"option", "Trainer options", "hud|hud_jump|auto_return|pad|log 0|1, return_delay <seconds>, hippy_height|nocomply_height|boneless_height|manual_height|offboard_height|flip_speed <x>", true},
         {"grind", "The grind exit switches and the side force of a pop off a grind", "[<switch>|all game|off|on] | side <multiplier> | watch 0|1", false},
+        {"transition", "Transition skating: the feel, the help back into the ramp and the game's own settings",
+         "[feel skate|skate3] | lean|carry|drop|unstick|lockout|plant <number> | spine on|off | <setting>|all game|off|on", false},
         {"profile", "The preset this map applies on load", "set <preset>|clear", false},
         {"jumps", "The last measured jump", nullptr, false},
         {"where", "The skater's position, heading and speed", nullptr, false},
