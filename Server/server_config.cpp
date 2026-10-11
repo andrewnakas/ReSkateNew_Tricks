@@ -72,10 +72,10 @@ Layout layout(const ServerConfig &c) {
     server.set("query_port", static_cast<unsigned>(c.query_port));
     server.set("steam_token", c.steam_token);
     server.set("auto_update", c.auto_update);
+    server.set("autostart", c.autostart);
     server.set("activity_log", c.activity_log);
 
     auto &access = root.section("access");
-    access.set("admins", ids(c.admins));
     access.set("reserved_players_slots", ids(c.reserved));
     access.set("use_global_bans", c.global_bans);
 
@@ -92,6 +92,20 @@ Layout layout(const ServerConfig &c) {
     auto layers = Json::object();
     for (const auto &[key, mode] : c.layers) layers[key] = mode;
     maps.set("layers", std::move(layers));
+    auto park_mods = Json::array();
+    for (const auto &park : c.park_mods) {
+        auto item = Json::object();
+        item["name"] = park.name;
+        item["folder"] = park.folder;
+        item["map"] = park.map;
+        item["key"] = park.key;
+        park_mods.push_back(std::move(item));
+    }
+    maps.set("park_mods", std::move(park_mods));
+    auto park_limits = Json::object();
+    park_limits["parks"] = c.park_limits.parks;
+    park_limits["objects"] = c.park_limits.objects;
+    maps.set("park_limits", std::move(park_limits));
 
     auto &players = root.section("players");
     players.set("allow_boosts", c.boosts);
@@ -100,6 +114,8 @@ Layout layout(const ServerConfig &c) {
     players.set("allow_parties", c.parties);
     players.set("party_size", c.party_size);
     players.set("afk_kick_minutes", c.afk_kick);
+    players.set("word_warnings", c.word_warnings);
+    players.set("use_global_word_filter", c.global_words);
     players.set("allow_voice_chat", c.voice_chat);
     players.set("voice_range", static_cast<double>(c.voice_range));
     players.set("object_placement", placement_text(c.object_placement));
@@ -110,12 +126,14 @@ Layout layout(const ServerConfig &c) {
 
     auto &anti_cheat = root.section("anti_cheat");
     anti_cheat.set("speed_hack", c.speed_check);
+    anti_cheat.set("pinned_board", c.board_check);
     anti_cheat.set("modified_scoring", c.score_check);
     auto allowed = Json::array();
     for (const auto fingerprint : c.score_allow) allowed.push_back(scoring_text(fingerprint));
     anti_cheat.set("allowed_scoring_mods", std::move(allowed));
     anti_cheat.set("enforce_tuning", c.enforce_tuning);
     anti_cheat.set("bone_scale_limit", c.bone_scale_limit);
+    anti_cheat.set("bone_reach_limit", c.bone_reach_limit);
 
     auto &network = root.section("network");
     network.set("use_steam_relay", c.use_steam_relay);
@@ -171,7 +189,19 @@ Layout layout(const ServerConfig &c) {
     for (const auto &message : c.announcements.messages) messages.push_back(message);
     announcements.set("messages", std::move(messages));
     announcements.set("interval_minutes", c.announcements.interval);
-    announcements.set("card", c.announcements.card);
+
+    auto commands = Json::array();
+    for (const auto &command : c.commands) {
+        auto item = Json::object();
+        item["name"] = command.name;
+        item["reply"] = command.reply;
+        auto runs = Json::array();
+        for (const auto &run : command.commands) runs.push_back(run);
+        item["command"] = std::move(runs);
+        item["admin"] = command.admin;
+        commands.push_back(std::move(item));
+    }
+    root.set("commands", std::move(commands));
     return root;
 }
 // Bans have a file of their own, beside the config.
@@ -200,11 +230,30 @@ std::uint64_t steam_id(const Json &value) {
     if (value.is_string()) return std::stoull(value.string());
     return value.get<std::uint64_t>();
 }
+// The roles in data/roles.json, or the ones a server starts with when there is no such file.
+Roles roles_on_disk(const ServerConfig &c, bool &fresh) {
+    const auto roles = roles_file(c);
+    fresh = !std::filesystem::exists(roles);
+    if (fresh) return default_roles();
+    std::stringstream held;
+    {
+        std::ifstream in(roles, std::ios::binary);
+        held << in.rdbuf();
+    }
+    try {
+        return read_roles(held.str());
+    } catch (const std::exception &e) {
+        // Never started with nobody in charge because the file has a typo in it.
+        throw std::runtime_error("Cannot read " + path_utf8(roles) + ": " + e.what());
+    }
+}
 } // namespace
 ServerConfig load_config(const std::filesystem::path &file, std::vector<std::string> *added) {
     ServerConfig c;
     c.file = file;
     if (!std::filesystem::exists(file)) {
+        bool fresh{};
+        c.roles = roles_on_disk(c, fresh); // a config written anew keeps the roles there are
         save_config(c);
         return c;
     }
@@ -258,10 +307,16 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
     c.query_port = read_port("query_port", c.query_port);
     c.steam_token = get("server", "steam_token", c.steam_token);
     c.auto_update = get("server", "auto_update", c.auto_update);
+    c.autostart = get("server", "autostart", c.autostart);
     c.activity_log = get("server", "activity_log", c.activity_log);
 
-    if (const auto *admins = find("access", "admins"); admins && admins->is_array())
-        for (const auto &id : *admins) c.admins.push_back(steam_id(id));
+    // (Admins were listed here before there were roles: they are moved into the admin role below.)
+    // Looked for where either layout kept them, and not as a setting: there is none to add.
+    std::vector<std::uint64_t> listed_admins;
+    const Json *admins_listed = root.contains("access") && root.at("access").is_object() && root.at("access").contains("admins")
+                                    ? &root.at("access").at("admins") : root.contains("admins") ? &root.at("admins") : nullptr;
+    if (admins_listed && admins_listed->is_array())
+        for (const auto &id : *admins_listed) listed_admins.push_back(steam_id(id));
     if (const auto *reserved = find("access", "reserved_players_slots", {"reserved"}); reserved && reserved->is_array())
         for (const auto &id : *reserved) c.reserved.push_back(steam_id(id));
     c.global_bans = get("access", "use_global_bans", c.global_bans, {"global_bans"});
@@ -277,6 +332,18 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
     if (const auto *layers = find("maps", "layers"); layers && layers->is_object())
         for (const auto &[key, mode] : layers->items())
             if (mode.is_string()) c.layers[key] = mode.string();
+    if (const auto *parks = find("maps", "park_mods"); parks && !parks->is_null()) {
+        if (!parks->is_array()) throw std::runtime_error("park_mods must be a list of parks, each a JSON object.");
+        for (const auto &item : *parks) {
+            if (!item.is_object()) throw std::runtime_error("park_mods must be a list of parks, each a JSON object.");
+            c.park_mods.push_back({item.value("name", std::string{}), item.value("folder", std::string{}),
+                                   item.value("map", std::string{}), item.value("key", std::string{})});
+        }
+    }
+    if (const auto *limits = find("maps", "park_limits"); limits && limits->is_object()) {
+        c.park_limits.parks = limits->value("parks", c.park_limits.parks);
+        c.park_limits.objects = limits->value("objects", c.park_limits.objects);
+    }
 
     c.boosts = get("players", "allow_boosts", c.boosts, {"boosts"});
     c.no_bail = get("players", "allow_no_bail", c.no_bail, {"no_bail"});
@@ -284,6 +351,8 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
     c.parties = get("players", "allow_parties", c.parties, {"parties"});
     c.party_size = std::clamp(get("players", "party_size", c.party_size), 2U, 8U);
     c.afk_kick = get("players", "afk_kick_minutes", c.afk_kick);
+    c.word_warnings = get("players", "word_warnings", c.word_warnings);
+    c.global_words = get("players", "use_global_word_filter", c.global_words);
     c.voice_chat = get("players", "allow_voice_chat", c.voice_chat, {"voice_chat"});
     c.voice_range = get("players", "voice_range", c.voice_range);
     const auto placement = get("players", "object_placement", placement_text(c.object_placement));
@@ -297,6 +366,8 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
 
     c.speed_check = get("anti_cheat", "speed_hack", c.speed_check, {"speed_check"});
     if (c.speed_check != "off" && c.speed_check != "warn" && c.speed_check != "kick") c.speed_check = "warn";
+    c.board_check = get("anti_cheat", "pinned_board", c.board_check);
+    if (c.board_check != "off" && c.board_check != "warn" && c.board_check != "kick") c.board_check = "warn";
     c.score_check = get("anti_cheat", "modified_scoring", c.score_check, {"score_check"});
     if (c.score_check != "off" && c.score_check != "warn" && c.score_check != "kick") c.score_check = "warn";
     if (const auto *allowed = find("anti_cheat", "allowed_scoring_mods", {"score_allow"}); allowed && allowed->is_array())
@@ -305,6 +376,7 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
                 if (const auto fingerprint = parse_scoring(value.string())) c.score_allow.push_back(*fingerprint);
     c.enforce_tuning = get("anti_cheat", "enforce_tuning", c.enforce_tuning);
     c.bone_scale_limit = get("anti_cheat", "bone_scale_limit", c.bone_scale_limit);
+    c.bone_reach_limit = get("anti_cheat", "bone_reach_limit", c.bone_reach_limit);
 
     c.use_steam_relay = get("network", "use_steam_relay", c.use_steam_relay);
     c.send_rate = get("network", "send_rate", c.send_rate);
@@ -371,13 +443,29 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
     const Json no_announcements = Json::object();
     const auto &announcements = root.contains("announcements") && root.at("announcements").is_object()
                                     ? root.at("announcements") : no_announcements;
-    for (const char *key : {"messages", "interval_minutes", "card"})
+    for (const char *key : {"messages", "interval_minutes"})
         if (!announcements.contains(key)) missing.push_back(std::string("announcements.") + key);
     if (announcements.contains("messages") && announcements.at("messages").is_array())
         for (const auto &message : announcements.at("messages"))
             if (message.is_string() && !message.string().empty()) c.announcements.messages.push_back(message.string());
     c.announcements.interval = std::min(announcements.value("interval_minutes", c.announcements.interval), max_announcement_interval);
-    c.announcements.card = announcements.value("card", c.announcements.card);
+
+    // Chat commands came after announcements: a command is a string or a list of them.
+    if (!root.contains("commands")) missing.push_back("commands");
+    else if (!root.at("commands").is_array()) throw std::runtime_error("commands must be a list of commands, each a JSON object.");
+    else
+        for (const auto &item : root.at("commands")) {
+            if (!item.is_object()) throw std::runtime_error("commands must be a list of commands, each a JSON object.");
+            CustomCommand command;
+            command.name = item.value("name", std::string{});
+            command.reply = item.value("reply", std::string{});
+            command.admin = item.value("admin", command.admin);
+            if (item.contains("command") && item.at("command").is_string()) command.commands.push_back(item.at("command").string());
+            else if (item.contains("command") && item.at("command").is_array())
+                for (const auto &run : item.at("command"))
+                    if (run.is_string() && !run.string().empty()) command.commands.push_back(run.string());
+            c.commands.push_back(std::move(command));
+        }
 
     const auto read_bans = [&](const Json &rows) {
         if (!rows.is_array()) throw std::runtime_error("The bans must be a JSON list.");
@@ -403,20 +491,168 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
     // A config from an older version holds the bans itself: they are moved to their own file.
     const bool bans_moved = root.contains("bans");
     if (bans_moved) read_bans(root.at("bans"));
+    bool roles_new{};
+    c.roles = roles_on_disk(c, roles_new);
+    for (const auto id : listed_admins)
+        if (c.roles.find("admin") && !c.roles.players.contains(id)) c.roles.players[id] = "admin";
     // New settings, an older layout, or settings that are no longer any: the file is written
     // as it is now, so owners see what there is.
     const bool gone = root.contains("tps") || root.contains("reserved_slots") || root.contains("relay_everything") ||
                       (root.contains("network") && root.at("network").contains("relay_everything"));
-    if (!missing.empty() || moved || bans_moved || gone) {
+    const bool admins_moved = admins_listed != nullptr;
+    if (!missing.empty() || moved || bans_moved || gone || roles_new || admins_moved) {
         save_config(c);
         if (added) *added = std::move(missing);
     }
     return c;
 }
 std::filesystem::path bans_file(const ServerConfig &c) { return c.file.parent_path() / "data" / "bans.json"; }
+std::filesystem::path roles_file(const ServerConfig &c) { return c.file.parent_path() / "data" / "roles.json"; }
+Roles default_roles() {
+    using namespace multiplayer;
+    Roles roles;
+    const auto add = [&](std::string name, std::string tag, std::string color, int rank, bool all, std::vector<std::string> commands,
+                         std::uint32_t permissions, bool inherit = true) {
+        Role role;
+        role.name = std::move(name);
+        role.tag = std::move(tag);
+        role.color = std::move(color);
+        role.rank = rank;
+        role.all_commands = all;
+        role.commands = std::move(commands);
+        role.permissions = permissions;
+        role.inherit = inherit;
+        roles.list.push_back(std::move(role));
+    };
+    // What everybody may do, then the roles above it; and one below it, for a player who is to keep quiet.
+    add("player", "", "#FFFFFF", 0, false, {}, role_chat | role_votes | role_parties | role_whisper);
+    add("vip", "VIP", "#FFD24A", 10, false, {}, role_reserved_slot);
+    add("moderator", "Mod", "#5EC8FF", 50, false,
+        {"kick", "ban", "unban", "bans", "players", "msg", "msg-party", "msg-admins", "tphere", "vote-cancel", "announce-to", "role"},
+        role_reserved_slot | role_afk | role_vote_immune | role_alerts | role_polls);
+    add("admin", "Admin", "#FF74C6", 100, true, {"role", "reserved"}, role_permission_bits);
+    add("muted", "", "#FFFFFF", 0, false, {}, role_votes | role_parties, false);
+    roles.default_role = "player";
+    roles.settle();
+    return roles;
+}
+std::string roles_error(const Roles &roles) {
+    using namespace multiplayer;
+    if (roles.list.size() > max_roles) return "at most " + std::to_string(max_roles) + " roles.";
+    if (roles.players.size() > max_role_players) return "at most " + std::to_string(max_role_players) + " players with a role.";
+    const auto plain = [](std::string_view text) {
+        std::string out;
+        for (const char c : text)
+            if (c != ' ') out.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c);
+        return out;
+    };
+    for (std::size_t i = 0; i < roles.list.size(); ++i) {
+        const auto &role = roles.list[i];
+        const auto where = "role \"" + role.name + "\": ";
+        if (!valid_role_word(role.name, max_role_name)) return "a role's name is 1 to 24 of a-z, 0-9, - and _ (\"" + role.name + "\").";
+        if (role.name == "none") return "a role cannot be called none.";
+        for (std::size_t j = 0; j < i; ++j)
+            if (roles.list[j].name == role.name) return where + "listed twice.";
+        if (!role.tag.empty() && !valid_role_tag(role.tag)) return where + "its tag is at most 16 bytes of plain text.";
+        // What the game itself calls the server, a lobby's host, friends and the ReSkate team.
+        for (const std::string_view taken : {"server", "reskate", "dev", "developer", "contentcreator", "centrix", "staff", "homie", "host", "friend"})
+            if (plain(role.tag) == taken) return where + "the tag \"" + role.tag + "\" is one the game uses itself.";
+        if (!parse_colour(role.color)) return where + "color must be a colour like #FF74C6.";
+        if (role.rank < 0 || role.rank > 1000) return where + "rank is 0 to 1000.";
+        if (role.commands.size() > max_role_commands) return where + "too many commands.";
+        for (const auto &command : role.commands)
+            if (!valid_role_word(command, max_role_command)) return where + "\"" + command + "\" is not a command's name.";
+        if (role.permissions & ~role_permission_bits) return where + "unknown permission.";
+    }
+    if (!roles.default_role.empty() && !roles.find(roles.default_role))
+        return "default_role is \"" + roles.default_role + "\", which is not one of the roles.";
+    for (const auto &[id, name] : roles.players) {
+        if (!individual_steam_id(id)) return "players are SteamID64s (17 digits starting 7656119).";
+        if (!roles.find(name)) return "player " + std::to_string(id) + " has the role \"" + name + "\", which is not one of the roles.";
+    }
+    return {};
+}
+Roles read_roles(std::string_view text) {
+    const auto root = Json::parse(text);
+    if (!root.is_object() || !root.contains("roles") || !root.at("roles").is_array())
+        throw std::runtime_error("it must be a JSON object with a \"roles\" list.");
+    Roles roles;
+    for (const auto &item : root.at("roles")) {
+        if (!item.is_object()) throw std::runtime_error("each role is a JSON object.");
+        Role role;
+        role.name = item.value("name", std::string{});
+        role.tag = item.value("tag", std::string{});
+        role.color = item.value("color", role.color);
+        role.rank = static_cast<int>(std::clamp<std::int64_t>(item.value("rank", std::int64_t{}), -1, 1001));
+        role.inherit = item.value("inherit", role.inherit);
+        if (item.contains("commands")) {
+            if (!item.at("commands").is_array()) throw std::runtime_error("role \"" + role.name + "\": commands is a list.");
+            for (const auto &command : item.at("commands")) {
+                if (!command.is_string()) throw std::runtime_error("role \"" + role.name + "\": commands is a list of names.");
+                if (command.string() == "*") role.all_commands = true;
+                else if (const std::string name(canonical_command(command.string()));
+                         std::find(role.commands.begin(), role.commands.end(), name) == role.commands.end())
+                    role.commands.push_back(name);
+            }
+        }
+        if (item.contains("permissions")) {
+            if (!item.at("permissions").is_array()) throw std::runtime_error("role \"" + role.name + "\": permissions is a list.");
+            for (const auto &permission : item.at("permissions")) {
+                const auto known = std::find_if(role_permissions.begin(), role_permissions.end(), [&](const auto &entry) {
+                    return permission.is_string() && permission.string() == entry.first;
+                });
+                if (known == role_permissions.end())
+                    throw std::runtime_error("role \"" + role.name + "\": \"" + (permission.is_string() ? permission.string() : std::string("?")) +
+                                             "\" is not a permission.");
+                role.permissions |= known->second;
+            }
+        }
+        roles.list.push_back(std::move(role));
+    }
+    roles.default_role = root.value("default_role", std::string{});
+    if (root.contains("players")) {
+        if (!root.at("players").is_object()) throw std::runtime_error("players is a JSON object of SteamID64: role.");
+        for (const auto &[id, name] : root.at("players").items()) {
+            if (!name.is_string()) throw std::runtime_error("players is a JSON object of SteamID64: role.");
+            roles.players[steam_id(Json(id))] = name.string();
+        }
+    }
+    if (const auto error = roles_error(roles); !error.empty()) throw std::runtime_error(error);
+    roles.settle();
+    return roles;
+}
+std::string roles_text(const Roles &roles) {
+    auto list = Json::array();
+    for (const auto &role : roles.list) {
+        auto item = Json::object();
+        item["name"] = role.name;
+        item["tag"] = role.tag;
+        item["color"] = role.color;
+        item["rank"] = static_cast<std::int64_t>(role.rank);
+        item["inherit"] = role.inherit;
+        auto commands = Json::array();
+        if (role.all_commands) commands.push_back("*");
+        for (const auto &command : role.commands) commands.push_back(command);
+        item["commands"] = std::move(commands);
+        auto permissions = Json::array();
+        for (const auto &[name, bit] : role_permissions)
+            if (role.permissions & bit) permissions.push_back(std::string(name));
+        item["permissions"] = std::move(permissions);
+        list.push_back(std::move(item));
+    }
+    auto players = Json::object();
+    for (const auto &[id, name] : roles.players) players[std::to_string(id)] = name;
+    auto root = Json::object();
+    root["default_role"] = roles.default_role;
+    root["roles"] = std::move(list);
+    root["players"] = std::move(players);
+    return root.dump(2);
+}
 void save_config(const ServerConfig &c) {
     // The bans first: a config that held them is only rewritten without them once they are safe.
     write_file(bans_file(c), bans_json(c).dump(2));
+    // And the roles: a config that listed the admins is only rewritten without them once they are.
+    write_file(roles_file(c), roles_text(c.roles));
     std::string text;
     write(text, layout(c), 0);
     write_file(c.file, text);
@@ -439,10 +675,11 @@ std::optional<std::uint64_t> parse_scoring(std::string_view text) {
     return value;
 }
 std::size_t extra_slots(const ServerConfig &config) noexcept {
-    // (An admin who is also listed has one slot, not two.)
+    // (A player with such a role who is also listed has one slot, not two.)
     std::size_t slots = config.reserved.size();
-    for (const auto id : config.admins)
-        if (std::find(config.reserved.begin(), config.reserved.end(), id) == config.reserved.end()) ++slots;
+    for (const auto &[id, name] : config.roles.players)
+        if (const auto *role = config.roles.find(name); role && (role->granted & multiplayer::role_reserved_slot) &&
+            std::find(config.reserved.begin(), config.reserved.end(), id) == config.reserved.end()) ++slots;
     // Never more players than a session can hold, the server itself being one of them.
     const std::size_t room = multiplayer::max_players - 1;
     return config.max_players >= room ? 0 : std::min<std::size_t>(slots, room - config.max_players);
@@ -450,7 +687,10 @@ std::size_t extra_slots(const ServerConfig &config) noexcept {
 bool may_join(const ServerConfig &config, std::uint64_t id, std::size_t on) noexcept {
     if (on < config.max_players) return true;
     const auto listed = [&](const std::vector<std::uint64_t> &ids) { return std::find(ids.begin(), ids.end(), id) != ids.end(); };
-    return (listed(config.reserved) || listed(config.admins)) && on < config.max_players + extra_slots(config);
+    // (The role they were given: a slot is kept for a player, not for everybody.)
+    const auto *role = config.roles.given(id);
+    return (listed(config.reserved) || (role && (role->granted & multiplayer::role_reserved_slot))) &&
+           on < config.max_players + extra_slots(config);
 }
 std::optional<std::uint32_t> parse_colour(std::string_view text) noexcept {
     if (!text.empty() && text.front() == '#') text.remove_prefix(1);
@@ -497,10 +737,81 @@ std::string custom_votes_error(const std::vector<CustomVote> &votes) {
     }
     return {};
 }
+bool custom_command_name_free(std::string_view name) noexcept {
+    // The chat's own commands, then the server commands admins type as /<command>.
+    for (const std::string_view taken :
+         {"help", "party", "p", "w", "whisper", "tell", "poll", "vote", "yes", "y", "no", "n", "tp",
+          "activity-log", "admin", "admins", "afk-kick", "role", "roles", "announce", "announce-throwdowns", "announce-to", "announcements",
+          "ban", "bans", "board-check", "bone-scale", "boosts", "boosts-allow", "chat-color", "chat-colour", "clear-objects", "crowd",
+          "distances", "effects", "kick", "layer", "layer-sync", "layers", "listed", "map", "map-pool", "maps", "msg",
+          "msg-admins", "msg-party", "name", "net", "nobail", "nobail-allow", "noclip", "noclip-allow", "object-limit",
+          "object-placement", "object-scaling", "objects", "park", "park-mod", "parties", "party-size", "password", "placement",
+          "players", "rate", "reserved", "rotation", "say", "score-allow", "score-check", "speed-check", "status", "teleport",
+          "tod", "tpall", "tphere", "tps", "tuning", "tuning-enforce", "unban", "voice", "voice-allow", "voice-range",
+          "vote-cancel", "votes", "welcome", "world-layer-sync", "quit", "exit", "stop", "update"})
+        if (name == taken) return false;
+    // A number is an answer to a poll ("/2").
+    return !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+std::string custom_commands_error(const std::vector<CustomCommand> &commands) {
+    using namespace multiplayer;
+    if (commands.size() > max_custom_commands) return "commands: at most " + std::to_string(max_custom_commands) + " commands.";
+    for (std::size_t i = 0; i < commands.size(); ++i) {
+        const auto &c = commands[i];
+        if (!valid_server_vote_name(c.name))
+            return "commands: each needs a name of 1 to 16 lowercase letters, digits, - or _ (\"" + c.name + "\" is not).";
+        const auto where = "commands \"" + c.name + "\": ";
+        if (!custom_command_name_free(c.name)) return where + "that name is one of the server's own commands.";
+        for (std::size_t j = 0; j < i; ++j)
+            if (commands[j].name == c.name) return where + "two commands have that name.";
+        if (c.reply.empty() && c.commands.empty()) return where + "needs a reply, a command, or both.";
+        if (!c.reply.empty() && !valid_chat_text(c.reply)) return where + "reply must be one chat line (at most 200 bytes).";
+        if (c.commands.size() > max_custom_command_runs)
+            return where + "at most " + std::to_string(max_custom_command_runs) + " server commands.";
+        for (const auto &run : c.commands)
+            if (!valid_admin_text(run)) return where + "each command must be one server command, e.g. \"announce-to {player} Hi\".";
+    }
+    return {};
+}
+bool valid_mod_folder(std::string_view folder) noexcept {
+    // What the game's mod list takes (mods::valid_mod_name), without blanks at either end.
+    if (folder.empty() || folder.size() > 64 || folder.front() == '.' || folder.front() == ' ' || folder.back() == ' ') return false;
+    return std::all_of(folder.begin(), folder.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == ' ';
+    });
+}
+bool valid_park_key(std::string_view key) noexcept {
+    return !key.empty() && key.size() <= 32 &&
+           std::all_of(key.begin(), key.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; });
+}
+std::string park_mods_error(const ServerConfig &c) {
+    using namespace multiplayer;
+    if (c.park_limits.parks < 1 || c.park_limits.parks > max_spawned_parks)
+        return "park_limits.parks must be 1 to " + std::to_string(max_spawned_parks) + ".";
+    if (c.park_limits.objects < 1 || c.park_limits.objects > max_object_limit)
+        return "park_limits.objects must be 1 to " + std::to_string(max_object_limit) + ".";
+    if (c.park_mods.size() > max_park_mods) return "park_mods: at most " + std::to_string(max_park_mods) + " parks.";
+    for (std::size_t i = 0; i < c.park_mods.size(); ++i) {
+        const auto &park = c.park_mods[i];
+        if (!valid_server_vote_name(park.name))
+            return "park_mods: each park needs a name of 1 to 16 lowercase letters, digits, - or _ (\"" + park.name + "\" is not).";
+        const auto where = "park_mods \"" + park.name + "\": ";
+        for (std::size_t j = 0; j < i; ++j)
+            if (c.park_mods[j].name == park.name) return where + "two parks have that name.";
+        if (!valid_mod_folder(park.folder))
+            return where + "folder must be the name of a mod folder in Mods (letters, digits, spaces, _ - and ., no path).";
+        if (!find_level(park.map) || !valid_map_destination(map_destination(park.map)))
+            return where + "map \"" + park.map + "\" is not a single known map. Use the map's name, e.g. \"San Vansterdam\".";
+        if (!park.key.empty() && !valid_park_key(park.key))
+            return where + "key must be a base map's key such as bam, grom or stadium_1, or empty.";
+    }
+    return {};
+}
 std::string config_error(const ServerConfig &c) {
     using namespace multiplayer;
     if (!parse_colour(c.chat_color)) return "chat_color must be a colour like #8E5CFF.";
     if (c.afk_kick > 1440) return "afk_kick_minutes must be 0 (never) to 1440.";
+    if (c.word_warnings > 10) return "word_warnings must be 0 (words are not checked) to 10.";
     if (!parse_colour(c.chat_text_color)) return "chat_text_color must be a colour like #D9C8FF.";
     if (!valid_server_name(c.name)) return std::string("name must be ") + server_name_rule + ".";
     for (const auto id : c.reserved)
@@ -509,6 +820,8 @@ std::string config_error(const ServerConfig &c) {
     if (c.send_rate < 128 || c.send_rate > 16384) return "send_rate must be 128 to 16384 (KB/s for each player).";
     if (c.bone_scale_limit != 0 && !(c.bone_scale_limit >= 1.f && c.bone_scale_limit <= 8.f))
         return "bone_scale_limit must be 0 (no limit) or 1 to 8 (1: no resized body parts at all).";
+    if (c.bone_reach_limit != 0 && !(c.bone_reach_limit >= .5f && c.bone_reach_limit <= 20.f))
+        return "bone_reach_limit must be 0 (no limit) or 0.5 to 20 metres.";
     if (c.pack_ms > 50) return "pack_ms must be 0 (off) to 50.";
     if (c.threads > 32) return "threads must be 0 (one for each processor but one) to 32.";
     if (c.finger_distance > 10000) return "finger_distance must be 0 (fingers always sent) to 10000.";
@@ -529,6 +842,7 @@ std::string config_error(const ServerConfig &c) {
     if (c.password.size() > 64) return "password must be at most 64 characters.";
     if (!c.welcome.empty() && !valid_chat_text(c.welcome)) return "welcome must be one chat line (at most 200 bytes).";
     if (auto error = custom_votes_error(c.votes.custom); !error.empty()) return error;
+    if (auto error = custom_commands_error(c.commands); !error.empty()) return error;
     if (c.announcements.messages.size() > max_announcements)
         return "announcements.messages: at most " + std::to_string(max_announcements) + " messages.";
     for (const auto &message : c.announcements.messages)
@@ -540,9 +854,9 @@ std::string config_error(const ServerConfig &c) {
     for (unsigned lot = 0; lot < park_lots.size(); ++lot)
         if (c.parks[lot].empty() || !valid_park(lot, c.parks[lot]))
             return "parks." + std::string(park_lots[lot].key) + " is not a park layout (e.g. skatepark_01, or empty).";
+    if (auto error = park_mods_error(c); !error.empty()) return error;
     if (!c.port || !c.query_port || c.port == c.query_port) return "port and query_port must differ.";
-    for (const auto id : c.admins)
-        if (!individual_steam_id(id)) return "admins must be SteamID64s (17 digits starting 7656119).";
+    if (const auto error = roles_error(c.roles); !error.empty()) return "roles: " + error;
     return {};
 }
 namespace {
@@ -584,11 +898,20 @@ std::vector<std::string> load_levels(const std::filesystem::path &mods) {
             std::stringstream text;
             text << in.rdbuf();
             const auto root = Json::parse(text.str());
+            // The mod's version, when the whole folder was copied here and not only its level list.
+            std::string version;
+            try {
+                std::ifstream about(entry.path() / "manifest.json", std::ios::binary);
+                std::stringstream about_text;
+                about_text << about.rdbuf();
+                if (about) version = Json::parse(about_text.str()).value("version_number", "");
+            } catch (const std::exception &) {}
+            const auto package = multiplayer::map_package_name(entry.path().filename().string(), version);
             for (const auto &level : root.at("levels")) {
                 const auto asset = level.at("asset").string();
                 const auto name = level.value("displayName", world_level_name(asset));
                 if (std::none_of(list.begin(), list.end(), [&](const auto &l) { return same(l.asset, asset); }))
-                    list.push_back({asset, name.empty() ? world_level_name(asset) : name});
+                    list.push_back({asset, name.empty() ? world_level_name(asset) : name, package});
             }
         } catch (const std::exception &e) {
             problems.push_back(entry.path().filename().string() + ": " + e.what());
@@ -657,6 +980,10 @@ std::string map_setting(std::string_view map) {
 std::string map_label(std::string_view map) {
     if (const auto *level = find_level(map)) return level->name;
     return world_level_name(world_destination_asset(map_destination(map)));
+}
+std::string map_package(std::string_view map) {
+    const auto *level = find_level(map);
+    return level ? level->package : std::string();
 }
 std::vector<const ServerLevel *> pool_levels(const ServerConfig &config) {
     std::vector<const ServerLevel *> pool;

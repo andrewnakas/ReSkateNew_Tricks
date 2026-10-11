@@ -1,4 +1,5 @@
 #pragma once
+#include "roles.h"
 #include "Engine/Game/Multiplayer/distance_settings.h"
 #include "Engine/Game/Multiplayer/object_placement.h"
 #include "Engine/Game/Multiplayer/session_model.h"
@@ -49,8 +50,34 @@ inline constexpr unsigned max_announcement_interval = 1440; // minutes
 struct Announcements {
     std::vector<std::string> messages;
     unsigned interval{}; // minutes; 0: off
-    bool card = true;   // also as a card on each player's screen, not only in chat
 };
+inline constexpr std::size_t max_custom_commands = 32;
+inline constexpr std::size_t max_custom_command_runs = 8;
+// The owner's own chat commands ("/discord"), never listed in /help. Each answers whoever typed
+// it with `reply`, and/or runs `commands` as the console: {player} is their SteamID64, {map}
+// the current map, {arg} the rest of what they typed.
+struct CustomCommand {
+    std::string name; // 1-16 of a-z 0-9 - _
+    std::string reply;
+    std::vector<std::string> commands;
+    bool admin{}; // only admins may use it
+};
+// A park built in the Park Editor and shipped as a mod: <Mods>\<folder>\parks\<key>.park.json.
+// Its objects only fit the map it was built on, so it is bound to a map by name (custom maps
+// share a base map's key, "bam" for many). It is spawned with "park-mod add <name>" while that
+// map runs, as objects the server owns.
+struct ParkMod {
+    std::string name;   // 1-16 of a-z 0-9 - _: what commands and votes use
+    std::string folder; // the mod folder in Mods (may contain spaces)
+    std::string map;    // the map it belongs to, named as "map" names one
+    std::string key;    // which base map's park in the mod (bam, grom...); empty: the only one
+};
+// How much of the parks can be spawned at once: parks, and their objects in all.
+struct ParkLimits {
+    unsigned parks = 3, objects = 512;
+};
+inline constexpr std::size_t max_park_mods = 32;
+inline constexpr unsigned max_spawned_parks = 16;
 // ReSkateServer.json. Every setting an admin or the console changes is saved
 // back, so a restart keeps it.
 inline constexpr unsigned dedicated_tps = 20;
@@ -69,6 +96,9 @@ struct ServerConfig {
     // inverse the least). The game's own skater height is a scale as well, so 1 shows every
     // skater at one height and build; 2, the default, leaves height alone. 0 is no limit.
     float bone_scale_limit = 2;
+    // How far (metres) a bone of a skater's body or board may be from the one it hangs from
+    // for the other players (limit_bone_reach). 0: no limit.
+    float bone_reach_limit = 1;
     // How players reach the server: true, through Steam's relay network only; false, straight
     // to `port` (UDP). A direct server still answers through the relays, for a player the port
     // does not reach, one who has turned direct connections off, or an older game.
@@ -100,6 +130,9 @@ struct ServerConfig {
     // which is how the ReSkate team's list of official servers knows it. Empty: anonymous.
     std::string steam_token;
     bool auto_update = true;   // install new releases when nobody is on
+    // The server window (Server/GUI) starts the server as soon as it opens, without waiting
+    // for Start to be pressed. The console server always starts at once and does not read it.
+    bool autostart{};
     bool global_bans = true;   // turn away players the ReSkate team has banned (global_bans.h)
     bool activity_log = true;  // console lines for throwdowns, objects and loading
     bool announce_throwdowns = true; // tell everyone in chat when a throwdown drop is placed
@@ -110,9 +143,20 @@ struct ServerConfig {
     // Minutes a player may be away (not moving, talking, typing or building) before the server
     // removes them, 1 to 1440; 0: never. Admins are never removed for it.
     unsigned afk_kick = 0;
+    // A chat message with a word the ReSkate team does not allow at all (word_lists.h) is never
+    // passed on. Its player is warned; after this many warnings, 1 to 10, the next gets them
+    // kicked. 0: nobody is warned or kicked, and the message is still not passed on.
+    unsigned word_warnings = 3;
+    // The ReSkate team's chat word lists hold here. Off: only this server's own words
+    // (server_words.h) are filtered and refused.
+    bool global_words = true;
     // Players whose game runs fast (a speedhack; Server/speed_check.h): "warn" takes them out of
     // throwdowns and coop challenges and tells the admins, "kick" also removes them, "off" does not check.
     std::string speed_check = "warn";
+    // Players whose skateboard stays on another player as they move (a hacked game; Server/
+    // board_check.h): "warn" stops showing their board to the others and tells the admins,
+    // "kick" removes them, "off" does not check.
+    std::string board_check = "warn";
     // Players whose mods change how tricks score (Engine/Vfs/mod_scoring.h): "warn" takes them out
     // of throwdowns and coop challenges (the server stops relaying theirs) and tells everyone,
     // "kick" removes them, "off" does not check.
@@ -145,12 +189,17 @@ struct ServerConfig {
     bool enforce_tuning = true;
     VoteSettings votes; // all off until the owner turns them on
     Announcements announcements;
+    std::vector<CustomCommand> commands;
     ParkChoices parks{"skatepark_01", "megapark_05", "flumppark_08"};
     // Forced on every player while world_layer_sync is on: layer key -> mode.
     // Needs world-layers.json (the players' catalog) next to the server.
     bool world_layer_sync{};
     std::map<std::string, std::string> layers;
-    std::vector<std::uint64_t> admins;
+    std::vector<ParkMod> park_mods;
+    ParkLimits park_limits;
+    // Where the park mods' folders are: Mods next to the server. Not part of the file.
+    std::filesystem::path mods;
+    Roles roles; // data/roles.json
     std::vector<MultiplayerBan> bans;
 };
 // Reads `file`, writing a default one first when it does not exist. Settings this version
@@ -160,10 +209,17 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
 void save_config(const ServerConfig &config);
 // Where the bans are kept: data/bans.json, beside the config.
 std::filesystem::path bans_file(const ServerConfig &config);
-// How many players may be on beyond max_players: one for each reserved player and each admin.
+// Where the roles are kept: data/roles.json. A server without the file starts with
+// default_roles(); the admins an older config listed are moved into its admin role.
+std::filesystem::path roles_file(const ServerConfig &config);
+// The roles a file's text holds (throws what is wrong with it), and the text for these.
+Roles read_roles(std::string_view text);
+std::string roles_text(const Roles &roles);
+// How many players may be on beyond max_players: one for each reserved player and each player
+// whose role has a reserved slot.
 std::size_t extra_slots(const ServerConfig &config) noexcept;
 // Whether a player who is not yet on may join a server with `on` players on it. Anyone, until
-// max_players are on; the reserved players and the admins after that too, in the extra slots
+// max_players are on; the reserved players and those roles after that too, in the extra slots
 // (a full server of 32 shows 33/32 with one of them on).
 bool may_join(const ServerConfig &config, std::uint64_t id, std::size_t on) noexcept;
 // "#RRGGBB" (or "RRGGBB") as a colour in the layout the protocol and the overlay use, or nothing.
@@ -173,7 +229,18 @@ std::string config_error(const ServerConfig &config);
 // Why the owner's custom votes cannot run, or empty; and whether a custom vote may be called
 // `name` (not a word "/vote" already takes: map, kick, tod, yes, poll...).
 std::string custom_votes_error(const std::vector<CustomVote> &votes);
+// Why the owner's custom chat commands cannot run, or empty; and whether a chat command may be
+// called `name` (not one players or admins already type: help, party, vote, kick, map...).
+bool custom_command_name_free(std::string_view name) noexcept;
+std::string custom_commands_error(const std::vector<CustomCommand> &commands);
 bool custom_vote_name_free(std::string_view name) noexcept;
+// Why the park mods or their limits cannot run, or empty. A folder that is not there is not one:
+// it is reported when the park is spawned.
+std::string park_mods_error(const ServerConfig &config);
+// A mod folder's name as the game's mod list allows it: no path, no leading dot.
+bool valid_mod_folder(std::string_view folder) noexcept;
+// A base map's key as park files are named by it: bam, grom, stadium_1... (1-32 of a-z 0-9 _).
+bool valid_park_key(std::string_view key) noexcept;
 // A scoring fingerprint as the config and console write it (16 hex digits), and read back
 // (nothing for text that is not one, or for 0: the game's own scoring needs no entry).
 std::string scoring_text(std::uint64_t fingerprint);
@@ -184,6 +251,9 @@ std::optional<std::uint64_t> parse_scoring(std::string_view text);
 // "San Vansterdam", "Isle of Grom", a custom map's "bbcity"...
 struct ServerLevel {
     std::string asset, name;
+    // The Thunderstore package a custom map's mod folder is (protocol.h: map_package_name), from
+    // the folder's name and its manifest.json, so players without the map can be offered it.
+    std::string package;
 };
 // The retail maps, and the custom maps in `mods`\<mod>\reskate-levels.json
 // (players' map mods, copied next to the server). Returns why a mod was skipped.
@@ -204,6 +274,8 @@ std::string map_destination(std::string_view map);
 std::string map_setting(std::string_view map);
 // A map's name for people: "San Vansterdam".
 std::string map_label(std::string_view map);
+// The Thunderstore package that map comes from; empty for the game's own and when unknown.
+std::string map_package(std::string_view map);
 std::vector<const ServerLevel *> pool_levels(const ServerConfig &config); // known pool maps once each; all when empty
 bool in_map_pool(const ServerConfig &config, std::string_view map);
 const ServerLevel *next_pool_map(const ServerConfig &config, std::string_view map); // after `map`; null if no other

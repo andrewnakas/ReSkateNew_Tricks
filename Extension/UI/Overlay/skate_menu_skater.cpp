@@ -97,6 +97,11 @@ void camera_controls(SkateMenu& menu, const Model& model, const CallbacksV3& cal
                 "Use the game's camera while walking; first person comes back when you get on the board.",
                 settings.board_only, can_edit))
             debug_request(menu, callbacks, {DebugAction::set_first_person_board_only, settings.board_only});
+        if (toggle_row(menu, "First person in the camera cycle",
+                "Clicking the right stick (R3) on the board goes high camera, low camera, first person, then high again. "
+                "Needs Camera height control on in the game's settings (Gameplay > Advanced Camera).",
+                settings.camera_cycle, can_edit))
+            debug_request(menu, callbacks, {DebugAction::set_first_person_camera_cycle, settings.camera_cycle});
         note("Nod, tilt and bob are the share of the head's own movement kept. Use Spring arm > Pitch to look "
              "further down at the board.");
     }
@@ -164,6 +169,21 @@ void movement_controls(SkateMenu& menu, const Model& model, const CallbacksV3& c
         : "Your bails show the bones they hurt and score a Meat card. A break slows the game in single player.";
     if (toggle_row(menu, "Hall of Meat", meat_help, hall_of_meat, model.hall_of_meat.available && callbacks.queue_console_command))
         send_console(menu, callbacks, hall_of_meat ? "hallofmeat 1" : "hallofmeat 0");
+    bool road_rash = model.road_rash.enabled;
+    const bool rash_console = model.road_rash.available && callbacks.queue_console_command;
+    if (toggle_row(menu, "Road Rash", "Bails leave marks that build up: dust, scrapes, bruises, wounds. Needs the Road Rash item pack.",
+            road_rash, rash_console))
+        send_console(menu, callbacks, road_rash ? "roadrash 1" : "roadrash 0");
+    bool rash_blood = model.road_rash.blood;
+    if (toggle_row(menu, "Road Rash blood", "Fresh blood on the worst wounds. Off, they are dry and scabbed.", rash_blood,
+            rash_console && model.road_rash.enabled))
+        send_console(menu, callbacks, rash_blood ? "roadrashblood 1" : "roadrashblood 0");
+    bool board_break = model.board_break.enabled;
+    if (toggle_row(menu, "Board Break", model.board_break.has_deck
+                ? "A hard slam can snap your board: at the nose, in the middle or at the tail. Whole again once you pick it up."
+                : "A hard slam can snap your board. Needs one of the Board Break deck packs.",
+            board_break, model.board_break.available && callbacks.queue_console_command))
+        send_console(menu, callbacks, board_break ? "boardbreak 1" : "boardbreak 0");
     end_card();
 
     begin_card(menu, "boosts", "BOOSTS", "Buttons are set in Settings > Controls");

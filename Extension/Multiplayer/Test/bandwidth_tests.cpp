@@ -173,6 +173,34 @@ void coarse_checks() {
         for (std::size_t i = 0; i < std::min(first.size(), second.size()); ++i) different += first[i] != second[i];
         check(first.size() == second.size() && different < first.size() / 20, "A turn far below the step still changed the pose's bytes");
     }
+    // A bone moved away from its parent is brought back to the limit, the way it pointed; the
+    // bones that follow the board keep their metres, and no limit leaves everything.
+    {
+        Pose stretched;
+        stretched.skater.resize(395);
+        stretched.board.resize(18);
+        stretched.root.position = stretched.skater[1].position = {500, 20, -300};
+        stretched.skater[7].position = {0, .4f, 0};
+        stretched.skater[20].position = {0, 30, 40};
+        stretched.skater[50].position = {0, 9, 0};
+        stretched.skater[393].position = {0, 0, 4000};
+        stretched.board[0].position = {530, 20, -300};
+        stretched.board[2].position = {530, 20, 700};
+        stretched.board[5].position = {12, 0, 0};
+        auto reached = stretched, loose = stretched;
+        limit_bone_reach(reached, 1.f);
+        limit_bone_reach(loose, 0.f);
+        const auto near = [](const std::array<float, 3> &a, const std::array<float, 3> &b) {
+            return std::abs(a[0] - b[0]) < 1e-3f && std::abs(a[1] - b[1]) < 1e-3f && std::abs(a[2] - b[2]) < 1e-3f;
+        };
+        check(reached.skater[7] == stretched.skater[7] && reached.skater[1] == stretched.skater[1] && reached.root == stretched.root &&
+                  reached.skater[50] == stretched.skater[50] && reached.board[0] == stretched.board[0],
+              "The reach limit moved a bone that was where the game puts it");
+        check(near(reached.skater[20].position, {0, .6f, .8f}) && near(reached.skater[393].position, {0, 0, 100}) &&
+                  near(reached.board[2].position, {530, 20, -295}) && near(reached.board[5].position, {1, 0, 0}),
+              "A stretched bone was not brought back to the reach limit");
+        check(loose.skater == stretched.skater && loose.board == stretched.board, "No reach limit still moved a bone");
+    }
     // A resized bone is held to the limit both ways, and at 1 is not resized at all.
     auto big = fixture();
     big.pose.skater[5].scale = {4, 4, 4};
@@ -185,6 +213,16 @@ void coarse_checks() {
               plain.skater[5].scale == std::array<float, 3>{1, 1, 1} && plain.skater[6].scale == std::array<float, 3>{1, 1, 1} &&
               free.skater[5].scale == std::array<float, 3>{4, 4, 4},
           "A bone's scale was not held to the limit");
+    big.pose.board.resize(3);
+    big.pose.board[0].scale = {3, 3, 3};
+    big.pose.board[2].scale = {.2f, 1, 1};
+    auto board_held = big.pose, board_free = big.pose;
+    limit_bone_scale(board_held, 2.f);
+    limit_bone_scale(board_free, 0.f);
+    check(board_held.board[0].scale == std::array<float, 3>{board_scale_limit, board_scale_limit, board_scale_limit} &&
+              std::abs(board_held.board[2].scale[0] - 1.f / board_scale_limit) < 1e-5f && board_held.skater[5].scale == std::array<float, 3>{2, 2, 2} &&
+              board_free.board[0].scale == std::array<float, 3>{3, 3, 3},
+          "A skateboard's scale was not held to its own limit");
     std::cout << "Coarse rotations: valid poses, within a step, small turns unchanged.\n";
 }
 void rate_checks() {
