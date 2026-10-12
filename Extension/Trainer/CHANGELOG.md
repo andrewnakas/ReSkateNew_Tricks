@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.6.0 - 2026-10-12
+
+Built on ReSkate 2.0.7.
+
+### New
+
+- **Gravity.** One slider on POP AND TRICKS for gravity in the air, on the board and on foot. 1 is the game's
+  own. Measured with a scripted ollie: at 0.5 the fall is 5.5 m/s2 and the same pop goes 0.70 m and hangs
+  1.05 s (the game's own: 0.36 m, 0.58 s); at 1.5 the fall is 15.8 m/s2. On foot a drop fell at 4.9 and 14.3
+  m/s2. It acts in the air only: rolling down a hill, grinds and a bailed skater keep the game's own.
+  Presets carry it (`trick.gravity`), RESET EVERYTHING puts it back, and it is the game's own under a host's
+  physics or with boosts off. `trainer option gravity <x>`.
+- **The first section is PRESETS AND QUICK SETTINGS.**
+  - **PRESETS** holds every kind of preset in one card: the whole game (skate., Skate 3 Easy, Skate 3,
+    Skate 3 Hardcore), the grind feel, the transition feel, Skate 3's tricklining extras, every built-in
+    style (Realistic, Super Ollie, Hard To Bail ...) and your own saved presets. One press puts one on, a
+    second press takes it off.
+  - **QUICK SETTINGS** lists everything that is changed right now, whatever section it lives in: values,
+    dials and the trainer's own settings (trick heights, flip speeds, gravity, grind and transition
+    settings, bending rules), grouped by section. Change any of them right there. Pick a preset and the
+    list fills with everything that preset sets.
+  - Each row has **Hide** (off the list, still set; it comes back by itself the next time it changes from
+    the game's own, or with "Show hidden"), **Go to** (opens the section it lives in and scrolls to it, the
+    value tinted, with the related settings around it) and **Reset** (back to the game's own).
+  - The card folds like every other, so the whole list can be put away.
+- `trainer setup <key> <value>` sets any one of the trainer's own settings by its preset key
+  (`trick.flip_speed`, `grind.push`, `transition.lean` ...).
+
+### Changed
+
+- The section WHOLE GAME is now PRESETS AND QUICK SETTINGS (`trainer open game` still opens it). Its PLAY
+  LIKE card is the first row of PRESETS, and Realistic sits with the other styles.
+- "Slow flips pop higher" follows the gravity that is set.
+
+### Known
+
+- The game aims an air off a ramp back at the ramp with its own gravity. With another gravity a vert or bowl
+  air can come down somewhere else than the game aimed it. Not yet tried on a ramp: tell us.
+- Gravity was measured on flat ground with a scripted controller. It has not been played by hand yet.
+- Everything under Known for 0.5.0 still holds.
+
 ## v0.5.0 - 2026-10-11
 
 Built on ReSkate 2.0.6.

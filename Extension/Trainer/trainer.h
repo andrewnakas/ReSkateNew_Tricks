@@ -29,7 +29,7 @@ struct Topic {
 };
 inline constexpr std::array<Topic, topic_count> topics{{
     {"everything", "EVERY VALUE", "The whole tuning table, group by group"},
-    {"game", "WHOLE GAME", "Play like Skate 3, Realistic: setups that reach across every section"},
+    {"game", "PRESETS AND QUICK SETTINGS", "Pick a preset, then change everything that is set in one place"},
     {"pop", "POP AND TRICKS", "Ollie and trick heights, flip trick speed, body flips and spins"},
     {"speed", "SPEED AND PUSHING", "Push speed, auto push, rolling, powerslides, getting on the board"},
     {"bails", "BAILS AND LANDINGS", "What knocks you off, and how the legs take a landing"},
@@ -70,6 +70,13 @@ struct PresetRow {
     double factor{1}, amount{1};
     std::uint8_t topic{}; // the section of the Tune tab that shows it (topic_*)
 };
+// One of the trainer's own settings that is off the game's own (the menu's quick settings change it with `trainer setup`).
+inline constexpr std::uint8_t setup_number = 0, setup_switch = 1, setup_mode = 2; // a number / off or on / the game's own, held off, held on
+struct SetupRow {
+    std::string key, title;
+    std::uint8_t topic{}, kind{};
+    double value{}, stock{}, low{}, high{};
+};
 struct Marker {
     bool set{};
     std::array<float, 3> position{};
@@ -98,6 +105,7 @@ struct View {
     // bending rules) off the game's own. No Bail, Noclip, Dark Pop and the game speed are ReSkate's: the menu adds those.
     bool stock{true};
     std::size_t setups_changed{}, locks{};           // the trainer's own settings off stock; locked values
+    std::vector<SetupRow> setups;                    // those settings, one by one
     std::array<std::uint16_t, topic_count> changed{}; // what is changed in each section of the Tune tab ([0]: values on no section)
     std::array<std::uint16_t, topic_count> settings{}; // of those, the trainer's own settings (not tuning values)
     std::map<std::string, bool, std::less<>> folds;   // sections and cards the player opened or closed
@@ -113,6 +121,8 @@ struct View {
     // The same for the no comply and the boneless.
     float nocomply_height{1}, boneless_height{1};
     float manual_height{1}; // the pop out of a manual
+    float gravity{1};       // x the game's own gravity
+    bool gravity_live{true}; // false: this game build's gravity is not where the trainer knows it
     float grind_side{1};    // the sideways part of a pop out of a grind
     float grind_push{};     // Skate 3's pop: m/s sideways at full stick (0: none)
     float grind_range{}; // Skate 3's turn: the left stick turns the board on a grind up to this many degrees (0: off)

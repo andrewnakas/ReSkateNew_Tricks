@@ -27,6 +27,12 @@ void set_physics_step_callback(void (*callback)() noexcept) noexcept;
 // rolling skater that is not braking gains speed up to it (m/s). Publish every client tick: it
 // expires after 500 ms.
 void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, float stock, float cruise) noexcept;
+// Trainer: gravity in the air on the board as a multiple of the game's own (1 leaves the skater alone). Publish every
+// client tick: it expires after 500 ms. `air_gravity_steps` counts the physics steps it acted on.
+void set_air_gravity(std::uintptr_t client, std::uintptr_t entity, float factor) noexcept;
+std::uint32_t air_gravity_steps() noexcept;
+// Trainer: the game has just launched a flight with this trajectory object (any skater's; any thread).
+void note_flight_record(std::uintptr_t trajectory) noexcept;
 // The trainer's pump power: speed added for as long as the skater pumps a transition, sized so
 // that `factor` 2 is about one more of the game's own pumps (1 leaves the game alone, under 1
 // takes speed away). `pumping` is the game's own word on whether the skater is pumping this tick; with

@@ -19,6 +19,11 @@ bool start_trick_heights(std::uintptr_t base) noexcept;
 void set_trick_heights(float no_comply, float boneless) noexcept;
 // The pop out of a manual: a height multiplier, and Enum.Intent.Manual as read this tick (above 0: in a manual).
 void set_manual_pop(float height, std::int32_t intent) noexcept;
+// Gravity on foot as a multiple of the game's own (1 puts the game's back). False: this build's code is not the known
+// one, or it could not be written. (In the air on the board: set_air_gravity, client_source_spawn.h.)
+bool set_foot_gravity(float factor) noexcept;
+float foot_gravity_in_force() noexcept;
+
 // The pop out of a grind or slide: the part of its launch that goes sideways off the edge is multiplied by `side`
 // (1: the game's own). `travel_x/z` is the skater's velocity along the ground this tick and `grinding` whether it is on
 // a grind now: the last direction of travel on the grind is what "sideways" is measured against.

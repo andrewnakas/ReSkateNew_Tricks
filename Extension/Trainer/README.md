@@ -12,7 +12,7 @@ telemetry HUD. It ships no game data: the list of values is built at run time fr
 
 | Tab | What you get |
 |---|---|
-| **TUNE** | One page of sections, each folding open and shut: WHOLE GAME (play like Skate 3 on one of its difficulties, Realistic), POP AND TRICKS (ollie and trick heights, flip trick speed for all tricks or one by one, body flips and spins), SPEED AND PUSHING, BAILS AND LANDINGS, GRINDS (feel like skate. or Skate 3, exits and transfers, pops off a grind), TRICKLINING (the board bending boost with its rules, revert friction, Dark Pop, manuals), TRANSITION (coping grinds, coming back in, handplants, lip tricks, vert airs), PUMPING (pump power and the game's own pump settings), ON FOOT, and EVERY VALUE (the whole tuning table). A section that holds a change says so on its bar and has a reset of its own. One search box looks through all of it. |
+| **TUNE** | One page of sections, each folding open and shut: PRESETS AND QUICK SETTINGS (every kind of preset in one card: Skate 3 on one of its difficulties, the grind and transition feels, the built-in styles, your own; and under it a list of everything that is changed right now, to change in place, hide, or jump to where it lives), POP AND TRICKS (gravity, ollie and trick heights, flip trick speed for all tricks or one by one, body flips and spins), SPEED AND PUSHING, BAILS AND LANDINGS, GRINDS (feel like skate. or Skate 3, exits and transfers, pops off a grind), TRICKLINING (the board bending boost with its rules, revert friction, Dark Pop, manuals), TRANSITION (coping grinds, coming back in, handplants, lip tricks, vert airs), PUMPING (pump power and the game's own pump settings), ON FOOT, and EVERY VALUE (the whole tuning table). A section that holds a change says so on its bar and has a reset of its own. One search box looks through all of it. |
 | **PRACTICE** | Game speed and pause, five marker slots per map (save / go / clear), return to the marker after a bail, teleport to coordinates or to the waypoint you placed on the pause map (onto the surface there), copy your position (game or Blender axes). |
 | **MAP & HUD** | Speed and air-time HUD, a read-out after every jump (takeoff speed and angle, height, distance, drop, landing speed, spin and flip), telemetry recording to CSV, and whatever the map's author ships for the trainer. |
 | **MOVEMENT** | ReSkate's Noclip, No Bail, Hall of Meat and the boost sliders. |
@@ -28,6 +28,26 @@ Everything is also a console command (`~`): `trainer open [tune|practice|map|mov
 `trainer find <words>`, `trainer preset apply|remove|export <name>`, `trainer preset import`, `trainer dial <multiplier> <preset name>`,
 `trainer reset <id>|all|tricks|presets|everything|section <name>`, `trainer marker save|go|clear [slot]`,
 `trainer tp <x> <y> <z>`, `trainer waypoint [info]`, `trainer ground <x> <z>`, `trainer where`, `trainer jumps`, `trainer dump`, `trainer selftest`.
+
+## Quick settings
+
+The first section of TUNE is **PRESETS AND QUICK SETTINGS**.
+
+- **PRESETS** is every kind of preset in one card: the whole game (skate. or Skate 3 on one of its difficulties), the grind feel,
+  the transition feel, Skate 3's tricklining extras, the built-in styles and your own saved presets. Blue is on; press again to
+  take it off.
+- **QUICK SETTINGS** lists everything that is changed right now, whatever section it lives in, grouped by section. Change a row
+  right there. Pick a preset and the list fills with everything it sets.
+- **Hide** takes a row off the list without changing it (it comes back by itself the next time it changes from the game's own,
+  or with "Show hidden"). **Go to** opens the section the row lives in and scrolls to it, with the related settings around it.
+  **Reset** puts that one row back to the game's own. The card's title folds the whole list away.
+
+## Gravity
+
+**Gravity** (TUNE > POP AND TRICKS) is gravity in the air, on the board and on foot, as a multiple of the game's own. Measured
+with a scripted ollie: x 0.5 falls at 5.5 m/s2 and the same pop goes 0.70 m for 1.05 s (the game's: 0.36 m, 0.58 s); x 1.5 falls
+at 15.8 m/s2. It acts in the air only: rolling downhill, grinds and a bailed skater keep the game's own. The game aims an air off
+a ramp back at the ramp with its own gravity, so with another gravity a vert air can come down somewhere else.
 
 ## Stock, presets and your game's own settings
 

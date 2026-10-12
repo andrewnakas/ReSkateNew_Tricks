@@ -450,6 +450,59 @@ void trainer_pump_power(std::uintptr_t core) noexcept {
         p.steps.store(p.count, std::memory_order_relaxed);
     } catch (...) {}
 }
+// ---- gravity -----------------------------------------------------------------------------------
+// In the air on the board the skater follows a record the game keeps in its trajectory object: a start point, a launch
+// velocity, gravity (0, -9.8, 0) and a step, read as start + velocity t + gravity t^2 / 2 at every physics step. Measured
+// with a scripted ollie (2026-10-12): the game's tuning, the gravity its jump planner reads and the bodies' own speeds
+// all leave the fall at 9.8 m/s2; that record's gravity held at -4.9 gives a fall of 5.5 m/s2, an ollie of 0.70 m and
+// 1.05 s (the game's: 0.36 m, 0.58 s), at -19.6 a fall of 20.4 m/s2. The game writes the record again at every launch,
+// so the trainer writes its gravity after each physics step, and lets go by writing nothing.
+constexpr std::uintptr_t flight_record_gravity = 0x18a0, trajectory_context = 0xb808;
+constexpr float game_gravity = -9.8f;
+struct AirGravity {
+    std::atomic<float> factor{1};
+    std::atomic<std::uint64_t> expires{};
+    std::atomic<std::uintptr_t> client{}, entity{};
+    std::atomic<std::uint32_t> steps{};
+    // The trajectory objects the game has launched lately (the local skater's is the one that points at its context).
+    std::array<std::atomic<std::uintptr_t>, 8> records{};
+    std::atomic<std::uint32_t> noted{};
+    std::uintptr_t held{}; // physics thread: the record whose gravity is the trainer's now
+};
+AirGravity& air_gravity() {
+    static auto* value = new AirGravity;
+    return *value;
+}
+void trainer_air_gravity(std::uintptr_t core) noexcept {
+    auto& g = air_gravity();
+    float factor = g.factor.load(std::memory_order_relaxed);
+    if (GetTickCount64() >= g.expires.load(std::memory_order_acquire)) factor = 1;
+    if (factor == 1 && !g.held) return;
+    SourceLastError error;
+    auto& state = source_state();
+    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
+    SourceBusyScope scope{state.busy};
+    try {
+        const auto bodies = debug_noclip_bodies(state.trial.base, g.client.load(std::memory_order_relaxed), g.entity.load(std::memory_order_relaxed));
+        if (bodies.core != core || !bodies.context) return;
+        for (const auto& slot : g.records) {
+            const auto record = slot.load(std::memory_order_relaxed);
+            if (!record) continue;
+            SourceReader reader;
+            const auto context = reader.pointer(record, trajectory_context);
+            const auto now = reader.value<std::array<float, 3>>(record, flight_record_gravity);
+            reader.verify();
+            // Only a record that reads as a gravity is written: straight down, and the game's or one of the trainer's.
+            if (context != bodies.context || now[0] != 0 || now[2] != 0 || !(now[1] < -0.1f) || !(now[1] > -250.0f)) continue;
+            const float wanted = game_gravity * factor;
+            if (now[1] != wanted) body_write(record + flight_record_gravity + 4, wanted);
+            g.held = factor == 1 ? 0 : record;
+            if (factor != 1) g.steps.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        g.held = 0;
+    } catch (...) {}
+}
 // ---- revert boost ------------------------------------------------------------------------------
 // When the game auto reverts a landing the board is still well out of line with the body and the
 // game swings it round. Earlier builds of the game gained speed there; this gives it back: a
@@ -848,6 +901,7 @@ void noclip_physics_update(std::uintptr_t core) {
     if (const auto callback = physics_step_callback.load(std::memory_order_acquire)) callback();
     trainer_push_speed(core);
     trainer_pump_power(core);
+    trainer_air_gravity(core);
     trainer_revert_boost(core);
     trainer_transition(core);
 }
@@ -975,6 +1029,20 @@ void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, 
     p.stock.store(stock > 1 && stock < 100 ? stock : 9.25f, std::memory_order_relaxed);
     p.factor.store(factor > 0.02f && factor <= 1.0e6f ? factor : 1.0f, std::memory_order_relaxed);
     p.expires.store(GetTickCount64() + 500, std::memory_order_release);
+}
+void set_air_gravity(std::uintptr_t client, std::uintptr_t entity, float factor) noexcept {
+    auto& g = air_gravity();
+    g.client.store(client, std::memory_order_relaxed);
+    g.entity.store(entity, std::memory_order_relaxed);
+    g.factor.store(std::isfinite(factor) && factor >= 0.02f && factor <= 20.0f ? factor : 1.0f, std::memory_order_relaxed);
+    g.expires.store(GetTickCount64() + 500, std::memory_order_release);
+}
+std::uint32_t air_gravity_steps() noexcept { return air_gravity().steps.load(std::memory_order_relaxed); }
+void note_flight_record(std::uintptr_t trajectory) noexcept {
+    auto& g = air_gravity();
+    for (const auto& slot : g.records)
+        if (slot.load(std::memory_order_relaxed) == trajectory) return;
+    g.records[g.noted.fetch_add(1, std::memory_order_relaxed) % g.records.size()].store(trajectory, std::memory_order_relaxed);
 }
 void set_pump_power(std::uintptr_t client, std::uintptr_t entity, float factor, bool pumping, bool measure) noexcept {
     auto& p = pump_power();

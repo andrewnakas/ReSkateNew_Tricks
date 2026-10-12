@@ -107,8 +107,20 @@ bool call_guarded(SetTrajectory function, std::uintptr_t trajectory, float *para
 }
 // After a physics update: a pop that has to go higher after all is launched again, from where it started (it is a tick
 // or two old), with the higher upward speed. Writing the trajectory object does nothing (measured): the setter has to run.
+// <dev>
+void hold_float(std::uintptr_t at, float value) noexcept {
+    __try {
+        *reinterpret_cast<float *>(at) = value;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+// </dev>
 void raise_step() noexcept {
     auto &h = hooked();
+// <dev>
+    // `trainer launchtest 1 <10000 + slot> <value>`: that float of the newest pop's object, written after every physics step.
+    if (const int slot = h.test_slot.load(std::memory_order_relaxed) - 10000; slot >= 0 && slot < 0x3000)
+        if (const auto object = h.flight_object.load(std::memory_order_relaxed)) hold_float(object + static_cast<std::uintptr_t>(slot) * 4, h.test_value.load(std::memory_order_relaxed));
+// </dev>
     const float up = h.raise_to.exchange(0, std::memory_order_acq_rel);
     if (!(up > 0)) return;
     const auto original = h.original.load(std::memory_order_acquire);
@@ -218,10 +230,11 @@ void set_trajectory_hook(std::uintptr_t trajectory, float *parameters) {
         h.raise_to.store(0, std::memory_order_relaxed);
         h.flight_kept = keep_floats(parameters, h.flight_parameters.data(), h.flight_parameters.size());
     }
+    if (trajectory) note_flight_record(trajectory);
     if (const auto original = h.original.load(std::memory_order_acquire)) original(trajectory, parameters);
 // <dev>
     if (trajectory) std::memcpy(h.last_trajectory.data(), reinterpret_cast<const void *>(trajectory), sizeof(float) * h.last_trajectory.size());
-    if (const int slot = h.test_slot.load(std::memory_order_relaxed) - 100; trajectory && slot >= 0 && slot < 96)
+    if (const int slot = h.test_slot.load(std::memory_order_relaxed) - 100; trajectory && slot >= 0 && slot < 0x3000)
         reinterpret_cast<float *>(trajectory)[slot] = h.test_value.load(std::memory_order_relaxed);
 // </dev>
 }
@@ -270,6 +283,57 @@ bool start_trick_heights(std::uintptr_t base) noexcept {
     } catch (...) {}
     return h.ready;
 }
+// Gravity on foot. A skater off the board falls under a gravity of its own, which the game writes from one instruction
+// (mov dword ptr [rbx + 0x934], -9.8). Measured (2026-10-12): at -4.9 a drop on foot fell at 4.4 m/s2. The trainer changes
+// that number, after checking the instruction is the known one, and puts it back at x 1.
+namespace {
+constexpr std::uintptr_t foot_gravity = 0x4834a95; // the instruction's number; the instruction starts 6 bytes before
+constexpr std::array<unsigned char, 6> foot_gravity_bytes{0xc7, 0x83, 0x34, 0x09, 0x00, 0x00};
+constexpr float foot_gravity_stock = -9.8f;
+std::atomic<int> gravity_known{}; // 0 not looked, 1 the instruction is the known one, -1 it is not
+std::atomic<float> gravity_now{1};
+bool read_constant(std::uintptr_t at, float &value) noexcept {
+    __try {
+        value = *reinterpret_cast<const float *>(at);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool write_constant(std::uintptr_t at, float value) noexcept {
+    DWORD old{};
+    if (!VirtualProtect(reinterpret_cast<void *>(at), sizeof(float), PAGE_EXECUTE_READWRITE, &old)) return false;
+    bool done = false;
+    __try {
+        *reinterpret_cast<float *>(at) = value;
+        done = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    DWORD again{};
+    VirtualProtect(reinterpret_cast<void *>(at), sizeof(float), old, &again);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void *>(at), sizeof(float));
+    return done;
+}
+} // namespace
+bool set_foot_gravity(float factor) noexcept {
+    const auto base = hooked().base;
+    if (!base) return false;
+    if (!std::isfinite(factor) || factor < 0.02f || factor > 20.0f) factor = 1.0f;
+    int known = gravity_known.load(std::memory_order_relaxed);
+    if (known == 0) {
+        float value{};
+        known = known_bytes(base + foot_gravity - foot_gravity_bytes.size(), foot_gravity_bytes.data(), foot_gravity_bytes.size()) &&
+                read_constant(base + foot_gravity, value) && value == foot_gravity_stock ? 1 : -1;
+        gravity_known.store(known, std::memory_order_relaxed);
+        if (known < 0)
+            logging::write(logging::Level::warning, logging::Channel::skater, "Trainer: this game build's on-foot gravity is not where it is known to be; gravity acts on the board only.");
+    }
+    if (known < 0) return false;
+    if (gravity_now.load(std::memory_order_relaxed) == factor) return true;
+    if (!write_constant(base + foot_gravity, foot_gravity_stock * factor)) return false;
+    gravity_now.store(factor, std::memory_order_relaxed);
+    return true;
+}
+float foot_gravity_in_force() noexcept { return gravity_now.load(std::memory_order_relaxed); }
 void set_trick_heights(float no_comply, float boneless) noexcept {
     const auto speed = [](float height) { return std::isfinite(height) && height > 0 ? std::sqrt(std::min(height, 1.0e6f)) : 1.0f; };
     hooked().no_comply.store(speed(no_comply), std::memory_order_relaxed);

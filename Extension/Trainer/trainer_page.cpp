@@ -61,9 +61,24 @@ struct Page {
     std::uint64_t share_serial{}; // the last `preset export` put on the clipboard
     bool share_seen{};
     bool show_page{};
+    float gravity_edit{1};
+    bool gravity_editing{};
+    // QUICK SETTINGS: what is changed (kind 0 a section's line, 1 a dial, 2 one of the trainer's settings, 3 a value).
+    struct QuickItem {
+        std::uint8_t kind{}, topic{};
+        std::size_t index{};
+    };
+    std::vector<QuickItem> quick_all;
+    std::uint64_t quick_revision{~0ull};
+    bool in_quick{};     // drawing that list: a row there is not the one "Go to" points at
+    // "Go to": the value to point at (tinted for a few seconds, scrolled to once), and the section whose cards open.
+    std::string flash;
+    double flash_until{};
+    bool flash_scroll{};
+    float flash_y{-1};
+    int open_cards{-1}, current_topic{-1};
 };
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words, int part);
-void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View &view);
 void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view);
 void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view);
 Page &page() {
@@ -73,6 +88,7 @@ Page &page() {
 // A card of this page: it folds, and a section can leave it out (Page::pick). card_end() follows either way.
 bool card(SkateMenu &menu, Page &p, const char *id, const char *title, const char *subtitle = nullptr) {
     p.card_skipped = !p.pick.empty() && std::ranges::find(p.pick, std::string_view(id)) == p.pick.end();
+    if (!p.card_skipped && p.open_cards > 0 && p.open_cards == p.current_topic) set_fold(id, true); // "Go to" shows what it points at
     return !p.card_skipped && fold_card(menu, id, title, subtitle);
 }
 void card_end(Page &p) {
@@ -83,7 +99,7 @@ void card_end(Page &p) {
 // to catch up with.
 void clear_edits(Page &p) {
     p.manual_editing = p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = p.revert_editing = false;
-    p.grind_side_editing = p.grind_push_editing = p.grind_range_editing = false;
+    p.grind_side_editing = p.grind_push_editing = p.grind_range_editing = p.gravity_editing = false;
     p.trick_editing = {};
     p.active.clear();
 }
@@ -224,6 +240,13 @@ bool row_works(const trainer::Row &row) { return row.used || row.touched || row.
 void value_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const trainer::Row &row,
                bool with_group, bool friendly) {
     ImGui::PushID(row.id.c_str());
+    if (!p.in_quick && !p.flash.empty() && p.flash == row.id) {
+        // "Go to" pointed here.
+        const auto at = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(at.x - px(4), at.y - px(1)), ImVec2(at.x + ImGui::GetContentRegionAvail().x, at.y + ImGui::GetFrameHeight() + px(1)),
+                                                  IM_COL32(60, 130, 230, 80));
+        p.flash_y = at.y;
+    }
     bool frozen = row.frozen;
     if (ImGui::Checkbox("##freeze", &frozen)) trainer_command(menu, callbacks, std::format("freeze {} {}", row.id, frozen ? 1 : 0));
     if (ImGui::IsItemHovered()) wrapped_tooltip("Lock: presets and Reset values leave this value alone.\nReset everything (top of the page) clears locks too.\nYou do not need it for a change to apply.");
@@ -451,6 +474,307 @@ void preset_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const tr
     end_card();
 }
 
+// ---- the first section: every kind of preset, and everything that is changed in one list ---------
+// One of the trainer's own settings (a trick height, a grind switch, a bending rule ...) as a row that changes it.
+void setup_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const trainer::SetupRow &row) {
+    ImGui::PushID(row.key.c_str());
+    ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight())); // where a value's lock box is
+    ImGui::SameLine();
+    const float column = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x * 0.52f;
+    ImGui::PushStyleColor(ImGuiCol_Text, skate_theme::blue);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(row.title.c_str());
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered())
+        wrapped_tooltip("One of the trainer's own settings (%s). The game's own: %s. Go to shows it where it lives, with its explanation.", row.key.c_str(),
+                        row.kind == trainer::setup_mode ? "left to the game" : row.kind == trainer::setup_switch ? "off" : number(row.stock).c_str());
+    ImGui::SameLine(column);
+    const float reset = ImGui::CalcTextSize("Reset").x + ImGui::GetStyle().FramePadding.x * 2;
+    ImGui::BeginDisabled(!view.editable || !callbacks.queue_console_command);
+    const auto id = "setup:" + row.key;
+    double value = p.active == id ? p.active_value : row.value;
+    const float width = std::max(px(90), ImGui::GetContentRegionAvail().x - reset - ImGui::GetStyle().ItemSpacing.x);
+    if (row.kind == trainer::setup_switch) {
+        bool on = value != 0;
+        if (ImGui::Checkbox("##value", &on)) trainer_command(menu, callbacks, std::format("setup {} {}", row.key, on ? 1 : 0));
+    } else if (row.kind == trainer::setup_mode) {
+        static constexpr const char *modes[]{"The game's own", "Held off", "Held on"};
+        int mode = value < 0 ? 0 : value != 0 ? 2 : 1;
+        ImGui::SetNextItemWidth(width);
+        if (ImGui::Combo("##value", &mode, modes, 3)) trainer_command(menu, callbacks, std::format("setup {} {}", row.key, mode - 1));
+    } else {
+        ImGui::SetNextItemWidth(width);
+        const auto speed = static_cast<float>(std::max({std::abs(row.stock), std::abs(value), 0.05}) * 0.006);
+        if (ImGui::DragScalar("##value", ImGuiDataType_Double, &value, speed, &row.low, &row.high, "%.4g", ImGuiSliderFlags_AlwaysClamp))
+            trainer_command(menu, callbacks, std::format("setup {} {}", row.key, number(value)));
+        if (ImGui::IsItemActive()) {
+            p.active = id;
+            p.active_value = value;
+        } else if (p.active == id) {
+            p.active.clear();
+        }
+        if (!ImGui::IsItemActive()) tip("Drag left or right to change it, or double-click to type a number.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset", ImVec2(reset, 0))) {
+        clear_edits(p);
+        trainer_command(menu, callbacks, std::format("setup {} {}", row.key, number(row.stock)));
+    }
+    tip("Puts this one setting back to the game's own.");
+    ImGui::EndDisabled();
+    ImGui::PopID();
+}
+// Which feel the grind and the transition settings add up to: 0 skate.'s own, 1 Skate 3's, 2 a mix of the player's.
+int grind_feel(const trainer::View &view) {
+    bool like_skate = true, like_skate3 = true;
+    for (std::size_t i = 0; i < trainer::grind_switches.size(); ++i) {
+        if (view.grind_mode[i] >= 0) like_skate = false;
+        if (view.grind_mode[i] != trainer::skate3_grind_mode(i)) like_skate3 = false;
+    }
+    for (std::size_t i = 0; i < trainer::grind_settings.size(); ++i) {
+        if (view.grind_setting[i] >= 0) like_skate = false;
+        if (view.grind_setting[i] != trainer::grind_settings[i].skate3) like_skate3 = false;
+    }
+    if (view.grind_push != 0.0f || view.grind_range != 0.0f) like_skate = false;
+    if (std::abs(view.grind_push - 1.8f) > 0.005f || view.grind_range == 0.0f) like_skate3 = false;
+    return like_skate ? 0 : like_skate3 ? 1 : 2;
+}
+int transition_feel(const trainer::View &view) {
+    const bool preset_on = std::ranges::any_of(view.presets, [](const trainer::PresetRow &row) { return row.builtin && row.active && row.name == "Transition: Skate 3"; });
+    bool like_skate = !preset_on, like_skate3 = preset_on;
+    for (std::size_t i = 0; i < trainer::transition_settings.size(); ++i) {
+        if (view.tr_setting[i] >= 0) like_skate = false;
+        if (view.tr_setting[i] != trainer::transition_settings[i].skate3) like_skate3 = false;
+    }
+    if (view.tr_lean != 0.0f || view.tr_carry != 0.0f || view.tr_unstick != 0.0f || view.tr_lockout != 0.0f || view.tr_spine || view.tr_plant != 0.0f) like_skate = false;
+    if (view.tr_lean == 0.0f || view.tr_carry == 0.0f || view.tr_unstick == 0.0f || view.tr_lockout == 0.0f || view.tr_plant == 0.0f) like_skate3 = false;
+    return like_skate ? 0 : like_skate3 ? 1 : 2;
+}
+// Every kind of preset in one card: the whole-game feels, the grind and transition feels, the tricklining extras,
+// the built-in styles and the player's own. Whatever one sets shows up in QUICK SETTINGS below it.
+void presets_card(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, bool can_edit) {
+    if (card(menu, p, "presets", "PRESETS", "A whole setup in one press. Blue = on. What it changes is listed in QUICK SETTINGS below.")) {
+        ImGui::BeginDisabled(!can_edit);
+        // Buttons in a row that wraps under where the row started.
+        float column{};
+        bool first = true;
+        const auto begin = [&](const char *label, const char *about) {
+            field(menu, label, about);
+            column = ImGui::GetCursorPosX();
+            first = true;
+        };
+        const auto button = [&](const char *label, bool on, const char *about) {
+            const float width = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2;
+            if (!first) {
+                if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + width < ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x) ImGui::SameLine();
+                else ImGui::SetCursorPosX(column);
+            }
+            first = false;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
+            const bool pressed = ImGui::Button(label);
+            if (on) ImGui::PopStyleColor();
+            if (about && *about && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) wrapped_tooltip("%s", about);
+            if (pressed) clear_edits(p);
+            return pressed;
+        };
+        const auto active = [&](std::string_view name) {
+            return std::ranges::any_of(view.presets, [&](const trainer::PresetRow &row) { return row.builtin && row.active && row.name == name; });
+        };
+        begin("Whole game", "Skate 3's own numbers for everything the two games share, on one of its difficulties.");
+        const bool any = active("Skate 3 Easy") || active("Skate 3") || active("Skate 3 Hardcore");
+        if (button("skate.", !any, "The game's own tuning: takes a Skate 3 choice off again.")) trainer_command(menu, callbacks, "feel stock");
+        if (button("Skate 3 Easy", active("Skate 3 Easy"), "Skate 3 on Easy: full-height pops every time, strong pushes, generous grind lock-on, easy spins.")) trainer_command(menu, callbacks, "feel easy");
+        if (button("Skate 3", active("Skate 3"), "Skate 3 on Normal: its pop, grind pops, pushing, pumping, steering, manuals, spins, flips and bails.")) trainer_command(menu, callbacks, "feel normal");
+        if (button("Skate 3 Hardcore", active("Skate 3 Hardcore"), "Skate 3 on Hardcore: lower pops, weaker pushes, tight grind lock-on, slow auto spins.")) trainer_command(menu, callbacks, "feel hardcore");
+        const int grinds = grind_feel(view), transition = transition_feel(view);
+        begin("Grinds", "How a grind is ridden and left. GRINDS has every row behind it.");
+        if (button("skate.##grind", grinds == 0, "Every grind setting and switch is left to the game.")) trainer_command(menu, callbacks, "grind feel skate");
+        if (button("Skate 3##grind", grinds == 1, "The left stick alone turns the board on a one-truck grind, the right stick tips and pops, a pop goes sideways the way the left stick is held, "
+                                                   "and what skate. added to leaving a grind is off.")) trainer_command(menu, callbacks, "grind feel skate3");
+        if (grinds == 2) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("your own mix");
+        }
+        begin("Transition", "Bowls, quarter pipes, vert and spines. TRANSITION has every row behind it.");
+        if (button("skate.##transition", transition == 0, "Everything on transition is left to the game.")) trainer_command(menu, callbacks, "transition feel skate");
+        if (button("Skate 3##transition", transition == 1, "Lean into the ramp on a coping grind, roll off the coping at your angle, no hang-ups coming back in, handplants that come back in "
+                                                            "high on the wall, with Skate 3's coping timers.")) trainer_command(menu, callbacks, "transition feel skate3");
+        if (transition == 2) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("your own mix");
+        }
+        begin("Tricklining", "What Skate 3's tricklining had beyond its tuning. TRICKLINING has every row behind it.");
+        if (button("Skate 3's extras", view.revert_boost > 0, "The board bending boost at x 1, heavier revert and powerslide friction and higher footplants."))
+            trainer_command(menu, callbacks, view.revert_boost > 0 ? "trickline extras off" : "trickline extras on");
+        begin("Styles", "The built-in presets. Press one to put it on, press it again to take it off. Each also has a dial in its section.");
+        for (const auto &preset : view.presets) {
+            if (!preset.builtin || preset.name == "Stock" || preset.name.starts_with("Skate 3") || preset.name.starts_with("Transition:")) continue;
+            if (button(preset.name.c_str(), preset.active, preset.note.c_str()))
+                trainer_command(menu, callbacks, std::string(preset.active ? "preset remove " : "preset apply ") + preset.name);
+        }
+        begin("Yours", "The presets you saved or imported. Save, share and delete them in the row above the tabs.");
+        bool own = false;
+        for (const auto &preset : view.presets) {
+            if (preset.builtin) continue;
+            own = true;
+            ImGui::PushID(preset.name.c_str());
+            if (button(preset.name.c_str(), preset.active, preset.active ? "On. Press to put what it set back to the game's own." : "Press to load it on top of what is set now."))
+                trainer_command(menu, callbacks, std::string(preset.active ? "preset remove " : "preset apply ") + preset.name);
+            ImGui::PopID();
+        }
+        if (!own) ImGui::TextDisabled("none yet: set the game up, then name it and Save in the row above the tabs");
+        ImGui::EndDisabled();
+    }
+    card_end(p);
+}
+std::string quick_id(std::string_view id) {
+    std::string result = "qh:" + std::string(id);
+    for (auto &c : result)
+        if (c == ' ') c = '_';
+    return result;
+}
+// Everything that is changed right now, in one list: change it here, hide a row that is done with, or go to where it lives.
+void quick_card(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, bool can_edit) {
+    constexpr std::uint8_t order[]{trainer::topic_game, trainer::topic_pop, trainer::topic_speed, trainer::topic_bails, trainer::topic_grinds, trainer::topic_trickline,
+                                   trainer::topic_transition, trainer::topic_pumping, trainer::topic_foot, trainer::topic_none};
+    // Once per snapshot: what is changed, section by section.
+    if (p.quick_revision != view.revision) {
+        p.quick_revision = view.revision;
+        p.quick_all.clear();
+        std::vector<std::string> ids;
+        for (const auto topic : order) {
+            for (std::size_t i = 0; i < view.presets.size(); ++i)
+                if (const auto &preset = view.presets[i]; preset.builtin && preset.dial && preset.topic == topic && std::abs(preset.factor - 1.0) > 1e-4) {
+                    p.quick_all.push_back({1, topic, i});
+                    ids.push_back(quick_id("dial:" + preset.name));
+                }
+            for (std::size_t i = 0; i < view.setups.size(); ++i)
+                if (view.setups[i].topic == topic) {
+                    p.quick_all.push_back({2, topic, i});
+                    ids.push_back(quick_id(view.setups[i].key));
+                }
+            for (std::size_t i = 0; i < view.rows.size(); ++i)
+                if (const auto &row = view.rows[i]; row.touched && (row.topic < trainer::topic_count ? row.topic : 0) == topic) {
+                    p.quick_all.push_back({3, topic, i});
+                    ids.push_back(quick_id(row.id));
+                }
+        }
+        // A hidden row that has gone back to the game's own is forgotten: changed again, it shows again.
+        for (const auto &[id, hidden] : view.folds)
+            if (hidden && id.starts_with("qh:") && std::ranges::find(ids, id) == ids.end()) {
+                set_fold(id, false);
+                trainer_command(menu, callbacks, std::format("fold {} 0", id));
+            }
+    }
+    const auto id_of = [&](const Page::QuickItem &item) {
+        return item.kind == 1 ? quick_id("dial:" + view.presets[item.index].name) : item.kind == 2 ? quick_id(view.setups[item.index].key) : quick_id(view.rows[item.index].id);
+    };
+    const auto hide = [&](const std::string &id, bool hidden) {
+        set_fold(id, hidden);
+        trainer_command(menu, callbacks, std::format("fold {} {}", id, hidden ? 1 : 0));
+    };
+    // What is shown: the rows not hidden, each section under a line of its own.
+    std::vector<Page::QuickItem> shown;
+    std::size_t hidden{};
+    int last = -1;
+    for (const auto &item : p.quick_all) {
+        if (item.index >= (item.kind == 1 ? view.presets.size() : item.kind == 2 ? view.setups.size() : view.rows.size())) continue;
+        if (fold_open(id_of(item), false)) {
+            ++hidden;
+            continue;
+        }
+        if (last != item.topic) shown.push_back({0, item.topic, 0});
+        last = item.topic;
+        shown.push_back(item);
+    }
+    // Counted as the section's bar counts: a dial's row stands for values that have rows of their own.
+    const auto changed = static_cast<std::size_t>(std::ranges::count_if(p.quick_all, [](const Page::QuickItem &item) { return item.kind != 1; }));
+    const auto subtitle = p.quick_all.empty() ? std::string("Nothing is changed") : std::format("{} changed{}", changed, hidden ? std::format(", {} hidden", hidden) : std::string{});
+    if (card(menu, p, "quick", "QUICK SETTINGS", subtitle.c_str())) {
+        if (p.quick_all.empty()) {
+            note("Everything you change shows up here, whatever section it is in: pick a preset above, move a dial or set a value below. Change it again here, hide the "
+                 "rows you are done with, or press Go to for where a row lives and what is around it.");
+        } else {
+            const auto go = [&](const Page::QuickItem &item) {
+                p.scroll_to = item.topic;
+                p.open_cards = item.topic;
+                p.flash.clear();
+                if (item.kind == 3) {
+                    const auto &row = view.rows[item.index];
+                    p.flash = row.id;
+                    p.flash_until = ImGui::GetTime() + 4.0;
+                    p.flash_scroll = true;
+                    if (!item.topic) {
+                        // EVERY VALUE: its group, so the values beside it are the related ones.
+                        p.only_changed = false;
+                        const auto found = std::ranges::find(view.groups, row.group);
+                        p.group = found == view.groups.end() ? 1 : static_cast<int>(found - view.groups.begin()) + 2;
+                    }
+                }
+            };
+            if (hidden) {
+                if (ImGui::SmallButton(std::format("Show the {} hidden", hidden).c_str()))
+                    for (const auto &item : p.quick_all)
+                        if (const auto id = id_of(item); fold_open(id, false)) hide(id, false);
+                tip("Brings back every row you hid.");
+                ImGui::SameLine();
+            }
+            if (!shown.empty()) {
+                if (ImGui::SmallButton("Hide all")) {
+                    for (const auto &item : p.quick_all)
+                        if (const auto id = id_of(item); !fold_open(id, false)) hide(id, true);
+                }
+                tip("Hides every row here. Nothing is changed by hiding: the rows stay set, and each comes back by itself the next time it changes from the game's own.");
+                ImGui::SameLine();
+            }
+            ImGui::TextDisabled("Hide: off this list, still set.  Go to: where it lives.  Reset: back to the game's own.");
+            const float hide_width = ImGui::CalcTextSize("Hide").x + ImGui::GetStyle().FramePadding.x * 2, go_width = ImGui::CalcTextSize("Go to").x + ImGui::GetStyle().FramePadding.x * 2;
+            p.in_quick = true;
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(shown.size()), ImGui::GetFrameHeightWithSpacing());
+            while (clipper.Step())
+                for (int n = clipper.DisplayStart; n < clipper.DisplayEnd; ++n) {
+                    const auto &item = shown[static_cast<std::size_t>(n)];
+                    ImGui::PushID(n);
+                    if (item.kind == 0) {
+                        const auto &topic = trainer::topics[item.topic];
+                        ImGui::AlignTextToFramePadding();
+                        ImGui::PushFont(menu.bold);
+                        if (item.topic) ImGui::TextUnformatted(topic.title.data(), topic.title.data() + topic.title.size());
+                        else ImGui::TextUnformatted("OTHER VALUES");
+                        ImGui::PopFont();
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Open section")) {
+                            p.scroll_to = item.topic;
+                            p.flash.clear();
+                        }
+                        tip("Opens this section and scrolls to it.");
+                    } else {
+                        if (ImGui::Button("Hide", ImVec2(hide_width, 0))) hide(id_of(item), true);
+                        tip("Takes this row off the list. It stays set. It comes back by itself the next time it changes from the game's own, or with \"Show hidden\".");
+                        ImGui::SameLine();
+                        if (ImGui::Button("Go to", ImVec2(go_width, 0))) go(item);
+                        tip("Opens the section this lives in and scrolls to it, with the related settings around it.");
+                        ImGui::SameLine();
+                        if (item.kind == 1) {
+                            ImGui::BeginDisabled(!can_edit);
+                            dial_row(menu, callbacks, p, view.presets[item.index]);
+                            ImGui::EndDisabled();
+                        } else if (item.kind == 2) {
+                            setup_row(menu, callbacks, p, view, view.setups[item.index]);
+                        } else {
+                            value_row(menu, callbacks, p, view, view.rows[item.index], !item.topic, true);
+                        }
+                    }
+                    ImGui::PopID();
+                }
+            p.in_quick = false;
+            if (shown.empty()) note("Every changed row is hidden.");
+        }
+    }
+    card_end(p);
+}
+
 // ---- the Tune tab: one page of sections ----------------------------------------------------------
 // The bar that opens and closes one section; `summary` says what is changed inside.
 bool topic_header(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, std::uint8_t topic, const std::string &summary, bool open_by_default) {
@@ -571,6 +895,9 @@ void every_value(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const t
     const bool with_group = p.group <= 1 || p.only_changed;
     ImGuiListClipper clipper;
     clipper.Begin(static_cast<int>(p.shown.size()));
+    if (p.flash_scroll && !p.flash.empty())
+        for (std::size_t i = 0; i < p.shown.size(); ++i)
+            if (view.rows[p.shown[i]].id == p.flash) clipper.IncludeItemByIndex(static_cast<int>(i));
     while (clipper.Step())
         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
             value_row(menu, callbacks, p, view, view.rows[p.shown[static_cast<std::size_t>(i)]], with_group, false);
@@ -590,18 +917,9 @@ void topic_body(SkateMenu &menu, const Model &model, const CallbacksV3 &callback
     };
     switch (topic) {
     case trainer::topic_game:
-        if (card(menu, p, "feel", "PLAY LIKE", "The game's own tuning, or Skate 3's on one of its difficulties")) {
-            ImGui::BeginDisabled(!can_edit);
-            feel_buttons(menu, callbacks, view);
-            ImGui::EndDisabled();
-            note("A Skate 3 choice sets Skate 3's own numbers for everything the two games share (pop, grind pops, pushing, pumping, steering, "
-                 "manuals, spins, bails), and for grinds the way they were before skate.: the older grind friction, Skate 3's lock-on distances, wider slide "
-                 "angles, and no automatic turning between grinds. What a number cannot change stays skate.'s: animations and which stick "
-                 "motion asks for which grind. GRINDS and TRANSITION each have a Skate 3 feel of their own for the controls.");
-        }
-        card_end(p);
-        dials_card(menu, callbacks, p, view, topic, can_edit);
-        break;
+        presets_card(menu, callbacks, p, view, can_edit);
+        quick_card(menu, callbacks, p, view, can_edit);
+        return; // its rows are the other sections'
     case trainer::topic_pop:
         dials_card(menu, callbacks, p, view, topic, can_edit);
         ImGui::BeginDisabled(!can_edit);
@@ -706,12 +1024,17 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         if (p.shown.empty()) note("No value matches. Grind, transition and bending settings are in their sections: clear the box to see them.");
         return;
     }
+    if (!p.flash.empty() && ImGui::GetTime() > p.flash_until) p.flash.clear();
+    p.flash_y = -1;
     for (const auto topic : order) {
         const auto &one = trainer::topics[topic];
-        const std::size_t count = topic ? view.changed[topic] : view.touched;
-        const auto summary = !count ? std::string{} : topic ? std::format("{} changed", count) : std::format("{} values changed in all", count);
-        // A section with something changed in it starts open, so nothing that is on can hide.
-        if (!topic_header(menu, callbacks, p, topic, summary, topic != trainer::topic_none && count > 0)) continue;
+        const std::size_t all = view.touched + view.setups_changed;
+        const std::size_t count = topic == trainer::topic_game ? all : topic ? view.changed[topic] : view.touched;
+        const auto summary = !count ? std::string{} : topic == trainer::topic_game ? std::format("{} changed in all", count) : topic ? std::format("{} changed", count)
+                                                                                                                           : std::format("{} values changed in all", count);
+        p.current_topic = topic;
+        // A section with something changed in it starts open, so nothing that is on can hide. The first one is the way in.
+        if (!topic_header(menu, callbacks, p, topic, summary, topic == trainer::topic_game || (topic != trainer::topic_none && count > 0))) continue;
         ImGui::Indent(px(10));
         ImGui::PushID(static_cast<int>(topic));
         if (!topic) {
@@ -734,13 +1057,19 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         ImGui::Unindent(px(10));
         ImGui::Dummy(ImVec2(0, px(6)));
     }
+    p.current_topic = p.open_cards = -1;
+    // "Go to" a value: once it has been drawn, the page scrolls to it (it is inside a card, which does not scroll).
+    if (p.flash_scroll && p.flash_y >= 0) {
+        ImGui::SetScrollY(std::max(0.0f, ImGui::GetScrollY() + p.flash_y - ImGui::GetWindowPos().y - ImGui::GetWindowHeight() * 0.3f));
+        p.flash_scroll = false;
+    }
 }
 
 // The trick sliders. `part` 0: every one that matches the search words; 1: the TRICKS card of POP AND TRICKS; 2: the
 // jump on foot (ON FOOT). Pump power is on PUMPING and the board bending boost on TRICKLINING.
 void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words, int part) {
     static constexpr const char *advanced_label = "Advanced trick speed (a speed for each flip trick: kickflip, heelflip, 360 flip, varial, shuvit, hardflip, laser flip, impossible)";
-    static constexpr const char *labels[]{"Flip trick speed", advanced_label, "Pump power (pumping transitions)", "Manual pop height", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
+    static constexpr const char *labels[]{"Gravity", "Flip trick speed", advanced_label, "Pump power (pumping transitions)", "Manual pop height", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
                                            "Board bending boost (revert speed)"};
     const auto wanted = [&](const char *label) {
         const std::string_view name(label);
@@ -777,6 +1106,12 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         ImGui::PopID();
         return true;
     };
+    if (slider("Gravity", "gravity", view.gravity, p.gravity_edit, p.gravity_editing,
+               "Gravity in the air, on the board and on foot. 1 is the game's own. At 0.5 the same pop goes twice as high and hangs twice as long; at 2 you "
+               "drop twice as fast. It acts in the air only: rolling down a hill, grinds and a bailed skater are the game's own. The game aims an air off a "
+               "ramp back at the ramp with its own gravity, so with another gravity a vert air can come down somewhere else. It takes hold at once.",
+               3.0f) && view.gravity != 1.0f && !view.gravity_live)
+        ImGui::TextDisabled("On foot this game build keeps its own gravity: the setting acts on the board only.");
     slider("Manual pop height", "manual_height", view.manual_height, p.manual_edit, p.manual_editing,
            "How high you pop out of a manual or a nose manual. 1 is the game's own (lower than a riding ollie). Ollie height raises both.");
     slider("Flip trick speed", "flip_speed", view.flip_speed, p.flip_edit, p.flip_editing,
@@ -1003,31 +1338,6 @@ void jump_lines(SkateMenu &menu, const trainer::Jump &jump) {
 }
 // Which game the skating plays like: the game's own, or Skate 3 on one of its three difficulties.
 // One is always lit; a Skate 3 one goes out again as soon as one of its values is changed by hand.
-void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View &view) {
-    struct Choice {
-        const char *label, *preset, *command, *tip;
-    };
-    static constexpr Choice choices[]{
-        {"skate.", "", "feel stock", "The game's own tuning."},
-        {"Skate 3 Easy", "Skate 3 Easy", "feel easy", "Skate 3 on Easy: full-height pops every time, strong pushes, generous grind lock-on, easy spins."},
-        {"Skate 3", "Skate 3", "feel normal", "Skate 3 on Normal: its pop, grind pops, pushing, pumping, steering, manuals, spins, flips and bails."},
-        {"Skate 3 Hardcore", "Skate 3 Hardcore", "feel hardcore", "Skate 3 on Hardcore: lower pops, weaker pushes, tight grind lock-on, slow auto spins."},
-    };
-    const auto active = [&](const char *preset) {
-        return std::ranges::any_of(view.presets, [&](const trainer::PresetRow &row) { return row.builtin && row.active && row.name == preset; });
-    };
-    const bool any = active("Skate 3 Easy") || active("Skate 3") || active("Skate 3 Hardcore");
-    const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 3) / 4;
-    for (std::size_t i = 0; i < std::size(choices); ++i) {
-        if (i) ImGui::SameLine();
-        const bool on = i == 0 ? !any : active(choices[i].preset);
-        if (on) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
-        if (ImGui::Button(choices[i].label, ImVec2(width, 0))) trainer_command(menu, callbacks, choices[i].command);
-        if (on) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) wrapped_tooltip("%s", choices[i].tip);
-    }
-}
-
 // Everything that makes a trick line, in one place: the same values and sliders as the Tune tab,
 // gathered, with one button for Skate 3's and one for the game's own.
 void trickline_section(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {

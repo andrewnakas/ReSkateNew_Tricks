@@ -276,6 +276,8 @@ struct State {
     // The no comply and the boneless are launched by the trick scripts too (trainer_jump.cpp).
     float nocomply_height{1}, boneless_height{1};
     float manual_height{1}; // the pop out of a manual
+    float gravity{1};       // x the game's own gravity, in the air on the board
+    bool gravity_live{true}; // this build's gravity constants are the known ones
     float grind_side{1};    // the sideways part of a pop out of a grind or slide
     float grind_push{};     // Skate 3's pop: this many m/s sideways at full stick, the way the stick points (0: none)
     // Skate 3's turn on a grind: the left stick alone turns the board, up to this many degrees either way (0: off, the
@@ -473,6 +475,8 @@ std::optional<Vec3> read_position(const Json &value) {
 }
 Json write_position(const Vec3 &p) { return Json::array({Json(p[0]), Json(p[1]), Json(p[2])}); }
 
+// Gravity as a multiple of the game's own.
+constexpr float gravity_low = 0.05f, gravity_high = 10.0f;
 struct RevertField {
     std::string_view name;
     float RevertTuning::*member;
@@ -510,6 +514,7 @@ void load_store() {
             s.hippy_height = std::clamp(o.value("hippy_height", 1.0f), height_low, height_high);
             s.nocomply_height = std::clamp(o.value("nocomply_height", 1.0f), height_low, height_high);
             s.manual_height = std::clamp(o.value("manual_height", 1.0f), height_low, height_high);
+            s.gravity = std::clamp(o.value("gravity", 1.0f), gravity_low, gravity_high);
             s.grind_side = std::clamp(o.value("grind_side", 1.0f), 0.0f, 1000.0f);
             s.grind_push = std::clamp(o.value("grind_push", 0.0f), -50.0f, 50.0f);
             // (grind_lean, grind_turn and grind_tip were levers of earlier builds that did nothing: read past.)
@@ -596,6 +601,7 @@ void save_store() {
         options["hippy_height"] = s.hippy_height;
         options["nocomply_height"] = s.nocomply_height;
         options["manual_height"] = s.manual_height;
+        options["gravity"] = s.gravity;
         options["grind_side"] = s.grind_side;
         options["grind_push"] = s.grind_push;
         options["grind_range"] = s.grind_range;
@@ -1163,6 +1169,9 @@ struct Setup {
     std::function<double()> get;
     std::function<void(double)> set;
     std::function<bool()> in_force; // empty: always. Off stock but not in force (a trick's own speed with Advanced unticked) is not "modified".
+    std::string title;      // in the menu's quick settings
+    std::uint8_t kind{};    // setup_number / setup_switch / setup_mode (trainer.h)
+    double low{}, high{};
 };
 const std::vector<Setup> &setups() {
     static const auto *list = [] {
@@ -1171,16 +1180,24 @@ const std::vector<Setup> &setups() {
         const auto real = [&](std::string key, std::uint8_t topic, float *value, float stock, float low, float high) {
             all->push_back({std::move(key), topic, stock, [value] { return static_cast<double>(*value); },
                             [value, low, high](double v) { *value = std::isfinite(v) ? std::clamp(static_cast<float>(v), low, high) : *value; }, {}});
+            all->back().low = low;
+            all->back().high = high;
         };
         const auto toggle = [&](std::string key, std::uint8_t topic, bool *value) {
             all->push_back({std::move(key), topic, 0.0, [value] { return *value ? 1.0 : 0.0; }, [value](double v) { *value = v != 0; }, {}});
+            all->back().kind = setup_switch;
+            all->back().high = 1;
         };
         const auto mode = [&](std::string key, std::uint8_t topic, std::int8_t *value) {
             all->push_back({std::move(key), topic, -1.0, [value] { return static_cast<double>(*value); },
                             [value](double v) { *value = static_cast<std::int8_t>(v < 0 ? -1 : v != 0 ? 1 : 0); }, {}});
+            all->back().kind = setup_mode;
+            all->back().low = -1;
+            all->back().high = 1;
         };
         real("trick.flip_speed", topic_pop, &s.flip_speed, 1.0f, flip_low, flip_high);
         real("trick.manual_height", topic_pop, &s.manual_height, 1.0f, height_low, height_high);
+        real("trick.gravity", topic_pop, &s.gravity, 1.0f, gravity_low, gravity_high);
         real("trick.nocomply_height", topic_pop, &s.nocomply_height, 1.0f, height_low, height_high);
         real("trick.boneless_height", topic_pop, &s.boneless_height, 1.0f, height_low, height_high);
         real("trick.hippy_height", topic_pop, &s.hippy_height, 1.0f, height_low, height_high);
@@ -1192,14 +1209,21 @@ const std::vector<Setup> &setups() {
         toggle("trick.flip_flick", topic_pop, &s.flip_flick);
         for (std::size_t i = 0; i < flip_tricks.size(); ++i) {
             real("trick." + std::string(flip_tricks[i].key), topic_pop, &s.flip_trick[i], 1.0f, flip_low, flip_high);
+            all->back().title = std::string(flip_tricks[i].label) + ": flip speed";
             all->back().in_force = [&s] { return s.flip_advanced; };
         }
         real("grind.side", topic_grinds, &s.grind_side, 1.0f, 0.0f, 1000.0f);
         real("grind.push", topic_grinds, &s.grind_push, 0.0f, -50.0f, 50.0f);
         real("grind.range", topic_grinds, &s.grind_range, 0.0f, -360.0f, 360.0f);
-        for (std::size_t i = 0; i < grind_settings.size(); ++i) mode("grind.set." + std::string(grind_settings[i].key), topic_grinds, &s.grind_setting[i]);
+        for (std::size_t i = 0; i < grind_settings.size(); ++i) {
+            mode("grind.set." + std::string(grind_settings[i].key), topic_grinds, &s.grind_setting[i]);
+            all->back().title = "Grinds: " + std::string(grind_settings[i].label);
+        }
         for (std::size_t i = 0; i < grind_switches.size(); ++i)
-            if (!grind_switches[i].read_only) mode("grind.hold." + std::string(grind_switches[i].key), topic_grinds, &s.grind_mode[i]);
+            if (!grind_switches[i].read_only) {
+                mode("grind.hold." + std::string(grind_switches[i].key), topic_grinds, &s.grind_mode[i]);
+                all->back().title = "Grinds: " + std::string(grind_switches[i].label);
+            }
         real("transition.lean", topic_transition, &s.tr_lean, 0.0f, -1.0f, 1.0f);
         real("transition.carry", topic_transition, &s.tr_carry, 0.0f, 0.0f, 1.0f);
         real("transition.drop", topic_transition, &s.tr_drop, 1.0f, 0.0f, 100.0f);
@@ -1209,14 +1233,38 @@ const std::vector<Setup> &setups() {
         real("transition.plant", topic_transition, &s.tr_plant, 0.0f, 0.0f, 1.0f);
         toggle("transition.spine", topic_transition, &s.tr_spine);
         for (std::size_t i = 0; i < transition_settings.size(); ++i)
+        {
             mode("transition.set." + std::string(transition_settings[i].key), transition_settings[i].card == transition_card_pump ? topic_pumping : topic_transition,
                  &s.tr_setting[i]);
+            all->back().title = (transition_settings[i].card == transition_card_pump ? "Pumping: " : "Transition: ") + std::string(transition_settings[i].label);
+        }
         for (const auto &field : revert_fields) {
             const auto member = field.member;
             const float low = field.low, high = field.high;
             all->push_back({"revert." + std::string(field.name), topic_trickline, static_cast<double>(RevertTuning{}.*member),
                             [&s, member] { return static_cast<double>(s.revert.*member); },
                             [&s, member, low, high](double v) { if (std::isfinite(v)) s.revert.*member = std::clamp(static_cast<float>(v), low, high); }, {}});
+            all->back().low = low;
+            all->back().high = high;
+        }
+        constexpr std::pair<std::string_view, std::string_view> titles[]{
+            {"trick.flip_speed", "Flip trick speed"}, {"trick.manual_height", "Manual pop height"}, {"trick.gravity", "Gravity"},
+            {"trick.nocomply_height", "No comply height"}, {"trick.boneless_height", "Boneless height"}, {"trick.hippy_height", "Hippy jump height"},
+            {"trick.offboard_height", "Off-board jump height"}, {"trick.pump_power", "Pump power"}, {"trick.revert_boost", "Board bending boost"},
+            {"trick.flip_advanced", "Advanced trick speed"}, {"trick.flip_pop", "Slow flips pop higher"}, {"trick.flip_flick", "Flick tricks at full speed"},
+            {"grind.side", "Grind pop: side force"}, {"grind.push", "Grind pop: push with stick (m/s)"}, {"grind.range", "Grinds: left stick turn range (deg)"},
+            {"transition.lean", "Transition: lean into the ramp"}, {"transition.carry", "Transition: roll off at your angle"},
+            {"transition.drop", "Transition: roll-off drop speed (m/s)"}, {"transition.unstick", "Transition: no hang-ups"},
+            {"transition.lockout", "Transition: coping re-catch delay (s)"}, {"transition.plant", "Transition: Skate 3 plant exit"},
+            {"transition.spine", "Transition: airs clear the coping"}, {"revert.spin", "Bending: spin needed (deg)"},
+            {"revert.twist", "Bending: board off your body (deg)"}, {"revert.slip", "Bending: board off the travel (deg)"},
+            {"revert.bend", "Bending boost: a small bend (m/s)"}, {"revert.full", "Bending boost: a full bend (m/s)"},
+            {"revert.auto", "Bending boost: an auto revert (m/s)"}, {"revert.max_speed", "Bending: no boost above (m/s)"},
+            {"revert.cooldown", "Bending: time between boosts (s)"}, {"revert.min_air", "Bending: shortest flight (s)"}};
+        for (auto &one : *all) {
+            for (const auto &[key, title] : titles)
+                if (one.key == key) one.title = title;
+            if (one.title.empty()) one.title = one.key;
         }
         return all;
     }();
@@ -1678,6 +1726,9 @@ bool left_stick_raw(float &x, float &y) noexcept {
 }
 // Test value (`trainer flipland <seconds>`): this long before the landing a slowed flip goes back to the game's own speed.
 float flip_land_window = 0;
+// <dev>
+float dev_air_gravity = 0, dev_foot_gravity = 0; // `trainer gravtest`: one lever at a time (0: the setting's)
+// </dev>
 // Test value (`trainer flipturn <seconds>`): the turn time below, for every trick.
 float flip_turn_test = 0;
 // With "Flick tricks at full speed" the game's own flip speed counts as at least this (`trainer flipleast <n>` to
@@ -1691,13 +1742,14 @@ float flip_least_game = 1.0f;
 // tricks, speeds 0.1 to 0.5), and scripted kickflips landed clean with 0.2 s more air than that. Shuvits and impossibles
 // were still turning when they landed in that playtest (scripted pop shuvits were not), so they get a little more. The air a launch gives on flat ground is
 // 0.04 s more than twice its upward speed over 9.8.
+float air_gravity_now = 1; // x the game's gravity in the air on the board, as the last tick set it
 float slow_flip_up(std::uint32_t trick, float speed) {
     if (!(speed < 1.0f)) return 0;
     const auto name = flip_trick_name(trick);
     float turn = name.find("Shuvit") != name.npos || name.find("Impossible") != name.npos ? 0.38f : 0.34f;
     if (flip_turn_test > 0) turn = flip_turn_test;
     const float air = 0.20f + turn / std::max(speed, 0.05f);
-    return std::min(4.9f * (air - 0.04f), 16.5f);
+    return std::min(4.9f * air_gravity_now * (air - 0.04f), 16.5f);
 }
 // CurrentFlipTrick values that are a pop with no flip in it (the nollie, the ollie pops, the boned ollie, the wallies):
 // the flip speed leaves them alone, as it does the ollie.
@@ -1884,8 +1936,8 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
         // Seconds until the skater is back at the height they left from, by the flight's own arc.
         float to_landing = 1e9f;
         if (m.airborne) {
-            const float rise = velocity[1], above = position[1] - m.takeoff[1], under = rise * rise + 2 * 9.8f * above;
-            to_landing = under > 0 ? (rise + std::sqrt(under)) / 9.8f : 0.0f;
+            const float rise = velocity[1], above = position[1] - m.takeoff[1], gravity = 9.8f * air_gravity_now, under = rise * rise + 2 * gravity * above;
+            to_landing = under > 0 ? (rise + std::sqrt(under)) / gravity : 0.0f;
         }
         drive_flip_speed(base, m.airborne, to_landing);
     }
@@ -2898,6 +2950,8 @@ void build_view() {
     next->hippy_height = s.hippy_height;
     next->nocomply_height = s.nocomply_height;
     next->manual_height = s.manual_height;
+    next->gravity = s.gravity;
+    next->gravity_live = s.gravity_live;
     next->grind_side = s.grind_side;
     next->grind_push = s.grind_push;
     next->grind_range = s.grind_range;
@@ -2947,6 +3001,7 @@ void build_view() {
             ++next->changed[one.topic];
             ++next->settings[one.topic];
             ++next->setups_changed;
+            next->setups.push_back({one.key, one.title, one.topic, one.kind, one.get(), one.stock, one.low, one.high});
         }
     // Nothing of the trainer's is in force. (A lock on a value that is the game's own changes nothing: counted apart.)
     next->stock = !next->touched && !next->setups_changed;
@@ -3382,6 +3437,20 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
                 }
             }
             // </dev>
+        }
+        {
+            // Gravity: the game's own under a host's physics or with boosts off. Both levers let go by themselves.
+            float board = s.enforced || (multiplayer_session_active() && !session_boosts_allowed()) ? 1.0f : s.gravity, foot = board;
+            // <dev>
+            if (dev_air_gravity > 0) board = dev_air_gravity;
+            if (dev_foot_gravity > 0) foot = dev_foot_gravity;
+            // </dev>
+            set_air_gravity(client, s.entity, board);
+            air_gravity_now = board;
+            if (const bool live = set_foot_gravity(foot); live != s.gravity_live) {
+                s.gravity_live = live;
+                s.view_due = true;
+            }
         }
         drive_transition(base, client, now);
         // The revert boost adds speed, so it keeps to the session's rule for boosts and to a host's physics.
@@ -3929,6 +3998,11 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             (name == "hippy_height" ? s.hippy_height : name == "nocomply_height" ? s.nocomply_height : name == "offboard_height" ? s.offboard_height
              : name == "manual_height" ? s.manual_height : s.boneless_height) =
                 std::clamp(static_cast<float>(*value), height_low, height_high);
+        } else if (name == "gravity") {
+            const auto value = number(arg(1));
+            if (!value) return "error: gravity needs a multiplier, 1 = the game's own (0.5 floats, 2 drops fast).";
+            if (!editable(&why)) return "error: " + why;
+            s.gravity = std::clamp(static_cast<float>(*value), gravity_low, gravity_high);
         } else if (name == "pump_power") {
             const auto value = number(arg(1));
             if (!value) return "error: pump_power needs a multiplier, 1 = what the game's own pump gains.";
@@ -3997,9 +4071,20 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         changed();
         return "\"" + name + "\" will be applied whenever this map loads.";
     }
+    if (v == "setup") {
+        // Any one of the trainer's own settings by its preset key (the menu's quick settings): trainer setup grind.push 1.8
+        const auto *one = find_setup(lower(arg(0)));
+        const auto value = number(arg(1));
+        if (!one || !value) return "error: usage: trainer setup <key> <value> (the keys are the ones presets use: trick.flip_speed, grind.push, transition.lean ...)";
+        std::string why;
+        if (!editable(&why)) return "error: " + why;
+        one->set(*value);
+        changed();
+        return std::format("{} = {:.6g}", one->key, one->get());
+    }
     if (v == "fold") {
         bool open{};
-        if (arg(0).empty() || arg(0).size() > 64 || !flag(arg(1), open)) return "error: usage: trainer fold <section or card> 0|1";
+        if (arg(0).empty() || arg(0).size() > 120 || !flag(arg(1), open)) return "error: usage: trainer fold <section or card> 0|1";
         s.folds[arg(0)] = open;
         s.save_due = true;
         s.view_due = true;
@@ -4190,6 +4275,19 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             }
         } catch (...) { return "error: the skater's context could not be read."; }
         return result;
+    }
+    if (v == "ctxw") {
+        // trainer ctxw <hex offset> <number>: write one float of the skater's context (diagnostic).
+        std::uintptr_t offset{};
+        const auto value = number(arg(1));
+        if (!value || std::from_chars(a[0].data(), a[0].data() + a[0].size(), offset, 16).ec != std::errc{} || offset > 0x4000) return "error: usage: trainer ctxw <hex offset> <number>";
+        try {
+            const auto context = client_source::detail::debug_noclip_bodies(s.base, s.client, s.entity).context;
+            if (!context) return "error: no skater.";
+            const auto real = static_cast<float>(*value);
+            __try_poke(context + offset, real);
+            return std::format("ctx+{:x} = {}", offset, real);
+        } catch (...) { return "error: the skater's context could not be read."; }
     }
     if (v == "scanf") {
         // trainer scanf <window hex> <number> ...: the first number is the anchor.
@@ -4425,6 +4523,13 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         if (const auto seconds = number(arg(0))) flip_land_window = std::clamp(static_cast<float>(*seconds), 0.0f, 2.0f);
         return std::format("A slowed flip returns to the game's speed {:.3f} s before the landing.", flip_land_window);
     }
+    if (v == "gravtest") {
+        // trainer gravtest <in the air on the board> [<on foot>]: the two levers apart, whatever the Gravity setting says
+        dev_air_gravity = static_cast<float>(number(arg(0)).value_or(0.0));
+        dev_foot_gravity = static_cast<float>(number(arg(1)).value_or(0.0));
+        return std::format("gravity test: board x{:.2f}, foot x{:.2f} (0: the setting's); {} steps held so far, foot in force x{:.2f}", dev_air_gravity, dev_foot_gravity,
+                           air_gravity_steps(), foot_gravity_in_force());
+    }
     if (v == "launches") return trajectory_calls();
     if (v == "launchdump") return trajectory_parameters();
     if (v == "launchpoke") {
@@ -4636,10 +4741,10 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         return result.empty() ? "No physics state seen yet." : "Physics states seen (id: ticks): " + result;
     }
     // <dev>
-    if (v == "levers") return std::format("Forced settings and held switches in force: {}. Lean stick on: {}.", holds_in_force(), [] {
+    if (v == "levers") return std::format("Forced settings and held switches in force: {}. Lean stick on: {}. Gravity on foot x{:.2f}, {} flight steps held.", holds_in_force(), [] {
         float raw[2]{};
         return DingoSDKOverlayGrindStickLeanRaw(raw);
-    }() ? "yes" : "no");
+    }() ? "yes" : "no", foot_gravity_in_force(), air_gravity_steps());
     if (v == "audit") {
         // The release audit, run on a solo level: stock is stock, everything that goes on comes off again, a saved
         // preset brings back exactly what was set, a section's reset stays in its section. One log line each.
