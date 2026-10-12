@@ -9,6 +9,10 @@
 #include <algorithm>
 #include <array>
 #include <initializer_list>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace dingosdk::overlay {
 using namespace menu;
@@ -128,6 +132,66 @@ void begin_card(SkateMenu& menu, const char* id, const char* title, const char* 
 void end_card() {
     ImGui::EndChild();
     ImGui::Dummy(ImVec2(0, px(8)));
+}
+namespace {
+struct Folds {
+    std::map<std::string, bool, std::less<>> open;
+    std::vector<std::pair<std::string, bool>> changed;
+};
+Folds& folds() {
+    static auto* value = new Folds;
+    return *value;
+}
+}
+bool fold_open(std::string_view id, bool fallback) {
+    const auto& open = folds().open;
+    const auto found = open.find(id);
+    return found == open.end() ? fallback : found->second;
+}
+void set_fold(std::string_view id, bool open) { folds().open[std::string(id)] = open; }
+bool take_fold_change(std::string& id, bool& open) {
+    auto& changed = folds().changed;
+    if (changed.empty()) return false;
+    id = std::move(changed.back().first);
+    open = changed.back().second;
+    changed.pop_back();
+    return true;
+}
+void fold_arrow(ImVec2 at, float row_height, bool open, ImU32 colour) {
+    const float r = ImGui::GetFontSize() * 0.26f;
+    const ImVec2 c(at.x + r + px(2), at.y + row_height * 0.5f);
+    auto* draw = ImGui::GetWindowDrawList();
+    if (open) draw->AddTriangleFilled(ImVec2(c.x - r, c.y - r * 0.7f), ImVec2(c.x + r, c.y - r * 0.7f), ImVec2(c.x, c.y + r * 0.8f), colour);
+    else draw->AddTriangleFilled(ImVec2(c.x - r * 0.7f, c.y - r), ImVec2(c.x - r * 0.7f, c.y + r), ImVec2(c.x + r * 0.8f, c.y), colour);
+}
+bool fold_card(SkateMenu& menu, const char* id, const char* title, const char* subtitle, bool open_by_default) {
+    begin_card(menu, id);
+    bool open = fold_open(id, open_by_default);
+    const auto at = ImGui::GetCursorScreenPos();
+    const float height = ImGui::GetFrameHeight(), width = ImGui::GetContentRegionAvail().x;
+    if (ImGui::InvisibleButton("##fold", ImVec2(width, height))) {
+        open = !open;
+        set_fold(id, open);
+        folds().changed.emplace_back(id, open);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::GetWindowDrawList()->AddRectFilled(at, ImVec2(at.x + width, at.y + height), skate_theme::tile_light);
+        ImGui::SetTooltip(open ? "Click to fold this card away." : "Click to open this card.");
+    }
+    fold_arrow(at, height, open, muted);
+    ImGui::SetCursorScreenPos(ImVec2(at.x + ImGui::GetFontSize() * 0.9f + px(4), at.y + (height - ImGui::GetFontSize()) * 0.5f));
+    ImGui::PushFont(menu.bold);
+    ImGui::TextUnformatted(title);
+    ImGui::PopFont();
+    if (subtitle) {
+        ImGui::SameLine(0, px(10));
+        ImGui::PushStyleColor(ImGuiCol_Text, muted);
+        ImGui::TextUnformatted(subtitle);
+        ImGui::PopStyleColor();
+    }
+    ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + height));
+    ImGui::Dummy(ImVec2(0, open ? px(4) : 0.0f));
+    return open;
 }
 void field(SkateMenu&, const char* label, const char* tooltip) {
     const float start = ImGui::GetCursorPosX();

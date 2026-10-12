@@ -8,6 +8,7 @@
 #include "Extension/Skater/client_source_spawn.h"
 #include <array>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -17,10 +18,32 @@ namespace dingosdk::trainer {
 // curve: a FloatCurve the asset points at; graph: a table of points stored in the asset
 // itself (X0..X15, Y0..Y15). Both are edited as one multiplier on their outputs.
 enum class Kind : std::uint8_t { real, integer, flag, curve, graph };
-// The Tune tab's two short lists: which of them a value is on (Row::modes).
-inline constexpr std::uint8_t mode_realistic = 1, mode_fun = 2;
-// On a short list although the game was not seen reading it: named for players to try out.
-inline constexpr std::uint8_t mode_trial = 4;
+// The sections of the Tune tab: which one shows a value, a dial or a setting of the trainer's own (0: none, the value is
+// only on EVERY VALUE).
+inline constexpr std::uint8_t topic_none = 0, topic_game = 1, topic_pop = 2, topic_speed = 3, topic_bails = 4, topic_grinds = 5, topic_trickline = 6,
+                              topic_transition = 7, topic_pumping = 8, topic_foot = 9, topic_count = 10;
+struct Topic {
+    std::string_view key;   // `trainer open <key>`, `trainer reset section <key>`, the fold's id
+    std::string_view title; // in the menu
+    std::string_view about;
+};
+inline constexpr std::array<Topic, topic_count> topics{{
+    {"everything", "EVERY VALUE", "The whole tuning table, group by group"},
+    {"game", "WHOLE GAME", "Play like Skate 3, Realistic: setups that reach across every section"},
+    {"pop", "POP AND TRICKS", "Ollie and trick heights, flip trick speed, body flips and spins"},
+    {"speed", "SPEED AND PUSHING", "Push speed, auto push, rolling, powerslides, getting on the board"},
+    {"bails", "BAILS AND LANDINGS", "What knocks you off, and how the legs take a landing"},
+    {"grinds", "GRINDS", "Grinds feel like, exits and transfers, pops off a grind, lock-on, friction"},
+    {"tricklining", "TRICKLINING", "Board bending, reverts, Dark Pop, manuals"},
+    {"transition", "TRANSITION", "Coping grinds, coming back in, handplants, lip tricks, vert airs"},
+    {"pumping", "PUMPING", "Speed without pushing"},
+    {"foot", "ON FOOT", "Jumping, sprinting, gliding and wallruns off the board"},
+}};
+constexpr std::uint8_t topic_named(std::string_view key) noexcept {
+    for (std::uint8_t i = 1; i < topic_count; ++i)
+        if (topics[i].key == key) return i;
+    return key == "trickline" ? topic_trickline : key == "tricks" ? topic_pop : topic_none;
+}
 
 // One editable value of Gameplay/SkatePhysicsTuning. `id` is the name the game's data gives
 // it ("PhysicsMode.JumpMaxHeight").
@@ -31,8 +54,9 @@ struct Row {
     bool touched{}, frozen{};
     bool detail{}; // a single point or bound of a graph: hidden unless asked for
     std::string friendly; // a plain name, for the handful of values on the Essentials list
-    int rank{};           // its place on that list, from 1; 0: not on it
-    std::uint8_t modes{}; // which short lists it is on (trainer_presets.h: mode_realistic, mode_fun)
+    int rank{};           // its place among the named values, from 1; 0: not named
+    std::uint8_t topic{}; // the section of the Tune tab it is on (topic_*)
+    bool trial{};         // shown there although the game was not seen reading it: named for players to try out
     bool used{};          // the game's code was found to read it
     std::string help;     // what the value does, in a sentence; empty for most
 };
@@ -44,7 +68,7 @@ struct PresetRow {
     bool dial{};
     std::string title;
     double factor{1}, amount{1};
-    std::uint8_t modes{}; // which of the short lists show it (mode_realistic, mode_fun)
+    std::uint8_t topic{}; // the section of the Tune tab that shows it (topic_*)
 };
 struct Marker {
     bool set{};
@@ -70,8 +94,13 @@ struct View {
     std::vector<std::string> groups;
     std::vector<PresetRow> presets;
     std::size_t touched{};
-    // Nothing the trainer does is in force: no changed value, lock, preset or trick slider.
+    // Nothing the trainer does is in force: no changed value and none of its own settings (tricks, grinds, transition,
+    // bending rules) off the game's own. No Bail, Noclip, Dark Pop and the game speed are ReSkate's: the menu adds those.
     bool stock{true};
+    std::size_t setups_changed{}, locks{};           // the trainer's own settings off stock; locked values
+    std::array<std::uint16_t, topic_count> changed{}; // what is changed in each section of the Tune tab ([0]: values on no section)
+    std::array<std::uint16_t, topic_count> settings{}; // of those, the trainer's own settings (not tuning values)
+    std::map<std::string, bool, std::less<>> folds;   // sections and cards the player opened or closed
     // Practice
     int slot{};
     std::array<Marker, marker_slots> markers{};
@@ -86,9 +115,7 @@ struct View {
     float manual_height{1}; // the pop out of a manual
     float grind_side{1};    // the sideways part of a pop out of a grind
     float grind_push{};     // Skate 3's pop: m/s sideways at full stick (0: none)
-    float grind_lean{};     // Skate 3's one stick: the left stick also leans on a grind, times this (0: off)
     float grind_range{}; // Skate 3's turn: the left stick turns the board on a grind up to this many degrees (0: off)
-    float grind_turn{}, grind_tip{}; // how fast the stick turns / tips the board on a grind (the game's multipliers); 0: the game's own
     std::array<std::int8_t, grind_settings.size()> grind_setting{}; // the game's own grind settings: -1 its own / 0 off / 1 on
     std::array<std::int8_t, grind_switches.size()> grind_mode{}, grind_live{}; // -1 the game's own / 0 off / 1 on; what each reads (-1: not found)
     // Transition skating: the trainer's own help (0 / false: off) and the game's own settings (-1 its own / 0 off / 1 on).
@@ -96,6 +123,9 @@ struct View {
     bool tr_spine{};
     std::array<std::int8_t, transition_settings.size()> tr_setting{};
     std::array<int, transition_options.size()> tr_option{}; // the game's own options, as the game holds them now
+    // What the player's own game settings hold for the settings the trainer can force (0 off / 1 on).
+    std::array<std::int8_t, grind_settings.size()> grind_own{};
+    std::array<std::int8_t, transition_settings.size()> tr_own{};
     float revert_boost{}; // strength of the speed given back on an auto revert; 0: off
     float pump_power{1};  // x what pumping a transition gains
     bool pump_live{};     // the game's pumping states are found: the pump power acts
@@ -109,10 +139,6 @@ struct View {
     std::array<float, flip_tricks.size()> flip_trick{}; // those, in the order of flip_tricks
     bool flip_advanced_blocked{};       // ticked, but this session's rules keep the game's own flips
     bool flip_live{};                   // the game's flip states are found: the speeds act
-    bool flip_gate_found{};   // the rule's number was found in memory (the switch can act)
-    bool flip_gate_blocked{}; // ticked, but this session's rules keep the game's own flips
-    bool catch_at{};          // flips are caught at a set part of the jump
-    float catch_percent{70};  // which part: percent of the air time
     // HUD
     bool hud{}, hud_jump{}, logging{};
     // The loaded map and what its author ships for the trainer (Mods/<mod>/trainer.json).

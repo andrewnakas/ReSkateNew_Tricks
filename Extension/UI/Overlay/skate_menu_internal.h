@@ -2,6 +2,7 @@
 #include "skate_menu.h"
 #include <initializer_list>
 #include <string>
+#include <string_view>
 
 namespace dingosdk::overlay::menu {
 // The menu chrome is laid out in pixels; px() applies the user's menu scale to
@@ -25,6 +26,18 @@ void category_tabs(SkateMenu& menu, int& selected, std::initializer_list<const c
 //   primary_button         a card's main action: blue, full width
 void begin_card(SkateMenu& menu, const char* id, const char* title = nullptr, const char* subtitle = nullptr);
 void end_card();
+// A card that folds: a click on its title row (or A on the controller) closes it down to that row and opens it again.
+// Returns whether the body is to be drawn; end_card() follows either way:
+//     if (fold_card(menu, "id", "TITLE")) { ... }
+//     end_card();
+// Which cards are open is kept by id for as long as the game runs. The owner of a page can seed it (set_fold) and
+// collect what the player changed (take_fold_changes) to keep it for longer.
+bool fold_card(SkateMenu& menu, const char* id, const char* title, const char* subtitle = nullptr, bool open_by_default = true);
+bool fold_open(std::string_view id, bool fallback);
+void set_fold(std::string_view id, bool open);
+bool take_fold_change(std::string& id, bool& open);
+// The little arrow of a fold, drawn at the cursor's row; `open` points down.
+void fold_arrow(ImVec2 at, float row_height, bool open, ImU32 colour);
 void field(SkateMenu& menu, const char* label, const char* tooltip = nullptr);
 void info(SkateMenu& menu, const char* label, const std::string& value);
 void note(const char* text);

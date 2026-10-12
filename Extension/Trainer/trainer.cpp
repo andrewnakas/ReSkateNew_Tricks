@@ -34,6 +34,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <numbers>
 #include <optional>
@@ -45,7 +46,6 @@ extern "C" std::uint64_t DingoSDKOverlayScriptControllerBlanked();
 // </dev>
 
 // Game thread only. See trainer.h for how the menu reaches this.
-extern "C" void DingoSDKOverlaySetGrindStickMirror(float amount) noexcept;
 extern "C" std::uint64_t DingoSDKOverlayGrindStickMirrored() noexcept;
 extern "C" void DingoSDKOverlaySetGrindStickTurn(bool on, float x, float y_add, float y_scale) noexcept;
 extern "C" void DingoSDKOverlayGrindStickSent(float *values) noexcept;
@@ -253,6 +253,7 @@ struct State {
     bool flip_pop{}; // a slowed flip trick pops higher, so it has the air time it needs
     bool flip_flick{}; // a slow flick of the stick turns the board as fast as a full one
     bool grind_watch{}; // the grind card is asking what the game's switches read (`trainer grind watch`)
+    std::map<std::string, bool, std::less<>> folds; // the menu's sections and cards the player has opened or closed
     std::array<float, flip_tricks.size()> flip_trick = [] {
         std::array<float, flip_tricks.size()> ones{};
         ones.fill(1.0f);
@@ -270,9 +271,6 @@ struct State {
     float flip_clamped_seen{-1}; // and what the impossible's own speed state read (-1: not found)
     bool flip_live{};
     std::uint32_t flip_trick_seen{}; // the last trick that turned (CurrentFlipTrick)
-    bool catch_at{};           // flips are caught at catch_percent of the jump's air time
-    float catch_percent{70};
-    float catch_seconds{flip_gate_stock}; // what that comes to for the jump in the air now, as seconds before landing
     bool offboard_grounded{}; // off the board and not moving up or down at the last tick
     const char *boost_name{""};
     // The no comply and the boneless are launched by the trick scripts too (trainer_jump.cpp).
@@ -280,16 +278,11 @@ struct State {
     float manual_height{1}; // the pop out of a manual
     float grind_side{1};    // the sideways part of a pop out of a grind or slide
     float grind_push{};     // Skate 3's pop: this many m/s sideways at full stick, the way the stick points (0: none)
-    // Skate 3's one stick on a grind: the left stick also leans (skate. leans with the right stick), times this (0: off).
-    float grind_lean{};
-    // How fast the stick turns / tips the board on a grind (the game's two control multipliers); 0: the game's own.
-    float grind_turn{}, grind_tip{};
     // Skate 3's turn on a grind: the left stick alone turns the board, up to this many degrees either way (0: off, the
     // game's own, which follows where the right stick points). Negative turns the other way.
     float grind_range{};
     float grind_yaw{};          // Skate 3's eased stick, -0.614..0.614
     float grind_heading{};      // what the game is answered with (radians)
-    std::uint32_t grind_heading_asked{};
     // The angle the game turns the right stick by before it steers the board (it reads the stick from the camera's side):
     // measured from what it was shown against what its GrindControlLR / UD then read.
     float grind_frame_cos{1}, grind_frame_sin{};
@@ -303,7 +296,6 @@ struct State {
     // sets most of them once and never again (measured 2026-10-11: released, a switch stayed where it was held), so
     // "the game's own" has to put this back.
     std::array<std::int8_t, grind_switches.size()> grind_stock = grind_mode;
-    std::uint32_t grind_multiplier_asked[2]{};
     // Transition skating (bowls, quarter pipes, vert): the trainer's own help, each 0 / false when off.
     float tr_lean{};         // 0..1: how hard the skater leans into the ramp on a coping grind
     float tr_carry{};        // 0..1: how much of the speed along the coping is kept rolling off it
@@ -320,6 +312,18 @@ struct State {
         return a;
     }();
     std::uint64_t tr_option_at{};
+    // What the player's own game settings hold for the settings the trainer can force (read with the options above):
+    // a row that is not forced shows this, not the game's default.
+    std::array<std::int8_t, grind_settings.size()> grind_own = [] {
+        std::array<std::int8_t, grind_settings.size()> a{};
+        for (std::size_t i = 0; i < a.size(); ++i) a[i] = grind_settings[i].stock;
+        return a;
+    }();
+    std::array<std::int8_t, transition_settings.size()> tr_own = [] {
+        std::array<std::int8_t, transition_settings.size()> a{};
+        for (std::size_t i = 0; i < a.size(); ++i) a[i] = transition_settings[i].stock;
+        return a;
+    }();
     std::array<std::int8_t, transition_settings.size()> tr_setting = [] { std::array<std::int8_t, transition_settings.size()> a{}; a.fill(-1); return a; }();
     // What the trainer knows of the transition the skater is on, from one tick to the next.
     struct TransitionTrack {
@@ -508,10 +512,8 @@ void load_store() {
             s.manual_height = std::clamp(o.value("manual_height", 1.0f), height_low, height_high);
             s.grind_side = std::clamp(o.value("grind_side", 1.0f), 0.0f, 1000.0f);
             s.grind_push = std::clamp(o.value("grind_push", 0.0f), -50.0f, 50.0f);
-            s.grind_lean = std::clamp(o.value("grind_lean", 0.0f), -1.0f, 1.0f);
-            s.grind_turn = std::clamp(o.value("grind_turn", 0.0f), 0.0f, 1000.0f);
+            // (grind_lean, grind_turn and grind_tip were levers of earlier builds that did nothing: read past.)
             s.grind_range = std::clamp(o.value("grind_range", 0.0f), -360.0f, 360.0f);
-            s.grind_tip = std::clamp(o.value("grind_tip", 0.0f), 0.0f, 1000.0f);
             for (std::size_t i = 0; i < grind_settings.size(); ++i)
                 s.grind_setting[i] = static_cast<std::int8_t>(std::clamp(o.value("grind.set." + std::string(grind_settings[i].key), -1), -1, 1));
             for (std::size_t i = 0; i < grind_switches.size(); ++i)
@@ -533,13 +535,14 @@ void load_store() {
             s.flip_flick = o.value("flip_flick", false);
             for (std::size_t i = 0; i < flip_tricks.size(); ++i)
                 s.flip_trick[i] = std::clamp(o.value(std::string(flip_tricks[i].key), 1.0f), flip_low, flip_high);
-            s.catch_at = false; // "Catch flips at a set point of the jump" was removed in 0.5.0
-            s.catch_percent = std::clamp(o.value("catch_percent", 70.0f), catch_low, catch_high);
             s.boneless_height = std::clamp(o.value("boneless_height", 1.0f), height_low, height_high);
             s.revert_boost = std::clamp(o.value("revert_boost", 0.0f), 0.0f, revert_boost_high);
             s.pump_power = std::clamp(o.value("pump_power", 1.0f), 0.0f, pump_high);
             s.slot = std::clamp(o.value("slot", 0), 0, static_cast<int>(marker_slots) - 1);
         }
+        if (json->contains("folds") && json->at("folds").is_object())
+            for (const auto &[id, open] : json->at("folds").items())
+                if (open.is_boolean() && id.size() <= 64) s.folds[id] = open.get<bool>();
         if (json->contains("values") && json->at("values").is_object())
             for (const auto &[key, row] : json->at("values").items())
                 if (row.is_object() && row.contains("value") && row.at("value").is_number())
@@ -595,10 +598,7 @@ void save_store() {
         options["manual_height"] = s.manual_height;
         options["grind_side"] = s.grind_side;
         options["grind_push"] = s.grind_push;
-        options["grind_lean"] = s.grind_lean;
-        options["grind_turn"] = s.grind_turn;
         options["grind_range"] = s.grind_range;
-        options["grind_tip"] = s.grind_tip;
         for (std::size_t i = 0; i < grind_settings.size(); ++i)
             if (s.grind_setting[i] >= 0) options["grind.set." + std::string(grind_settings[i].key)] = static_cast<int>(s.grind_setting[i]);
         for (std::size_t i = 0; i < grind_switches.size(); ++i)
@@ -619,13 +619,14 @@ void save_store() {
         options["flip_flick"] = s.flip_flick;
         for (std::size_t i = 0; i < flip_tricks.size(); ++i)
             if (s.flip_trick[i] != 1.0f) options[std::string(flip_tricks[i].key)] = s.flip_trick[i];
-        options["catch_at"] = s.catch_at;
-        options["catch_percent"] = s.catch_percent;
         options["boneless_height"] = s.boneless_height;
         options["revert_boost"] = s.revert_boost;
         options["pump_power"] = s.pump_power;
         options["slot"] = s.slot;
         json["options"] = std::move(options);
+        Json folds = Json::object();
+        for (const auto &[id, open] : s.folds) folds[id] = open;
+        json["folds"] = std::move(folds);
         Json values = Json::object();
         // Values of fields this build's tuning does not have are kept as they were read.
         for (const auto &[key, saved] : s.saved) {
@@ -969,15 +970,12 @@ float own_cruise() {
 // session that has turned boosts off.
 // A session where the player's own trick extras do not count: its host sets the physics, or has turned boosts off.
 bool extras_blocked() { return state().enforced || (multiplayer_session_active() && !session_boosts_allowed()); }
-// With the catch set by the air time, the flip itself has to be slow enough for that limit to be
-// what ends it (the game's own flip is over in a third of a second).
-constexpr float catch_flip_speed = 0.25f;
 Boosts boosts_in_force() {
     auto &s = state();
     if (s.enforced)
         return {s.host.flip_speed, s.host.hippy_height, s.host.nocomply_height, s.host.boneless_height, s.host.offboard_height, s.host.cruise};
     if (multiplayer_session_active() && !session_boosts_allowed()) return {};
-    return {s.catch_at ? std::min(s.flip_speed, catch_flip_speed) : s.flip_speed, s.hippy_height, s.nocomply_height, s.boneless_height, s.offboard_height, own_cruise()};
+    return {s.flip_speed, s.hippy_height, s.nocomply_height, s.boneless_height, s.offboard_height, own_cruise()};
 }
 // The player's own, for a session they host to share with its guests.
 void publish_extras() {
@@ -1147,23 +1145,6 @@ std::string apply_dial(std::string_view name, double factor) {
     changed();
     return std::format("{} x{:.2f}: {} values set{}.", presets[p].name, factor, count, locked ? std::format("; {} locked values left alone", locked) : "");
 }
-// A preset of the player's own also carries the trick sliders that are off 1, under these keys.
-constexpr std::string_view trick_prefix = "trick.";
-constexpr std::string_view trick_sliders[]{"flip_speed", "hippy_height", "nocomply_height", "boneless_height", "offboard_height", "revert_boost", "pump_power", "manual_height"};
-// Those and the speed of each flip trick.
-constexpr auto trick_names = [] {
-    std::array<std::string_view, std::size(trick_sliders) + flip_tricks.size()> names{};
-    std::size_t at{};
-    for (const auto name : trick_sliders) names[at++] = name;
-    for (const auto &trick : flip_tricks) names[at++] = trick.key;
-    return names;
-}();
-constexpr std::string_view flip_gate_name = "flip_gate", catch_at_name = "catch_at", catch_percent_name = "catch_percent", flip_advanced_name = "flip_advanced";
-bool trick_switch(std::string_view name) { return name == flip_gate_name || name == catch_at_name || name == catch_percent_name || name == flip_advanced_name; }
-// What a trick slider or switch is when the game is left alone: the multipliers 1, the revert boost and the switches off.
-constexpr float trick_stock(std::string_view name) {
-    return name == "revert_boost" || name == catch_at_name || name == flip_advanced_name ? 0.0f : name == catch_percent_name ? 70.0f : 1.0f;
-}
 float *trick_option(std::string_view name) {
     auto &s = state();
     for (std::size_t i = 0; i < flip_tricks.size(); ++i)
@@ -1172,22 +1153,106 @@ float *trick_option(std::string_view name) {
          : name == "boneless_height" ? &s.boneless_height : name == "offboard_height" ? &s.offboard_height
          : name == "revert_boost" ? &s.revert_boost : name == "pump_power" ? &s.pump_power : name == "manual_height" ? &s.manual_height : nullptr;
 }
-// Sets a trick slider named by a preset key; false when the key is not one.
-bool set_trick_key(std::string_view key, double value) {
-    if (!key.starts_with(trick_prefix)) return false;
-    const auto name = key.substr(trick_prefix.size());
-    // (flip_gate, a switch of earlier versions, still comes in old presets: a slow flip stays slow by itself now.)
-    // (catch_at, a switch of earlier versions, still comes in old presets and is ignored.)
-    if (name == flip_advanced_name) state().flip_advanced = value != 0;
-    if (name == catch_percent_name) state().catch_percent = std::clamp(static_cast<float>(value), catch_low, catch_high);
-    if (auto *option = trick_option(name))
-        *option = name == "flip_speed" || name.starts_with("flip.") ? std::clamp(static_cast<float>(value), flip_low, flip_high)
-                : name == "revert_boost" ? std::clamp(static_cast<float>(value), 0.0f, revert_boost_high)
-                : name == "pump_power" ? std::clamp(static_cast<float>(value), 0.0f, pump_high)
-                : std::clamp(static_cast<float>(value), height_low, height_high);
+// Everything of the trainer's that changes how the game plays and is not a tuning value: one number each, under the
+// key a preset carries it by. The STOCK badge, every reset and the player's presets all go through this list, so a new
+// option cannot be counted by one of them and missed by another.
+struct Setup {
+    std::string key;
+    std::uint8_t topic{}; // the section of the Tune tab that shows it (trainer.h: topic_*)
+    double stock{};
+    std::function<double()> get;
+    std::function<void(double)> set;
+    std::function<bool()> in_force; // empty: always. Off stock but not in force (a trick's own speed with Advanced unticked) is not "modified".
+};
+const std::vector<Setup> &setups() {
+    static const auto *list = [] {
+        auto *all = new std::vector<Setup>;
+        auto &s = state();
+        const auto real = [&](std::string key, std::uint8_t topic, float *value, float stock, float low, float high) {
+            all->push_back({std::move(key), topic, stock, [value] { return static_cast<double>(*value); },
+                            [value, low, high](double v) { *value = std::isfinite(v) ? std::clamp(static_cast<float>(v), low, high) : *value; }, {}});
+        };
+        const auto toggle = [&](std::string key, std::uint8_t topic, bool *value) {
+            all->push_back({std::move(key), topic, 0.0, [value] { return *value ? 1.0 : 0.0; }, [value](double v) { *value = v != 0; }, {}});
+        };
+        const auto mode = [&](std::string key, std::uint8_t topic, std::int8_t *value) {
+            all->push_back({std::move(key), topic, -1.0, [value] { return static_cast<double>(*value); },
+                            [value](double v) { *value = static_cast<std::int8_t>(v < 0 ? -1 : v != 0 ? 1 : 0); }, {}});
+        };
+        real("trick.flip_speed", topic_pop, &s.flip_speed, 1.0f, flip_low, flip_high);
+        real("trick.manual_height", topic_pop, &s.manual_height, 1.0f, height_low, height_high);
+        real("trick.nocomply_height", topic_pop, &s.nocomply_height, 1.0f, height_low, height_high);
+        real("trick.boneless_height", topic_pop, &s.boneless_height, 1.0f, height_low, height_high);
+        real("trick.hippy_height", topic_pop, &s.hippy_height, 1.0f, height_low, height_high);
+        real("trick.offboard_height", topic_foot, &s.offboard_height, 1.0f, height_low, height_high);
+        real("trick.pump_power", topic_pumping, &s.pump_power, 1.0f, 0.0f, pump_high);
+        real("trick.revert_boost", topic_trickline, &s.revert_boost, 0.0f, 0.0f, revert_boost_high);
+        toggle("trick.flip_advanced", topic_pop, &s.flip_advanced);
+        toggle("trick.flip_pop", topic_pop, &s.flip_pop);
+        toggle("trick.flip_flick", topic_pop, &s.flip_flick);
+        for (std::size_t i = 0; i < flip_tricks.size(); ++i) {
+            real("trick." + std::string(flip_tricks[i].key), topic_pop, &s.flip_trick[i], 1.0f, flip_low, flip_high);
+            all->back().in_force = [&s] { return s.flip_advanced; };
+        }
+        real("grind.side", topic_grinds, &s.grind_side, 1.0f, 0.0f, 1000.0f);
+        real("grind.push", topic_grinds, &s.grind_push, 0.0f, -50.0f, 50.0f);
+        real("grind.range", topic_grinds, &s.grind_range, 0.0f, -360.0f, 360.0f);
+        for (std::size_t i = 0; i < grind_settings.size(); ++i) mode("grind.set." + std::string(grind_settings[i].key), topic_grinds, &s.grind_setting[i]);
+        for (std::size_t i = 0; i < grind_switches.size(); ++i)
+            if (!grind_switches[i].read_only) mode("grind.hold." + std::string(grind_switches[i].key), topic_grinds, &s.grind_mode[i]);
+        real("transition.lean", topic_transition, &s.tr_lean, 0.0f, -1.0f, 1.0f);
+        real("transition.carry", topic_transition, &s.tr_carry, 0.0f, 0.0f, 1.0f);
+        real("transition.drop", topic_transition, &s.tr_drop, 1.0f, 0.0f, 100.0f);
+        all->back().in_force = [&s] { return s.tr_carry != 0.0f; }; // the limit on what the row above keeps
+        real("transition.unstick", topic_transition, &s.tr_unstick, 0.0f, 0.0f, 100.0f);
+        real("transition.lockout", topic_transition, &s.tr_lockout, 0.0f, 0.0f, 60.0f);
+        real("transition.plant", topic_transition, &s.tr_plant, 0.0f, 0.0f, 1.0f);
+        toggle("transition.spine", topic_transition, &s.tr_spine);
+        for (std::size_t i = 0; i < transition_settings.size(); ++i)
+            mode("transition.set." + std::string(transition_settings[i].key), transition_settings[i].card == transition_card_pump ? topic_pumping : topic_transition,
+                 &s.tr_setting[i]);
+        for (const auto &field : revert_fields) {
+            const auto member = field.member;
+            const float low = field.low, high = field.high;
+            all->push_back({"revert." + std::string(field.name), topic_trickline, static_cast<double>(RevertTuning{}.*member),
+                            [&s, member] { return static_cast<double>(s.revert.*member); },
+                            [&s, member, low, high](double v) { if (std::isfinite(v)) s.revert.*member = std::clamp(static_cast<float>(v), low, high); }, {}});
+        }
+        return all;
+    }();
+    return *list;
+}
+const Setup *find_setup(std::string_view key) {
+    for (const auto &one : setups())
+        if (one.key == key) return &one;
+    return nullptr;
+}
+bool off_stock(const Setup &one) { return one.get() != one.stock; }
+bool modified(const Setup &one) { return off_stock(one) && (!one.in_force || one.in_force()); }
+// Puts back everything on that list (`topic` 0), or what one section of the Tune tab shows.
+std::size_t reset_setups(std::uint8_t topic = 0) {
+    std::size_t count{};
+    for (const auto &one : setups())
+        if ((!topic || one.topic == topic) && off_stock(one)) {
+            one.set(one.stock);
+            ++count;
+        }
+    return count;
+}
+// Sets one of the setups named by a preset key; false when the key is not one (it is a tuning value's, then).
+// (trick.flip_gate, trick.catch_at and trick.catch_percent come in presets of earlier versions and are read past.)
+bool set_setup_key(std::string_view key, double value) {
+    if (key == "trick.flip_gate" || key == "trick.catch_at" || key == "trick.catch_percent") return true;
+    const auto *one = find_setup(key);
+    if (!one) return false;
+    one->set(value);
     return true;
 }
-std::string remove_preset(std::string_view name) {
+// Whether a built-in preset is on: the values say so, whatever switched them (a slider, a dial or another preset).
+bool builtin_on(std::size_t p);
+// `matching`: only the values that still hold what the built-in preset set go back (a feel taken off must not wipe a
+// value the player has since set themselves).
+std::string remove_preset(std::string_view name, bool matching = false) {
     auto &s = state();
     const auto wanted = lower(name);
     std::size_t count{};
@@ -1209,8 +1274,8 @@ std::string remove_preset(std::string_view name) {
     for (const auto &[user_name, values] : s.user) {
         if (lower(user_name) != wanted) continue;
         for (const auto &saved : values) {
-            if (saved.first.starts_with(trick_prefix)) {
-                (void)set_trick_key(saved.first, trick_stock(std::string_view(saved.first).substr(trick_prefix.size())));
+            if (const auto *one = find_setup(saved.first)) {
+                one->set(one->stock);
                 ++count;
             }
             else if (auto *e = find_entry(saved.first)) put_back(*e);
@@ -1225,6 +1290,7 @@ std::string remove_preset(std::string_view name) {
                 for (auto &e : s.entries) {
                     const bool scale = e.kind == Kind::curve || e.kind == Kind::graph;
                     if (!rule_matches(e, scale, rule)) continue;
+                    if (matching && std::abs(e.value - sane(e, rule.multiply ? e.stock * rule.amount : rule.amount)) > 1e-6 * std::max(1.0, std::abs(e.value))) continue;
                     put_back(e);
                 }
             removed = preset.name;
@@ -1269,7 +1335,7 @@ std::string apply_preset(std::string_view name) {
         for (const auto &[user_name, values] : s.user) {
             if (lower(user_name) != wanted) continue;
             for (const auto &[key, value] : values) {
-                if (set_trick_key(key, value)) ++count;
+                if (set_setup_key(key, value)) ++count;
                 else if (auto *e = find_entry(key); e && !is_locked(*e)) { set_entry(*e, value); ++count; }
             }
             applied = user_name;
@@ -1555,9 +1621,6 @@ void drive_dev_body_flip(std::uintptr_t base) {
 // grind pop reads it raw (its PhysGrindStabilityNudge is left stick X). The game state of the same name in skate.
 // (Float.Intent.GrindStabilityNudge) read 0 at every pop in the playtest of 2026-10-11, so the controller is asked.
 bool left_stick_raw(float &x, float &y) noexcept;
-// "Grinds like Skate 3" starts the board's turn speed here (the game's own is 0.2, its legacy grinds use 8): a first
-// setting, to be dialled against Skate 3's own turn (about 24 degrees, eased over a fifth of a second).
-constexpr float skate3_grind_turn = 1.0f;
 // And how far the left stick turns the board at its end. Skate 3's own code reads as about 24 degrees; the owner
 // remembers turning all the way to the next grind, so the preset starts at a quarter turn.
 constexpr float skate3_grind_range = 90.0f;
@@ -1817,8 +1880,6 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
         m.takeoff_stamp = m.stamp;
         m.apex = std::max(m.position[1], position[1]);
     }
-    // On the ground the limit is the game's own: the number left by the last flight means nothing for the next.
-    if (!m.airborne) state().catch_seconds = flip_gate_stock;
     {
         // Seconds until the skater is back at the height they left from, by the flight's own arc.
         float to_landing = 1e9f;
@@ -1834,23 +1895,6 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     if (m.airborne) {
         m.apex = std::max(m.apex, position[1]);
         t.air_time = static_cast<float>(clock_seconds(stamp - m.takeoff_stamp));
-        if (auto &own = state(); own.catch_at && flying) {
-            // The whole flight, guessed from where the skater is and how fast they rise: the time
-            // so far plus the time back down to the height they left from. Right over flat ground,
-            // short over a drop. The game has a flip round `seconds` before the landing it
-            // predicts, so the catch falls at the asked part of the flight.
-            // The flight's own gravity (the trajectory object holds 0, -9.8, 0); the tuning value named for it does nothing.
-            const float g = 9.8f;
-            const float rise = velocity[1], above = std::max(0.0f, position[1] - m.takeoff[1]);
-            const float whole = t.air_time + (rise + std::sqrt(rise * rise + 2 * g * above)) / g;
-            // A catch asked for earlier than a board can come round (a flick late in a short
-            // jump) would make the limit negative, which the game reads as no limit at all and
-            // the flip crawls (measured at 10%: big pops turned at 450 deg/s to the ground). Such a
-            // flip is asked to come round as fast as the game turns one, about a fifth of a second.
-            constexpr float fastest_flip = 0.2f;
-            if (whole > 0.05f && whole < 60.0f)
-                own.catch_seconds = std::min((1 - own.catch_percent / 100) * whole, whole - t.air_time - fastest_flip);
-        }
         t.height = m.apex - m.takeoff[1];
         if (!flying)
             finish_jump(position, std::sqrt(m.velocity[0] * m.velocity[0] + m.velocity[1] * m.velocity[1] + m.velocity[2] * m.velocity[2]),
@@ -2586,7 +2630,7 @@ void hold_air_grinds(bool off) {
     bool wrote = false;
     for (const auto key : air_grind_values) {
         const auto *e = find_entry(key);
-        if (!e || e->class_field >= 0 || e->kind != Kind::real || static_cast<std::size_t>(e->offset) + e->size > s.want.image.size()) continue;
+        if (!e || e->frozen || e->class_field >= 0 || e->kind != Kind::real || static_cast<std::size_t>(e->offset) + e->size > s.want.image.size()) continue;
         const double wanted = off ? 0.0 : e->touched ? e->value : e->stock;
         if (read_field(s.want.image, *e) == static_cast<double>(static_cast<float>(wanted))) continue;
         write_field(s.want.image, *e, wanted);
@@ -2612,6 +2656,16 @@ void drive_transition(std::uintptr_t base, std::uintptr_t client, std::uint64_t 
                 s.view_due = true;
             }
         }
+        const auto own = [&](std::string_view setting, bool stock, std::int8_t &shown) {
+            const auto held = profile_runtime::local_game_option(setting);
+            const auto value = static_cast<std::int8_t>(held ? *held != 0 : stock);
+            if (value != shown) {
+                shown = value;
+                s.view_due = true;
+            }
+        };
+        for (std::size_t i = 0; i < grind_settings.size(); ++i) own(grind_settings[i].setting, grind_settings[i].stock, s.grind_own[i]);
+        for (std::size_t i = 0; i < transition_settings.size(); ++i) own(transition_settings[i].setting, transition_settings[i].stock, s.tr_own[i]);
     }
     const auto watch = watched_physics_state();
     const std::uint32_t physics = watch.valid && s.telemetry.skater && m.valid ? watch.state : 0;
@@ -2678,6 +2732,7 @@ void drive_transition(std::uintptr_t base, std::uintptr_t client, std::uint64_t 
     const float along_speed = std::abs(v[0] * t.edge[0] + v[2] * t.edge[1]);
     const float lean_wanted = t.coping && !blocked ? s.tr_lean * 0.8f * std::clamp((along_speed - 1.0f) / 4.0f, 0.0f, 1.0f) : 0.0f;
     t.lean += (lean_wanted - t.lean) * 0.15f;
+    if (blocked) t.lean = 0.0f;
     float lean_x = 0, lean_y = 0;
     bool leaning = false;
     if (t.coping && std::abs(t.lean) > 0.02f) {
@@ -2756,6 +2811,26 @@ void drive_transition(std::uintptr_t base, std::uintptr_t client, std::uint64_t 
     t.grinding = grinding;
     t.flying = flying;
 }
+bool builtin_on(std::size_t p) {
+    auto &s = state();
+    const auto &preset = builtin_presets()[p];
+    bool any = false;
+    for (const auto &[index, r] : preset_targets()[p]) {
+        const auto &e = s.entries[index];
+        const auto &rule = preset.rules[r];
+        const double expected = rule.multiply ? e.stock * rule.amount : rule.amount;
+        any = true;
+        // To the two decimals a dial shows: dragging one to the preset's number switches it on.
+        if (std::abs(e.value - sane(e, expected)) > 4e-3 * std::max(1e-3, std::abs(expected))) return false;
+    }
+    return any;
+}
+bool builtin_on(std::string_view name) {
+    const auto &presets = builtin_presets();
+    for (std::size_t p = 0; p < presets.size(); ++p)
+        if (presets[p].name == name) return builtin_on(p);
+    return false;
+}
 void build_view() {
     auto &s = state();
     s.view_due = false;
@@ -2779,12 +2854,17 @@ void build_view() {
     next->rows.reserve(s.entries.size());
     for (const auto &e : s.entries) {
         int rank{};
-        std::uint8_t modes{};
-        const auto friendly = essential_name(e.key, &rank, &modes);
-        next->rows.push_back({e.id, e.label, e.group, e.kind, e.value, e.stock, e.touched, e.frozen, e.detail, std::string(friendly), rank, modes,
-                              e.used});
+        std::uint8_t topic{};
+        bool trial{};
+        const auto friendly = essential_name(e.key, &rank, &topic, &trial);
+        next->rows.push_back({e.id, e.label, e.group, e.kind, e.value, e.stock, e.touched, e.frozen, e.detail, std::string(friendly), rank, topic,
+                              trial, e.used});
         next->rows.back().help = essential_help(e.key);
-        if (e.touched) ++next->touched;
+        if (e.touched) {
+            ++next->touched;
+            ++next->changed[topic];
+        }
+        if (e.frozen) ++next->locks;
         if (std::ranges::find(next->groups, e.group) == next->groups.end()) next->groups.push_back(e.group);
     }
     const auto is_active = [&](std::string_view name) { return std::ranges::find(s.active, name) != s.active.end(); };
@@ -2797,21 +2877,13 @@ void build_view() {
         for (std::size_t p = 0; p < presets.size(); ++p) {
             const auto &preset = presets[p];
             PresetRow row{std::string(preset.name), std::string(preset.note), true, false};
-            bool any = false, on = true;
             const Entry *headline{};
-            for (const auto &[index, r] : targets[p]) {
-                const auto &e = s.entries[index];
-                const auto &rule = preset.rules[r];
-                if (!headline && r == 0) headline = &e;
-                const double expected = rule.multiply ? e.stock * rule.amount : rule.amount;
-                any = true;
-                // To the two decimals a dial shows: dragging one to the preset's number switches it on.
-                if (std::abs(e.value - sane(e, expected)) > 4e-3 * std::max(1e-3, std::abs(expected))) on = false;
-            }
-            row.active = any && on;
+            for (const auto &[index, r] : targets[p])
+                if (!headline && r == 0) headline = &s.entries[index];
+            row.active = builtin_on(p);
             const auto dial = preset_dial(preset.name);
             row.title = std::string(dial.title);
-            row.modes = dial.modes;
+            row.topic = dial.topic;
             if (!preset.rules.empty() && preset.rules[0].multiply && headline && headline->stock != 0 && !dial.title.empty()) {
                 row.dial = true;
                 row.amount = preset.rules[0].amount;
@@ -2828,10 +2900,7 @@ void build_view() {
     next->manual_height = s.manual_height;
     next->grind_side = s.grind_side;
     next->grind_push = s.grind_push;
-    next->grind_lean = s.grind_lean;
-    next->grind_turn = s.grind_turn;
     next->grind_range = s.grind_range;
-    next->grind_tip = s.grind_tip;
     next->grind_mode = s.grind_mode;
     next->grind_setting = s.grind_setting;
     next->grind_live = s.grind_live;
@@ -2843,6 +2912,8 @@ void build_view() {
     next->tr_spine = s.tr_spine;
     next->tr_plant = s.tr_plant;
     next->tr_setting = s.tr_setting;
+    next->grind_own = s.grind_own;
+    next->tr_own = s.tr_own;
     next->tr_option = s.tr_option;
     next->offboard_height = s.offboard_height;
     next->flip_speed = s.flip_speed;
@@ -2852,10 +2923,6 @@ void build_view() {
     next->flip_trick = s.flip_trick;
     next->flip_advanced_blocked = s.flip_advanced && extras_blocked();
     next->flip_live = s.flip_live;
-    next->flip_gate_found = flip_gates() != 0;
-    next->flip_gate_blocked = s.catch_at && extras_blocked();
-    next->catch_at = s.catch_at;
-    next->catch_percent = s.catch_percent;
     next->boneless_height = s.boneless_height;
     next->revert_boost = s.revert_boost;
     next->pump_power = s.pump_power;
@@ -2875,11 +2942,15 @@ void build_view() {
     next->waypoint_set = s.waypoint.has_value();
     if (s.waypoint) next->waypoint = *s.waypoint;
     next->open_serial = s.open_serial;
-    next->stock = s.revert == RevertTuning{} && !next->touched && s.active.empty() && std::ranges::none_of(s.entries, &Entry::frozen) &&
-                  std::ranges::all_of(trick_names, [](std::string_view name) { return *trick_option(name) == trick_stock(name); }) && !s.catch_at && !s.flip_advanced &&
-                  !s.flip_pop && !s.flip_flick && s.grind_side == 1.0f && s.grind_push == 0.0f && s.grind_lean == 0.0f && s.grind_turn == 0.0f && s.grind_tip == 0.0f && s.grind_range == 0.0f &&
-                  std::ranges::all_of(s.grind_mode, [](std::int8_t mode) { return mode < 0; }) &&
-                  std::ranges::all_of(s.grind_setting, [](std::int8_t mode) { return mode < 0; }) && transition_stock();
+    for (const auto &one : setups())
+        if (modified(one)) {
+            ++next->changed[one.topic];
+            ++next->settings[one.topic];
+            ++next->setups_changed;
+        }
+    // Nothing of the trainer's is in force. (A lock on a value that is the game's own changes nothing: counted apart.)
+    next->stock = !next->touched && !next->setups_changed;
+    next->folds = s.folds;
     next->share_text = s.share_text;
     next->share_serial = s.share_serial;
     next->open_tab = s.open_tab;
@@ -2934,13 +3005,8 @@ std::string export_preset(const std::string &name) {
     if (lower(name) == "current") {
         for (const auto &e : s.entries)
             if (e.touched) values[e.key] = e.value;
-        for (const auto trick : trick_names)
-            if (const auto *option = trick_option(trick); *option != trick_stock(trick)) values[std::string(trick_prefix) + std::string(trick)] = *option;
-        if (s.flip_advanced) values[std::string(trick_prefix) + std::string(flip_advanced_name)] = 1;
-        if (s.catch_at) {
-            values[std::string(trick_prefix) + std::string(catch_at_name)] = 1;
-            values[std::string(trick_prefix) + std::string(catch_percent_name)] = s.catch_percent;
-        }
+        for (const auto &one : setups())
+            if (off_stock(one)) values[one.key] = one.get();
         title = "My setup";
     } else {
         for (const auto &[user_name, saved] : s.user)
@@ -2998,9 +3064,8 @@ std::string import_preset(const std::string &file_name) {
         for (const auto &[key, value] : json.at("values").items()) {
             if (!value.is_number() || values.size() >= 512) continue;
             const auto id = lower(key);
-            const bool trick = id.starts_with(trick_prefix) && (trick_option(std::string_view(id).substr(trick_prefix.size())) ||
-                                                                trick_switch(std::string_view(id).substr(trick_prefix.size())));
-            if (!trick && !find_entry(id)) ++unknown; // kept: another build of the game may have it
+            const bool setting = find_setup(id) || id == "trick.flip_gate" || id == "trick.catch_at" || id == "trick.catch_percent";
+            if (!setting && !find_entry(id)) ++unknown; // kept: another build of the game may have it
             values[id] = value.get<double>();
         }
         if (values.empty()) return "error: that preset holds no values.";
@@ -3101,7 +3166,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         // A flip asked to be slow is slow from the start: the game's rule would hurry it round before
         // the landing, so it is held off for as long as the speed in force is under the game's own.
         const bool slow = (s.flip_drive.active ? s.flip_drive.factor : s.boosts.flip) < 1.0f;
-        want_flip_gate(extras_blocked() ? flip_gate_stock : s.catch_at ? s.catch_seconds : slow ? flip_gate_off : flip_gate_stock);
+        want_flip_gate(extras_blocked() || !slow ? flip_gate_stock : flip_gate_off);
         if (s.boosts.flip != s.flip_applied) {
             // The catch times follow the flip speed (want_class).
             s.flip_applied = s.boosts.flip;
@@ -3118,6 +3183,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             if (entity) s.class_entity = entity;
             // A respawn can keep the entity and still fill new copies (the push speeds' native
             // one among them): the old ones go on holding what was written, so nothing looks lost.
+            if (skater_creations() != s.class_creations) s.grind_stock.fill(-1); // a new skater starts from the game's own switches
             if (const auto creations = skater_creations(); creations != s.class_creations) {
                 new_skater = new_skater || s.class_creations != 0;
                 s.class_creations = creations;
@@ -3170,8 +3236,6 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             const bool on_grind = watch.valid && watch.state >= 400 && watch.state < 500;
             // The controller is only asked while it matters: on a grind, with the stick push in use or being logged.
             const float stick = on_grind && (s.grind_push != 0.0f || s.hud_jump || s.logging) ? left_stick_x() : 0.0f;
-            // One stick on a grind: only while the skater is on one, and never where the session's rules apply.
-            DingoSDKOverlaySetGrindStickMirror(on_grind && !extras_blocked() ? s.grind_lean : 0.0f);
             // <dev>
             // What the stick does to the board on a grind, six times a second: for matching Skate 3's response.
             // Thirty times a second while the stick is held: the turn's speed is read off these lines.
@@ -3218,13 +3282,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             searching = dev_capture; // the capture reads the off-board flip states
             // </dev>
             const bool grind_held = std::ranges::any_of(s.grind_mode, [](std::int8_t mode) { return mode >= 0; });
+            keep_holds_alive();
             for (std::size_t i = 0; i < grind_settings.size(); ++i) force_grind_setting(i, extras_blocked() ? -1 : s.grind_setting[i]);
-            states_in_use(s.pump_power != 1.0f || s.manual_height != 1.0f || grind_held || s.grind_watch || s.grind_push != 0.0f || s.grind_turn > 0.0f || s.grind_tip > 0.0f || s.grind_range != 0.0f || measure || searching);
+            states_in_use(s.pump_power != 1.0f || s.manual_height != 1.0f || grind_held || s.grind_watch || s.grind_push != 0.0f || s.grind_range != 0.0f || measure || searching);
             {
                 const auto watch = watched_physics_state();
                 const bool grinding = watch.valid && watch.state >= 400 && watch.state < 500;
-                hold_grind_multipliers(base, static_cast<std::uintptr_t>(s.entity), extras_blocked() ? 0.0f : s.grind_turn, extras_blocked() ? 0.0f : s.grind_tip,
-                                       grinding, s.grind_multiplier_asked);
                 // Skate 3's turn (retail sub_82D89F58): nothing inside a quarter of the stick, the rest stretched, x 0.85,
                 // cubed, eased 0.91 / 0.09 a sixtieth of a second; the end of the stick is `grind_range` degrees.
                 const bool turning = grinding && s.grind_range != 0.0f && !extras_blocked();
@@ -3263,17 +3326,20 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
                     DingoSDKOverlaySetGrindStickTurn(false, 0.0f, 0.0f, 1.0f);
                 }
                 s.grind_yaw_at = turning ? turn_now : 0;
-                s.grind_heading_asked = hold_grind_heading(base, static_cast<std::uintptr_t>(s.entity), false, 0.0f);
             }
             {
                 auto modes = s.grind_mode, live = s.grind_live;
                 if (extras_blocked()) modes.fill(-1);
+                std::array<bool, grind_switches.size()> giving_back{};
                 for (std::size_t i = 0; i < modes.size(); ++i)
                     if (modes[i] < 0 && s.grind_stock[i] >= 0) {
                         modes[i] = s.grind_stock[i]; // released: the game's own value back, once
-                        s.grind_stock[i] = -1;
+                        giving_back[i] = true;
                     }
                 hold_grind_switches(base, static_cast<std::uintptr_t>(s.entity), modes.data(), live.data());
+                // Given back once the skater's value was there to write (no page yet: tried again next tick).
+                for (std::size_t i = 0; i < modes.size(); ++i)
+                    if (giving_back[i] && live[i] >= 0) s.grind_stock[i] = -1;
                 for (std::size_t i = 0; i < modes.size(); ++i)
                     if (s.grind_mode[i] >= 0 && !extras_blocked() && s.grind_stock[i] < 0 && live[i] >= 0) s.grind_stock[i] = live[i]; // read before the first write
                 if (live != s.grind_live) {
@@ -3399,10 +3465,10 @@ std::string feel_command(const std::vector<std::string> &a) {
     if (!editable(&why)) return "error: " + why;
     const auto found = std::ranges::find(feels, which, [](const auto &feel) { return feel.first; });
     if (found == std::end(feels) && which != "stock" && which != "skate") return "error: usage: trainer feel stock|easy|normal|hardcore";
-    // Only a feel that is on is taken off: taking off one that is not would put back values the
-    // player set themselves that it happens to share (the push speed dial, for one).
+    // Only a feel that is on is taken off, and of that only the values that still hold its numbers: taking off more
+    // would put back values the player set themselves that it happens to share (the push speed dial, for one).
     for (const auto &feel : feels)
-        if (std::ranges::find(state().active, feel.second) != state().active.end()) (void)remove_preset(feel.second);
+        if (std::ranges::find(state().active, feel.second) != state().active.end() || builtin_on(feel.second)) (void)remove_preset(feel.second, true);
     if (found != std::end(feels)) (void)apply_preset(found->second);
     changed();
     return found == std::end(feels) ? "Plays like skate.: the game's own tuning." : std::format("Plays like {}: its tuning for everything this game shares with it.", found->second);
@@ -3417,11 +3483,13 @@ std::string trickline_command(const std::vector<std::string> &a) {
     if (!editable(&why)) return "error: " + why;
     bool on{};
     if (a.size() < 2 || lower(a[0]) != "extras" || !flag(a[1], on)) return "error: usage: trainer trickline extras on|off";
+    // Off puts back only what still holds the extras' own numbers: a value the player has since moved is theirs.
     for (const auto &[key, factor] : trickline_friction)
-        if (auto *e = find_entry(key); e && !is_locked(*e)) set_entry(*e, on ? e->stock * factor : e->stock);
-    s.revert_boost = on ? std::max(s.revert_boost, 1.0f) : 0.0f;
-    s.nocomply_height = on ? std::max(s.nocomply_height, trickline_footplant) : 1.0f;
-    s.boneless_height = on ? std::max(s.boneless_height, trickline_footplant) : 1.0f;
+        if (auto *e = find_entry(key); e && !is_locked(*e) && (on || std::abs(e->value - sane(*e, e->stock * factor)) < 1e-6 * std::max(1.0, std::abs(e->value))))
+            set_entry(*e, on ? e->stock * factor : e->stock);
+    s.revert_boost = on ? std::max(s.revert_boost, 1.0f) : s.revert_boost == 1.0f ? 0.0f : s.revert_boost;
+    s.nocomply_height = on ? std::max(s.nocomply_height, trickline_footplant) : s.nocomply_height == trickline_footplant ? 1.0f : s.nocomply_height;
+    s.boneless_height = on ? std::max(s.boneless_height, trickline_footplant) : s.boneless_height == trickline_footplant ? 1.0f : s.boneless_height;
     changed();
     return on ? "Tricklining extras on: the board bending boost, heavier revert and powerslide friction, no comply and boneless height x 1.5."
               : "Tricklining extras off.";
@@ -3454,7 +3522,7 @@ std::string transition_command(const std::vector<std::string> &a) {
         const bool skate3 = to == "skate3" || to == "3";
         if (!skate3 && to != "skate" && to != "stock") return "error: usage: trainer transition feel skate|skate3";
         if (!editable(&why)) return "error: " + why;
-        if (std::ranges::find(s.active, transition_preset) != s.active.end()) (void)remove_preset(transition_preset);
+        if (std::ranges::find(s.active, transition_preset) != s.active.end() || builtin_on(transition_preset)) (void)remove_preset(transition_preset, true);
         // Values the preset set in earlier builds of this day and no longer does: back to the game's own where they
         // still hold what it set.
         static constexpr std::pair<std::string_view, double> dropped[]{
@@ -3554,8 +3622,11 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
     if (v == "status") {
         std::size_t touched{}, frozen{};
         for (const auto &e : s.entries) { touched += e.touched; frozen += e.frozen; }
-        return std::format("{} {} values ({} changed, {} frozen). Map: {}. Presets: {}.", s.status, s.entries.size(), touched, frozen,
-                           s.map.empty() ? "none" : s.map, s.active.empty() ? "stock" : std::to_string(s.active.size()) + " applied");
+        std::string own;
+        for (const auto &one : setups())
+            if (off_stock(one)) own += std::format(" {}={:.4g}{}", one.key, one.get(), modified(one) ? "" : "(not in force)");
+        return std::format("{} {} values ({} changed, {} frozen). Map: {}. Presets: {}. The trainer's own settings off the game's:{}.", s.status, s.entries.size(), touched,
+                           frozen, s.map.empty() ? "none" : s.map, s.active.empty() ? "stock" : std::to_string(s.active.size()) + " applied", own.empty() ? " none" : own);
     }
     if (v == "set" || v == "freeze" || v == "reset") {
         if (v == "reset" && lower(arg(0)) == "all") {
@@ -3566,23 +3637,27 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             return locked ? std::format("{} values put back; {} locked values kept (Reset everything clears those too).", count, locked)
                           : std::format("{} values put back.", count);
         }
-        if (v == "reset" && lower(arg(0)) == "tricks") {
-            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = s.manual_height = 1.0f;
-            s.grind_side = 1.0f;
-            s.grind_push = 0.0f;
-            s.grind_lean = 0.0f;
-            s.grind_turn = s.grind_tip = s.grind_range = 0.0f;
-            s.grind_mode.fill(-1);
-            s.grind_setting.fill(-1);
-            reset_transition();
-            s.catch_at = false;
-            s.flip_advanced = false;
-            s.flip_pop = false;
-            s.flip_flick = false;
-            s.flip_trick.fill(1.0f);
-            s.revert_boost = 0.0f;
+        if (v == "reset" && (lower(arg(0)) == "tricks" || lower(arg(0)).starts_with("section"))) {
+            // reset tricks: the sliders and switches of POP AND TRICKS. reset section <name>: everything one section of
+            // the Tune tab shows, its tuning values too (locked ones stay).
+            // (The console hands `reset` its words as one: "section grinds".)
+            const auto words = lower(arg(0)) + (a.size() > 1 ? " " + lower(arg(1)) : std::string{});
+            const bool section = words.starts_with("section");
+            const auto named = section && words.size() > 8 ? words.substr(8) : std::string{};
+            const auto topic = section ? topic_named(named) : topic_pop;
+            if (!topic) return "error: usage: trainer reset section pop|speed|bails|grinds|tricklining|transition|pumping|foot";
+            std::size_t count = reset_setups(topic);
+            if (section)
+                for (auto &e : s.entries) {
+                    if (!e.touched || is_locked(e)) continue;
+                    std::uint8_t of{};
+                    (void)essential_name(e.key, nullptr, &of);
+                    if (of != topic) continue;
+                    set_entry(e, e.stock);
+                    ++count;
+                }
             changed();
-            return "Trick heights and flip trick speed are the game's own again.";
+            return std::format("{}: {} put back to the game's own.", section ? std::string(topics[topic].title) : std::string("Tricks"), count);
         }
         if (v == "reset" && lower(arg(0)) == "presets") {
             const auto on = s.active;
@@ -3592,7 +3667,9 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             return std::format("{} presets switched off.", on.size());
         }
         if (v == "reset" && lower(arg(0)) == "everything") {
-            // The game as it shipped: no lock survives, no preset stays on, no trick multiplier.
+            // The game as it shipped: no lock survives, no preset stays on, nothing of the trainer's stays set.
+            // (Under a host's physics the player's own setup is kept for when they leave.)
+            if (s.enforced) return "error: the host controls physics in this multiplayer game; your own setup is kept for when you leave.";
             std::size_t count{};
             for (auto &e : s.entries) e.frozen = false;
             for (auto &e : s.entries) {
@@ -3605,23 +3682,11 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             }
             s.saved.clear();
             s.active.clear();
-            s.hippy_height = s.nocomply_height = s.boneless_height = s.offboard_height = s.flip_speed = s.pump_power = s.manual_height = 1.0f;
-            s.grind_side = 1.0f;
-            s.grind_push = 0.0f;
-            s.grind_lean = 0.0f;
-            s.grind_turn = s.grind_tip = s.grind_range = 0.0f;
-            s.grind_mode.fill(-1);
-            s.grind_setting.fill(-1);
-            reset_transition();
-            s.catch_at = false;
-            s.flip_advanced = false;
-            s.flip_pop = false;
-            s.flip_flick = false;
-            s.flip_trick.fill(1.0f);
-            s.revert_boost = 0.0f;
-            s.revert = {};
+            count += reset_setups();
+            // A preset this map applies by itself would be back at its next load.
+            if (!s.map.empty()) current_map().preset.clear();
             changed();
-            return std::format("Everything is the game's own again: {} values put back, locks cleared, presets off, trick sliders at 1.", count);
+            return std::format("Everything is the game's own again: {} values and settings put back, locks cleared, presets off.", count);
         }
         auto *e = find_entry(arg(0));
         if (!e) return "error: no tuning value is called \"" + arg(0) + "\". Try: trainer find <text>";
@@ -3683,13 +3748,8 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             std::map<std::string, double, std::less<>> values;
             for (const auto &e : s.entries)
                 if (e.touched) values[e.key] = e.value;
-            for (const auto trick : trick_names)
-                if (const auto *option = trick_option(trick); *option != trick_stock(trick)) values[std::string(trick_prefix) + std::string(trick)] = *option;
-        if (s.flip_advanced) values[std::string(trick_prefix) + std::string(flip_advanced_name)] = 1;
-        if (s.catch_at) {
-            values[std::string(trick_prefix) + std::string(catch_at_name)] = 1;
-            values[std::string(trick_prefix) + std::string(catch_percent_name)] = s.catch_percent;
-        }
+            for (const auto &one : setups())
+                if (off_stock(one)) values[one.key] = one.get();
             if (values.empty()) return "error: nothing is changed, so there is nothing to save.";
             const auto count = values.size();
             s.user[name] = std::move(values);
@@ -3757,11 +3817,6 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         const auto word = [](std::int8_t value) { return value < 0 ? "-" : value ? "on" : "off"; };
         if (what.empty()) {
             std::string out = std::format("Side force off grinds x {:.2f}.", s.grind_side);
-            {
-                const auto c = read_grind_control(s.base, static_cast<std::uintptr_t>(s.entity));
-                out += std::format("\nturn speed {:.3f}, tip speed {:.3f} (0: the game's own); the game's multipliers read {:.3f} / {:.3f}; asked {} / {} times last tick",
-                                   s.grind_turn, s.grind_tip, c.heading_multiplier, c.pitch_multiplier, s.grind_multiplier_asked[0], s.grind_multiplier_asked[1]);
-            }
             for (std::size_t i = 0; i < grind_settings.size(); ++i)
                 out += std::format("\n{} (setting {}, the game's default {}): {}; asked {} times since last listed", grind_settings[i].key, grind_settings[i].setting,
                                    grind_settings[i].stock ? "on" : "off",
@@ -3788,12 +3843,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             for (std::size_t i = 0; i < grind_settings.size(); ++i) s.grind_setting[i] = skate3 ? grind_settings[i].skate3 : std::int8_t{-1};
             s.grind_push = skate3 ? 1.8f : 0.0f; // Skate 3's pop goes sideways with the left stick, 1.8 m/s at full stick
             // Skate 3's left stick turns the board; the right stick only tips it (5-0, nose grind) and pops.
-            s.grind_lean = 0.0f;
             s.grind_range = skate3 ? skate3_grind_range : 0.0f;
-            // The left stick turns the board through skate.'s own grind control (its legacy grinds snap between grinds
-            // instead); the game's own turn speed, 0.2, is far slower than Skate 3's.
-            s.grind_turn = skate3 ? skate3_grind_turn : 0.0f;
-            s.grind_tip = 0.0f;
             changed();
             return std::string{skate3 ? "Grinds like Skate 3: lean exits and skate.'s own ways off a grind off, the pop goes sideways with the stick."
                                       : "Grinds like skate.: every setting and switch is the game's own."};
@@ -3803,15 +3853,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             return std::string{s.grind_watch ? "Reading the grind switches." : "No longer reading the grind switches."};
         }
         std::string why;
-        if (what == "turn" || what == "tip") {
-            const auto value = number(arg(1));
-            if (!value || *value < 0)
-                return "error: usage: trainer grind turn|tip <speed>, 0 = the game's own (0.2 turn / 0.8 tip; 8 / 2 with legacy grinds on).";
-            if (*value != 0 && !editable(&why)) return "error: " + why;
-            (what == "turn" ? s.grind_turn : s.grind_tip) = std::clamp(static_cast<float>(*value), 0.0f, 1000.0f);
-            changed();
-            return std::format("Board {} speed on a grind: {:.3f}{}.", what, *value, *value == 0 ? " (the game's own)" : "");
-        }
+        if (what == "turn" || what == "tip" || what == "lean") return "That lever is gone: it did nothing. `trainer grind range <degrees>` is the left stick's turn.";
         if (what == "range") {
             const auto value = number(arg(1));
             if (!value) return "error: usage: trainer grind range <degrees>, 0 = off (the game's own turn, by the right stick); negative turns the other way.";
@@ -3819,14 +3861,6 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             s.grind_range = std::clamp(static_cast<float>(*value), -360.0f, 360.0f);
             changed();
             return std::format("Left stick turns the board on a grind: up to {:.1f} degrees{}.", s.grind_range, s.grind_range == 0 ? " (off)" : "");
-        }
-        if (what == "lean") {
-            const auto value = number(arg(1));
-            if (!value) return "error: usage: trainer grind lean <amount>, 0 = off (skate.: the right stick leans), 1 = the left stick leans too (Skate 3); negative mirrors it.";
-            if (*value != 0 && !editable(&why)) return "error: " + why;
-            s.grind_lean = std::clamp(static_cast<float>(*value), -1.0f, 1.0f);
-            changed();
-            return std::format("Left stick also leans on a grind: {:.2f} ({} polls given so far).", s.grind_lean, DingoSDKOverlayGrindStickMirrored());
         }
         if (what == "push") {
             const auto value = number(arg(1));
@@ -3845,7 +3879,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             return std::format("Side force off grinds x {:.2f}.", s.grind_side);
         }
         const int mode = to == "on" || to == "1" ? 1 : to == "off" || to == "0" ? 0 : to == "game" || to == "-1" ? -1 : -2;
-        if (mode == -2) return "error: usage: trainer grind <switch>|all game|off|on, trainer grind side <multiplier>, trainer grind (lists them)";
+        if (mode == -2) return "error: usage: trainer grind (lists everything) | feel skate|skate3 | side <multiplier> | push <m/s> | range <degrees> | <setting or switch>|all game|off|on";
         if (mode >= 0 && !editable(&why)) return "error: " + why;
         bool any = false;
         for (std::size_t i = 0; i < grind_settings.size(); ++i)
@@ -3906,10 +3940,7 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
             if (!editable(&why)) return "error: " + why;
             s.revert_boost = std::clamp(static_cast<float>(*value), 0.0f, revert_boost_high);
         } else if (name == "catch_percent") {
-            const auto value = number(arg(1));
-            if (!value) return "error: catch_percent needs a percent of the air time.";
-            if (!editable(&why)) return "error: " + why;
-            s.catch_percent = std::clamp(static_cast<float>(*value), catch_low, catch_high);
+            return "That setting is gone with the switch it belonged to.";
         } else if (name == "return_delay") {
             const auto value = number(arg(1));
             if (!value) return "error: return_delay needs seconds.";
@@ -3922,10 +3953,8 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         else if (name == "pad") s.pad_shortcuts = on;
         else if (name == "pad_menu") s.pad_menu = on;
         else if (name == "flip_gate") return "That switch is gone: a flip set slower than the game's own stays slow by itself.";
-        else if (name == "catch_at") {
-            s.catch_at = false;
-            return "That switch is gone: it did not work reliably. Use the flip trick speed.";
-        } else if (name == "flip_pop") {
+        else if (name == "catch_at") return "That switch is gone: it did not work reliably. Use the flip trick speed.";
+        else if (name == "flip_pop") {
             if (on && !editable(&why)) return "error: " + why;
             s.flip_pop = on;
         } else if (name == "flip_flick") {
@@ -3968,12 +3997,22 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         changed();
         return "\"" + name + "\" will be applied whenever this map loads.";
     }
+    if (v == "fold") {
+        bool open{};
+        if (arg(0).empty() || arg(0).size() > 64 || !flag(arg(1), open)) return "error: usage: trainer fold <section or card> 0|1";
+        s.folds[arg(0)] = open;
+        s.save_due = true;
+        s.view_due = true;
+        return std::string{};
+    }
     if (v == "open") {
         const auto tab = lower(arg(0));
-        // The last three are the Tune tab on one of its lists.
-        const std::array<std::string_view, 10> tabs{"tune", "presets", "practice", "map", "realistic", "fun", "everything", "movement", "trickline", "transition"};
+        // After "movement": a section of the Tune tab, opened and scrolled to (realistic, fun: lists of earlier versions).
+        const std::array<std::string_view, 19> tabs{"tune", "presets", "practice", "map", "realistic", "fun", "everything", "movement", "trickline", "transition",
+                                                    "pop", "speed", "bails", "grinds", "pumping", "foot", "tricklining", "tricks", "game"};
         const auto found = std::ranges::find(tabs, tab);
-        if (!tab.empty() && found == tabs.end()) return "error: usage: trainer open [tune|trickline|transition|practice|map|movement|realistic|fun|everything]";
+        if (!tab.empty() && found == tabs.end())
+            return "error: usage: trainer open [tune|practice|map|movement|presets|game|pop|speed|bails|grinds|tricklining|transition|pumping|foot|everything]";
         s.open_tab = tab.empty() ? 0 : static_cast<int>(found - tabs.begin());
         ++s.open_serial;
         s.view_due = true;
@@ -4596,6 +4635,119 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
         for (const auto &[id, ticks] : s.states) result += std::format("{}{}: {}", result.empty() ? "" : ", ", id, ticks);
         return result.empty() ? "No physics state seen yet." : "Physics states seen (id: ticks): " + result;
     }
+    // <dev>
+    if (v == "levers") return std::format("Forced settings and held switches in force: {}. Lean stick on: {}.", holds_in_force(), [] {
+        float raw[2]{};
+        return DingoSDKOverlayGrindStickLeanRaw(raw);
+    }() ? "yes" : "no");
+    if (v == "audit") {
+        // The release audit, run on a solo level: stock is stock, everything that goes on comes off again, a saved
+        // preset brings back exactly what was set, a section's reset stays in its section. One log line each.
+        int failures{};
+        const auto snapshot = [&] {
+            std::vector<double> all;
+            for (const auto &e : s.entries) all.push_back(e.touched ? e.value : e.stock);
+            for (const auto &one : setups()) all.push_back(one.get());
+            return all;
+        };
+        const auto differences = [&](const std::vector<double> &a, const std::vector<double> &b) {
+            std::string out;
+            std::size_t count{};
+            for (std::size_t i = 0; i < a.size() && i < b.size(); ++i)
+                if (std::abs(a[i] - b[i]) > 1e-9 * std::max(1.0, std::abs(a[i])) && ++count <= 4)
+                    out += std::format(" {} {:.6g}->{:.6g}", i < s.entries.size() ? s.entries[i].key : setups()[i - s.entries.size()].key, a[i], b[i]);
+            return count ? std::format("{} differ:{}", count, out) : std::string{};
+        };
+        const auto check = [&](bool ok, const std::string &what, const std::string &detail = {}) {
+            failures += !ok;
+            say(ok ? logging::Level::info : logging::Level::warning, std::format("trainer audit: {} - {}{}{}", ok ? "ok" : "FAILED", what, detail.empty() ? "" : ": ", detail));
+        };
+        const auto words = [](std::string_view text) {
+            std::vector<std::string> out;
+            for (std::size_t start = 0; start < text.size();) {
+                auto end = text.find(' ', start);
+                if (end == std::string_view::npos) end = text.size();
+                if (end > start) out.emplace_back(text.substr(start, end - start));
+                start = end + 1;
+            }
+            return out;
+        };
+        const auto does = [&](std::string_view verb_, std::string_view arguments) {
+            const auto answer = run(verb_, words(arguments));
+            if (answer.starts_with("error")) check(false, std::format("{} {}", verb_, arguments), answer);
+        };
+        const auto is_stock = [&] {
+            for (const auto &e : s.entries)
+                if (e.touched || e.frozen) return false;
+            return std::ranges::none_of(setups(), off_stock) && s.active.empty();
+        };
+        does("reset", "everything");
+        const auto stock = snapshot();
+        check(is_stock(), "reset everything leaves nothing set");
+        for (const auto &preset : builtin_presets()) {
+            does("preset", "apply " + std::string(preset.name));
+            const bool moved = !differences(stock, snapshot()).empty();
+            does("preset", "remove " + std::string(preset.name));
+            check(moved && is_stock(), std::format("built-in preset {} on and off", preset.name), moved ? differences(stock, snapshot()) : "it set nothing");
+        }
+        static constexpr std::pair<std::string_view, std::string_view> pairs[][2]{
+            {{"feel", "easy"}, {"feel", "stock"}},       {{"feel", "normal"}, {"feel", "stock"}},
+            {{"feel", "hardcore"}, {"feel", "stock"}},   {{"grind", "feel skate3"}, {"grind", "feel skate"}},
+            {{"transition", "feel skate3"}, {"transition", "feel skate"}}, {{"trickline", "extras on"}, {"trickline", "extras off"}},
+        };
+        for (const auto &pair : pairs) {
+            does(pair[0].first, pair[0].second);
+            const bool moved = !differences(stock, snapshot()).empty();
+            does(pair[1].first, pair[1].second);
+            check(moved && is_stock(), std::format("{} {} then {}", pair[0].first, pair[0].second, pair[1].second), moved ? differences(stock, snapshot()) : "it set nothing");
+        }
+        // One feel straight to another: only the last one's numbers may be left.
+        does("feel", "easy");
+        does("feel", "hardcore");
+        const auto hardcore = snapshot();
+        does("feel", "stock");
+        does("feel", "hardcore");
+        check(differences(hardcore, snapshot()).empty(), "feel easy then hardcore equals hardcore alone", differences(hardcore, snapshot()));
+        does("feel", "stock");
+        check(is_stock(), "feel stock after that");
+        // A whole setup: saved, wiped, loaded, taken off.
+        does("feel", "normal");
+        does("grind", "feel skate3");
+        does("transition", "feel skate3");
+        does("option", "flip_speed 0.5");
+        does("option", "flip_pop 1");
+        does("option", "flip_flick 1");
+        does("option", "pump_power 3");
+        does("option", "offboard_height 2");
+        does("revert", "spin 60");
+        does("grind", "side 2");
+        const auto mine = snapshot();
+        does("preset", "save audit setup");
+        does("reset", "section grinds");
+        {
+            const auto after = snapshot();
+            bool grinds_stock = true, others_kept = true;
+            for (std::size_t i = 0; i < setups().size(); ++i) {
+                const auto &one = setups()[i];
+                if (one.topic == topic_grinds && off_stock(one)) grinds_stock = false;
+                if (one.topic != topic_grinds && after[s.entries.size() + i] != mine[s.entries.size() + i]) others_kept = false;
+            }
+            check(grinds_stock && others_kept, "reset section grinds puts back the grind settings and no other setting");
+        }
+        does("reset", "everything");
+        check(is_stock(), "reset everything after a whole setup", differences(stock, snapshot()));
+        does("preset", "apply audit setup");
+        check(differences(mine, snapshot()).empty(), "a saved preset brings the whole setup back", differences(mine, snapshot()));
+        const auto shared = export_preset("audit setup");
+        check(!shared.starts_with("error"), "preset export", shared);
+        does("preset", "remove audit setup");
+        check(is_stock(), "the saved preset turned off", differences(stock, snapshot()));
+        does("preset", "delete audit setup");
+        does("reset", "everything");
+        say(failures ? logging::Level::warning : logging::Level::info, std::format("trainer audit: finished, {} failures.", failures));
+        return std::format("Audit finished: {} failures (see the log).", failures);
+    }
+    // </dev>
     if (v == "dump") {
         const auto directory = data_directory();
         std::error_code error;

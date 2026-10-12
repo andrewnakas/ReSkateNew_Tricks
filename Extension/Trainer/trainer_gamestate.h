@@ -150,6 +150,11 @@ inline constexpr std::array<GrindSetting, 6> grind_settings{{
     {"stances", "Grind stances", "The game's own setting for the stances a grind can be held in.", "grind_stances", true, -1},
     {"prewind", "Wind up a spin on a grind", "The game's own setting: a spin can be wound up while still on the grind.", "egf_prewindfromgrind", false, 0},
 }};
+// Each tick of the trainer: without it for half a second, every forced setting and held switch below is the game's own
+// again, whatever the trainer last asked for.
+void keep_holds_alive() noexcept;
+// How many settings are forced and switches held right now (0 once the lease has run out).
+int holds_in_force() noexcept;
 // mode: -1 the game's own, 0 forced off, 1 forced on.
 void force_grind_setting(std::size_t index, int mode) noexcept;
 // For the settings getter hook: the forced value when `reference` (the script's setting reference) is one of those.
@@ -231,14 +236,4 @@ void grind_switch_asked(std::size_t index, std::uint32_t &asked, std::uint32_t &
 // skater has no page or no value for it, 3 it has a value. `handle` is the object's handle word.
 int grind_switch_status(std::uintptr_t base, std::uintptr_t entity, std::size_t index, std::uint32_t &handle) noexcept;
 void hold_grind_switches(std::uintptr_t base, std::uintptr_t entity, const std::int8_t *modes, std::int8_t *live) noexcept;
-// How fast the stick turns (heading) and tips (pitch) the board on a grind: the game's scripts set
-// Float.Intent.GrindHeadingControlMultiplier / GrindPitchControlMultiplier when a grind begins (0.2 / 0.8, or 8 / 2 with
-// its legacy grinds setting on) and the grind code reads them. Above 0 the trainer's number is answered instead (and
-// written while `on_grind`); 0 leaves the game's own. `asked` gets how often each was asked for since the last call.
-// The board's turn on a grind, Float.Intent.GrindControlHeading (radians from the grind's own heading): the game's
-// scripts work it out from where the right stick points, seen from the camera. While `on` every asker is answered with
-// `heading` instead, so the trainer can turn the board from the left stick the way Skate 3 does. Call hold_grind_multipliers
-// first each tick. Returns how often the game asked since the last call.
-std::uint32_t hold_grind_heading(std::uintptr_t base, std::uintptr_t entity, bool on, float heading) noexcept;
-void hold_grind_multipliers(std::uintptr_t base, std::uintptr_t entity, float turn, float tip, bool on_grind, std::uint32_t *asked = nullptr) noexcept;
 }

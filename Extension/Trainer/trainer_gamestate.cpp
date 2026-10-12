@@ -345,63 +345,29 @@ struct HeldSwitch {
     volatile std::uint8_t value[16]{};
 };
 HeldSwitch held_switches[std::size(grind_objects)];
-struct HeldNumber {
-    std::atomic<std::uintptr_t> object{};
-    std::atomic<float> value{};
-    std::atomic<bool> on{};
-    std::atomic<std::uint32_t> asked{};
-    volatile float answer[4]{};
-};
-HeldNumber held_numbers[3]; // the grind heading and pitch control multipliers, and the heading itself
 std::atomic<StateLookup> lookup_original{};
+// Held switches and forced settings only count while the trainer's tick keeps saying so (keep_holds_alive): should the
+// tick stop, the game has its own again within half a second.
+std::atomic<std::uint64_t> holds_until{};
+bool holds_alive() noexcept { return GetTickCount64() < holds_until.load(std::memory_order_relaxed); }
 std::atomic<bool> lookup_attempted{}, lookup_ready{};
 std::uintptr_t state_lookup_hook(std::uintptr_t object, std::uintptr_t context) {
     for (auto &held : held_switches) {
         if (held.object.load(std::memory_order_relaxed) != object) continue;
         held.asked.fetch_add(1, std::memory_order_relaxed);
         const int mode = held.mode.load(std::memory_order_relaxed);
-        if (mode < 0) break;
+        if (mode < 0 || !holds_alive()) break;
         held.answered.fetch_add(1, std::memory_order_relaxed);
         // The game may write through the answer too (its scripts set these): the value is put back for every asker.
         held.value[0] = mode ? 1 : 0;
         return reinterpret_cast<std::uintptr_t>(&held.value[0]);
     }
-    for (auto &held : held_numbers) {
-        if (!object || held.object.load(std::memory_order_relaxed) != object) continue;
-        held.asked.fetch_add(1, std::memory_order_relaxed);
-        if (!held.on.load(std::memory_order_relaxed)) break;
-        held.answer[0] = held.value.load(std::memory_order_relaxed); // put back for every asker: the scripts write through the answer too
-        return reinterpret_cast<std::uintptr_t>(&held.answer[0]);
-    }
     const auto original = lookup_original.load(std::memory_order_acquire);
     return original ? original(object, context) : 0;
-}
-// The game's other lookup, (context with the pages, state object) -> where the value is: most scripts and the grind code
-// read and write through this one (91 callers against 6). Only the held numbers are answered here.
-constexpr std::uintptr_t state_lookup_pages = 0x11dcd40;
-constexpr unsigned char state_lookup_pages_bytes[]{0x48, 0x89, 0x5c, 0x24, 0x08, 0x80, 0x7a, 0x2b, 0x00, 0x76, 0x66, 0x44, 0x8b, 0x5a, 0x28};
-using StateLookupPages = std::uintptr_t (*)(std::uintptr_t context, std::uintptr_t object);
-std::atomic<StateLookupPages> lookup_pages_original{};
-std::atomic<bool> numbers_held{};
-std::uintptr_t state_lookup_pages_hook(std::uintptr_t context, std::uintptr_t object) {
-    if (numbers_held.load(std::memory_order_relaxed) && object)
-        for (auto &held : held_numbers) {
-            if (held.object.load(std::memory_order_relaxed) != object) continue;
-            held.asked.fetch_add(1, std::memory_order_relaxed);
-            if (!held.on.load(std::memory_order_relaxed)) break;
-            held.answer[0] = held.value.load(std::memory_order_relaxed);
-            return reinterpret_cast<std::uintptr_t>(&held.answer[0]);
-        }
-    return lookup_pages_original.load(std::memory_order_relaxed)(context, object);
 }
 bool lookup_code_known(std::uintptr_t base) noexcept {
     __try {
         return std::memcmp(reinterpret_cast<const void *>(base + state_lookup), state_lookup_bytes, sizeof(state_lookup_bytes)) == 0;
-    } __except (1) { return false; }
-}
-bool lookup_pages_code_known(std::uintptr_t base) noexcept {
-    __try {
-        return std::memcmp(reinterpret_cast<const void *>(base + state_lookup_pages), state_lookup_pages_bytes, sizeof(state_lookup_pages_bytes)) == 0;
     } __except (1) { return false; }
 }
 bool start_state_holds(std::uintptr_t base) noexcept {
@@ -412,16 +378,16 @@ bool start_state_holds(std::uintptr_t base) noexcept {
     if (hook_prepare(target, reinterpret_cast<void *>(&state_lookup_hook), &original) != HookOk || !original) return false;
     lookup_original.store(reinterpret_cast<StateLookup>(original), std::memory_order_release);
     if (hook_enable(target) != HookOk) return false;
-    // The second lookup: left as it is when its first bytes are not the known ones.
-    const bool known = lookup_pages_code_known(base);
-    auto *pages_target = reinterpret_cast<void *>(base + state_lookup_pages);
-    void *pages_original{};
-    if (known && hook_prepare(pages_target, reinterpret_cast<void *>(&state_lookup_pages_hook), &pages_original) == HookOk && pages_original) {
-        lookup_pages_original.store(reinterpret_cast<StateLookupPages>(pages_original), std::memory_order_release);
-        (void)hook_enable(pages_target);
-    }
     lookup_ready.store(true, std::memory_order_relaxed);
     return true;
+}
+void keep_holds_alive() noexcept { holds_until.store(GetTickCount64() + 500, std::memory_order_relaxed); }
+int holds_in_force() noexcept {
+    if (!holds_alive()) return 0;
+    int count = 0;
+    for (const auto &forced : forced_settings) count += forced.mode.load(std::memory_order_relaxed) >= 0;
+    for (const auto &held : held_switches) count += held.mode.load(std::memory_order_relaxed) >= 0;
+    return count;
 }
 void force_grind_setting(std::size_t index, int mode) noexcept {
     if (index < grind_settings.size()) forced_settings[index].mode.store(mode, std::memory_order_relaxed);
@@ -479,7 +445,7 @@ std::optional<bool> forced_gameplay_bool(const void *reference) noexcept {
     auto &forced = forced_settings[static_cast<std::size_t>(entry.setting)];
     forced.asked.fetch_add(1, std::memory_order_relaxed);
     const int mode = forced.mode.load(std::memory_order_relaxed);
-    if (mode < 0) return {};
+    if (mode < 0 || !holds_alive()) return {};
     return mode != 0;
 }
 void grind_switch_asked(std::size_t index, std::uint32_t &asked, std::uint32_t &answered) noexcept {
@@ -511,35 +477,6 @@ void hold_grind_switches(std::uintptr_t base, std::uintptr_t entity, const std::
         live[i] = flag != 0;
         if (modes[i] >= 0 && (flag != 0) != (modes[i] != 0)) (void)put_flag(at, modes[i] != 0);
     }
-}
-void hold_grind_multipliers(std::uintptr_t base, std::uintptr_t entity, float turn, float tip, bool on_grind, std::uint32_t *asked) noexcept {
-    const float wanted[]{turn, tip};
-    const auto block = on_grind ? states_block(base, entity) : 0;
-    for (std::size_t i = 0; i < 2; ++i) {
-        auto &object = grind_control_objects[4 + i]; // the two multipliers, in the table's order
-        held_numbers[i].object.store(object.at.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        const bool on = std::isfinite(wanted[i]) && wanted[i] > 0.0f;
-        held_numbers[i].value.store(on ? wanted[i] : 0.0f, std::memory_order_relaxed);
-        held_numbers[i].on.store(on, std::memory_order_relaxed);
-        if (asked) asked[i] = held_numbers[i].asked.exchange(0, std::memory_order_relaxed);
-        // The value itself as well, for a reader that kept its address; the scripts set it again when the next grind begins.
-        if (block && wanted[i] > 0.0f)
-            if (const auto at = value_address(object, block)) (void)put(at, wanted[i]);
-    }
-}
-std::uint32_t hold_grind_heading(std::uintptr_t base, std::uintptr_t entity, bool on, float heading) noexcept {
-    auto &held = held_numbers[2];
-    auto &object = grind_control_objects[2]; // Float.Intent.GrindControlHeading
-    held.object.store(object.at.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    held.value.store(std::isfinite(heading) ? heading : 0.0f, std::memory_order_relaxed);
-    held.on.store(on, std::memory_order_relaxed);
-    bool any = false;
-    for (const auto &one : held_numbers) any = any || one.on.load(std::memory_order_relaxed);
-    numbers_held.store(any, std::memory_order_relaxed);
-    if (on)
-        if (const auto block = states_block(base, entity))
-            if (const auto at = value_address(object, block)) (void)put(at, heading);
-    return held.asked.exchange(0, std::memory_order_relaxed);
 }
 bool write_state_number(std::uintptr_t at, float value) noexcept { return at && std::isfinite(value) && put(at, value); }
 std::array<std::uintptr_t, 6> state_pages(std::uintptr_t base, std::uintptr_t entity) noexcept {

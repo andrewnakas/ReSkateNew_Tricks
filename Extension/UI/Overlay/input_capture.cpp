@@ -618,19 +618,18 @@ struct DarkPopRelease {
     std::atomic<std::uint64_t> polls{}; // the game's own XInput polls while enabled
 };
 DarkPopRelease& dark_pop_release() { static auto* value = new DarkPopRelease; return *value; }
-// ---- One stick on a grind (the trainer's "Grinds feel like Skate 3") -----------------
-// skate. turns the board on a grind with the left stick and leans with the right one; Skate 3 does both with the left.
-// While this is on (the trainer turns it on only while the local skater is on a grind) the game's own polls see the
-// left stick's sideways position on the right stick too, times this, unless the player is pushing the right stick
-// sideways. The right stick's up and down stays the player's (it tips the board: 5-0, nose grind), and while it is being
-// flicked (a pop) the game sees the right stick as it is, so a pop stays a pop.
-std::atomic<float>& grind_stick_mirror() { static std::atomic<float> value{0.0f}; return value; }
+// ---- The sticks on a grind (the trainer's "Grinds feel like Skate 3" and its lean into a ramp) -----------------
+// Both rewrites below only last while the trainer keeps asking for them: each `on` is good for half a second, so a
+// trainer that has stopped ticking cannot leave the game's own polls rewritten.
+constexpr std::uint64_t stick_lease = 500;
+// How many of the game's polls were given a made-up right stick so far.
 std::atomic<std::uint64_t>& grind_stick_mirrored() { static std::atomic<std::uint64_t> value{0}; return value; }
 // Skate 3's turn on a grind: while on, the game's own polls see a right stick whose sideways part is the trainer's (`x`,
 // from the left stick) and whose up and down is the player's own, times `y_scale`, plus `y_add`. For 150 ms after the
 // player's right stick jumps (the flick of a pop) the game sees the stick as it is. `sent_*` is what the game last saw.
 struct GrindStickTurn {
     std::atomic<bool> on{};
+    std::atomic<std::uint64_t> until{};
     std::atomic<float> x{}, y_add{}, y_scale{1.0f};
     std::atomic<float> sent_x{}, sent_y{}, raw_y{};
     std::atomic<int> last_ry{0};
@@ -639,8 +638,8 @@ struct GrindStickTurn {
 GrindStickTurn& grind_stick_turn() { static auto* value = new GrindStickTurn; return *value; }
 bool turn_grind_stick(XINPUT_GAMEPAD& pad) noexcept {
     auto& turn = grind_stick_turn();
-    if (!turn.on.load(std::memory_order_relaxed)) return false;
     const auto now = GetTickCount64();
+    if (!turn.on.load(std::memory_order_relaxed) || now >= turn.until.load(std::memory_order_relaxed)) return false;
     const int ry = pad.sThumbRY;
     if (std::abs(ry - turn.last_ry.exchange(ry, std::memory_order_relaxed)) > 5000) turn.flicked_at.store(now, std::memory_order_relaxed);
     const float raw_y = static_cast<float>(ry) / 32767.0f;
@@ -658,53 +657,19 @@ bool turn_grind_stick(XINPUT_GAMEPAD& pad) noexcept {
     turn.sent_y.store(static_cast<float>(pad.sThumbRY) / 32767.0f, std::memory_order_relaxed);
     return true;
 }
-void mirror_grind_stick(XINPUT_GAMEPAD& pad) noexcept {
-    if (turn_grind_stick(pad)) return;
-    const float amount = grind_stick_mirror().load(std::memory_order_relaxed);
-    if (amount == 0.0f) return;
-    // Skate 3's dead zone on this stick: nothing inside a quarter, the rest stretched over the whole range.
-    constexpr int right_idle = 9000, flick = 5000;
-    constexpr float dead = 0.25f;
-    static std::atomic<int> last_ry{0};
-    static std::atomic<std::uint64_t> flicked_at{0};
-    const auto now = GetTickCount64();
-    const int ry = pad.sThumbRY;
-    if (std::abs(ry - last_ry.exchange(ry, std::memory_order_relaxed)) > flick) flicked_at.store(now, std::memory_order_relaxed);
-    if (now - flicked_at.load(std::memory_order_relaxed) < 150) return;
-    const auto past_dead = [](SHORT raw) {
-        const float value = static_cast<float>(raw) / 32767.0f;
-        return std::abs(value) <= dead ? 0.0f : (std::abs(value) - dead) / (1.0f - dead) * (value < 0 ? -1.0f : 1.0f);
-    };
-    // Up and down too (the left stick holds a 5-0 or a nose grind), but never faster than a third of a second from end
-    // to end: the game must not read the left stick as the flick of a pop.
-    static float tipped = 0.0f;
-    static std::int64_t tipped_at = 0;
-    LARGE_INTEGER clock{}, rate{};
-    QueryPerformanceCounter(&clock);
-    QueryPerformanceFrequency(&rate);
-    const float passed = tipped_at && rate.QuadPart ? std::clamp(static_cast<float>(clock.QuadPart - tipped_at) / static_cast<float>(rate.QuadPart), 0.0f, 0.1f) : 0.0f;
-    tipped_at = clock.QuadPart;
-    const float tip_wanted = std::abs(int{pad.sThumbRY}) > right_idle ? 0.0f : past_dead(pad.sThumbLY) * std::abs(amount);
-    tipped += std::clamp(tip_wanted - tipped, -6.0f * passed, 6.0f * passed);
-    const float turned = std::abs(int{pad.sThumbRX}) > right_idle ? 0.0f : past_dead(pad.sThumbLX) * amount;
-    if (turned == 0.0f && std::abs(tipped) < 0.01f) return;
-    if (turned != 0.0f) pad.sThumbRX = static_cast<SHORT>(std::clamp(static_cast<int>(turned * 32767.0f), -32767, 32767));
-    if (std::abs(tipped) >= 0.01f && std::abs(int{pad.sThumbRY}) <= right_idle)
-        pad.sThumbRY = static_cast<SHORT>(std::clamp(static_cast<int>(tipped * 32767.0f), -32767, 32767));
-    grind_stick_mirrored().fetch_add(1, std::memory_order_relaxed);
-}
 // Leaning into the ramp on a coping grind: while on, the game's own polls see the left stick held at (x, y) for as long
 // as the player's own left stick is at rest (a stick the player moves is theirs). `raw_*` is the player's own stick as
 // the last poll had it, for the trainer's own reads of the left stick.
 struct GrindStickLean {
     std::atomic<bool> on{};
+    std::atomic<std::uint64_t> until{};
     std::atomic<float> x{}, y{}, raw_x{}, raw_y{};
     std::atomic<std::uint64_t> given{0};
 };
 GrindStickLean& grind_stick_lean() { static auto* value = new GrindStickLean; return *value; }
 void lean_grind_stick(XINPUT_GAMEPAD& pad) noexcept {
     auto& lean = grind_stick_lean();
-    if (!lean.on.load(std::memory_order_relaxed)) return;
+    if (!lean.on.load(std::memory_order_relaxed) || GetTickCount64() >= lean.until.load(std::memory_order_relaxed)) return;
     lean.raw_x.store(static_cast<float>(pad.sThumbLX) / 32767.0f, std::memory_order_relaxed);
     lean.raw_y.store(static_cast<float>(pad.sThumbLY) / 32767.0f, std::memory_order_relaxed);
     constexpr int idle = 8000; // about a quarter of the stick
@@ -778,7 +743,7 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
         const auto changed = dark_pop_filter(output->Gamepad.wButtons);
         if (changed) output->dwPacketNumber ^= changed << 29;
         dark_pop_release().flags.store(changed, std::memory_order_relaxed);
-        mirror_grind_stick(output->Gamepad);
+        (void)turn_grind_stick(output->Gamepad);
         lean_grind_stick(output->Gamepad);
     }
     return result;
@@ -1157,16 +1122,13 @@ extern "C" unsigned DingoSDKOverlayDarkPopInputFlags() noexcept {
 extern "C" std::uint64_t DingoSDKOverlayDarkPopGamePolls() noexcept {
     return dingosdk::overlay::detail::dark_pop_release().polls.load(std::memory_order_relaxed);
 }
-// The left stick's sideways position also goes to the right stick in the game's own polls, times `amount` (0: off).
-extern "C" void DingoSDKOverlaySetGrindStickMirror(float amount) noexcept {
-    dingosdk::overlay::detail::grind_stick_mirror().store(amount == amount ? amount : 0.0f, std::memory_order_relaxed);
-}
-// How many of the game's polls were given the left stick on the right one so far.
+// Skate 3's turn on a grind: the right stick the game's own polls see (see GrindStickTurn). Asked for again every tick.
 extern "C" void DingoSDKOverlaySetGrindStickTurn(bool on, float x, float y_add, float y_scale) noexcept {
     auto& turn = dingosdk::overlay::detail::grind_stick_turn();
     turn.x.store(x, std::memory_order_relaxed);
     turn.y_add.store(y_add, std::memory_order_relaxed);
     turn.y_scale.store(y_scale, std::memory_order_relaxed);
+    turn.until.store(GetTickCount64() + dingosdk::overlay::detail::stick_lease, std::memory_order_relaxed);
     turn.on.store(on, std::memory_order_relaxed);
 }
 // What the game's last poll saw of the right stick (x, y) and the player's own right stick up / down.
@@ -1181,12 +1143,13 @@ extern "C" void DingoSDKOverlaySetGrindStickLean(bool on, float x, float y) noex
     auto& lean = dingosdk::overlay::detail::grind_stick_lean();
     lean.x.store(x == x ? x : 0.0f, std::memory_order_relaxed);
     lean.y.store(y == y ? y : 0.0f, std::memory_order_relaxed);
+    lean.until.store(GetTickCount64() + dingosdk::overlay::detail::stick_lease, std::memory_order_relaxed);
     lean.on.store(on, std::memory_order_relaxed);
 }
 // The player's own left stick as the game's last poll had it, while the lean is on (false: it is off, read the controller).
 extern "C" bool DingoSDKOverlayGrindStickLeanRaw(float* values) noexcept {
     auto& lean = dingosdk::overlay::detail::grind_stick_lean();
-    if (!lean.on.load(std::memory_order_relaxed)) return false;
+    if (!lean.on.load(std::memory_order_relaxed) || GetTickCount64() >= lean.until.load(std::memory_order_relaxed)) return false;
     values[0] = lean.raw_x.load(std::memory_order_relaxed);
     values[1] = lean.raw_y.load(std::memory_order_relaxed);
     return true;
@@ -1195,6 +1158,7 @@ extern "C" bool DingoSDKOverlayGrindStickLeanRaw(float* values) noexcept {
 extern "C" std::uint64_t DingoSDKOverlayGrindStickLeaned() noexcept {
     return dingosdk::overlay::detail::grind_stick_lean().given.load(std::memory_order_relaxed);
 }
+// How many of the game's polls were given a made-up right stick so far.
 extern "C" std::uint64_t DingoSDKOverlayGrindStickMirrored() noexcept {
     return dingosdk::overlay::detail::grind_stick_mirrored().load(std::memory_order_relaxed);
 }

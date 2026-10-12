@@ -18,8 +18,19 @@ namespace {
 struct Page {
     int tab{}; // opens on TUNE: the dials and switches
     std::array<char, 96> search{};
-    int mode{1}; // the Tune tab: 0 Realistic, 1 Fun (two short lists), 3 Tricklining, 4 Transition, 2 Everything
-    int group{1}; // Everything: 1: every group, 2..: one of the view's groups
+    // The Tune tab is one page of sections. A function that draws several cards is told which of them a section
+    // takes (`pick`; empty: all), and card_end() has to know whether the last one was left out.
+    std::vector<std::string_view> pick;
+    bool card_skipped{};
+    int scroll_to{-1};   // a section `trainer open` asked for: opened and scrolled to, once
+    bool folds_seeded{}; // the saved folds were handed to the menu
+    bool manage{};       // the preset row's YOUR PRESETS card is open
+    int preset_pick{-1}; // which of the player's presets the row's box shows
+    // Rows a card shows by name (left out of their section's FINE TUNING), and each section's named rows by rank.
+    std::vector<char> placed;
+    std::uint64_t placed_revision{~0ull};
+    std::array<std::vector<std::size_t>, trainer::topic_count> topic_rows;
+    int group{1}; // EVERY VALUE: 1: every group, 2..: one of the view's groups
     bool only_changed{}, graph_points{}, show_unused{};
     std::size_t hidden_unused{}; // rows the filters would show but for "no use found"
     // The rows the filters leave, rebuilt when the snapshot or a filter changes.
@@ -36,31 +47,45 @@ struct Page {
     std::array<float, trainer::flip_tricks.size()> trick_edit{}; // the speed of each flip trick
     std::array<bool, trainer::flip_tricks.size()> trick_editing{};
     float grind_side_edit{1}, grind_push_edit{};
-    float grind_turn_edit{}, grind_tip_edit{}, grind_range_edit{};
-    bool grind_turn_editing{}, grind_tip_editing{}, grind_range_editing{};
+    float grind_range_edit{};
+    bool grind_range_editing{};
     bool grind_push_editing{};
     bool grind_side_editing{}, grind_watching{};
     float revert_edit{};
     bool revert_editing{};
-    // The Tricklining list: rows of the value table per group, for one snapshot.
-    std::array<std::vector<std::size_t>, 5> trick_rows;
-    std::uint64_t trick_revision{~0ull};
-    // The Transition list: the same, per card.
+    // Rows of the value table that cards show by name, for one snapshot (place_rows).
+    std::array<std::vector<std::size_t>, 4> trick_rows;
     std::array<std::vector<std::size_t>, 6> transition_rows;
-    std::uint64_t transition_revision{~0ull};
     bool manual_editing{}, hippy_editing{}, nocomply_editing{}, boneless_editing{}, offboard_editing{}, flip_editing{}, pump_editing{};
     std::uint64_t open_serial{}; // the last `trainer open` acted on
     std::uint64_t share_serial{}; // the last `preset export` put on the clipboard
     bool share_seen{};
     bool show_page{};
 };
-void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words);
+void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words, int part);
 void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::View &view);
 void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view);
 void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view);
 Page &page() {
     static auto *value = new Page;
     return *value;
+}
+// A card of this page: it folds, and a section can leave it out (Page::pick). card_end() follows either way.
+bool card(SkateMenu &menu, Page &p, const char *id, const char *title, const char *subtitle = nullptr) {
+    p.card_skipped = !p.pick.empty() && std::ranges::find(p.pick, std::string_view(id)) == p.pick.end();
+    return !p.card_skipped && fold_card(menu, id, title, subtitle);
+}
+void card_end(Page &p) {
+    if (!p.card_skipped) end_card();
+    p.card_skipped = false;
+}
+// A slider shows what the player is dragging until the trainer's own number catches up; after a reset there is nothing
+// to catch up with.
+void clear_edits(Page &p) {
+    p.manual_editing = p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = p.revert_editing = false;
+    p.grind_side_editing = p.grind_push_editing = p.grind_range_editing = false;
+    p.trick_editing = {};
+    p.active.clear();
 }
 // A tooltip that wraps at a readable width instead of running off the screen as one line.
 void wrapped_tooltip(const char *format, ...) {
@@ -97,25 +122,18 @@ void trainer_command(SkateMenu &menu, const CallbacksV3 &callbacks, const std::s
     send_console(menu, callbacks, "trainer " + text);
 }
 
+// The rows EVERY VALUE and a search show.
 void filter_rows(Page &p, const trainer::View &view) {
     const auto words = lower(p.search.data());
-    const auto key = std::format("{}|{}|{}|{}|{}|{}", words, p.group, p.only_changed, p.graph_points, p.show_unused, p.mode);
+    const auto key = std::format("{}|{}|{}|{}|{}", words, p.group, p.only_changed, p.graph_points, p.show_unused);
     if (p.shown_revision == view.revision && p.shown_key == key) return;
     p.shown_revision = view.revision;
     p.shown_key = key;
     p.shown.clear();
     p.hidden_unused = 0;
-    const std::string *group = p.mode == 2 && p.group > 1 && static_cast<std::size_t>(p.group) <= view.groups.size() + 1
-        ? &view.groups[static_cast<std::size_t>(p.group) - 2] : nullptr;
-    const bool essentials = p.mode < 2 && words.empty(); // searching looks through every value, whatever the list
-    const std::uint8_t list = p.mode == 0 ? trainer::mode_realistic : trainer::mode_fun;
+    const std::string *group = p.group > 1 && static_cast<std::size_t>(p.group) <= view.groups.size() + 1 ? &view.groups[static_cast<std::size_t>(p.group) - 2] : nullptr;
     for (std::size_t i = 0; i < view.rows.size(); ++i) {
         const auto &row = view.rows[i];
-        if (essentials) {
-            // Only what the game was found or seen to read: a short list has no room for maybes.
-            if (!row.friendly.empty() && (row.modes & list) && (row.used || (row.modes & trainer::mode_trial))) p.shown.push_back(i);
-            continue;
-        }
         if (row.detail && !p.graph_points && !row.touched) continue;
         if (p.only_changed && !row.touched && !row.frozen) continue;
         // Searching looks through every group.
@@ -128,8 +146,80 @@ void filter_rows(Page &p, const trainer::View &view) {
         }
         p.shown.push_back(i);
     }
-    if (essentials) std::ranges::sort(p.shown, {}, [&](std::size_t i) { return view.rows[i].rank; });
 }
+// Rows of the value table that cards show by name.
+constexpr const char *trick_groups[]{
+    "onboard_powerslide.frictionscalar_revert onboard_powerslide.frictionscalar_autorevert "
+    "onboard_powerslide.powerslide_forwardforcescalar_revert onboard_powerslide.powerslide_forwardforcescalar_autorevert",
+    "physicsmode.jumpmaxheight physicsmode.jumpminheight physicsmode.jumpminheightmanual physicsonboardjumptuning.jumpadjustvelocityboostlimitground",
+    "physicsairstates.maxspinspeed physicsmode.maxautobodyspinspeed physicsmode.easybodyspins physicsreckoning.flipscalar "
+    "physicsreckoning.flipmaxspeed heldflip.straightflipcatchtime heldflip.shuvmincatchtime heldflip.varialmincatchtime heldflip.bigflipmincatchtime",
+    "physicsmanual.manualscalar_p physicsmanual.manualscalar_i physicsmanual.manualscalar_d physicsmanual.maxtiltangle physicsfriction.noinputtime "
+    "physicssteering.generalscalar physicssteering.damping",
+};
+constexpr std::string_view coping_rows[]{"physicsgrind.copingexitstarttime", "physicsgrind.fairlysteepexitstarttime", "physicsgrind.curbexitstarttime",
+                                         "physicsgrind.slowgrindexitspeed", "physicsgrind.nonpopexitangledeg", "physicsgrind.grindreckoningsmoothnessonexit",
+                                         "physicsgrind.grindreckoningsmoothnessdropin"};
+constexpr std::string_view reentry_rows[]{"physicstrajectory.scoregrind", "physicsgrindsair.maxdist50_50", "physicsgrindsair.maxdist5_0",
+                                          "physicsgrindsair.maxdisttipslide", "physicsgrindsair.maxdistboardslide", "physicstrajectory.grindlandingmaxangle"};
+constexpr std::string_view plant_rows[]{"physicshandplant.exitanglerangestart", "physicshandplant.exitanglerangeend", "physicshandplant.minnormalvel",
+                                        "physicshandplant.maxnormalvel", "physicshandplant.maxparallelvel", "physicshandplant.maxverticalvel",
+                                        "physicshandplant.minlipclearance", "physicshandplant.maxlipclearance", "physicshandplant.maxangleofapproach",
+                                        "physicshandplant.waitforanimtime", "physicshandplant.bstofsanglethreshold", "physicshandplant.fstobsanglethreshold",
+                                        "physicshandplant.linesegmentoffset", "physicshandplant.linesegmentpad", "physicshandplant.segmentcastheightpad"};
+constexpr std::string_view lip_rows[]{"physicsliptrick.liptrickcomapexheight", "physicsliptrick.timetoapexvsspeed x", "physicsliptrick.skateboardrotationslerpvstime x",
+                                      "physicsliptrick.maxrotationpersecond", "physicsliptrick.lipquerymaxlipdistance",
+                                      "physicsliptrick.lipquerymaxdirectionchangedegrees", "physicsliptrick.launchgroundslopethreshold",
+                                      "physicsliptrick.lipquerylipslopethreshold", "physicsliptrick.lipquerygroundslopethreshold", "physicsrollin.maxrollintime",
+                                      "physicsrollin.skateboardrollinduration", "physicsrollin.minlipbashdownwardspeed", "physicsrollin.undershootamount"};
+constexpr std::string_view vert_rows[]{"physicsreckoning.vertjumpalignmaxgroundnormaly", "physicsreckoning.vertjumpalignmaxangle",
+                                       "physicsreckoning.vertjumpalignminjumpdiry", "physicsreckoning.vertjumpalignfactor",
+                                       "physicstrajectory.naturalairoffvertsscalar", "physicsairstates.naturalairmaxdist", "physicstrajectory.scoretransition",
+                                       "physicstrajectory.mintimeafterapexfortransition", "physicstrajectory.scoremiddlebonus",
+                                       "physicstrajectory.scorelandingdirection", "physicstrajectory.maxtrajectoryadjust", "physicstrajectory.coneanglex",
+                                       "physicstrajectory.coneanglez", "physicstrajectory.mintimefortrajectorytobevalid"};
+constexpr std::string_view pump_rows[]{"physicsmode.pumpeffectfactor", "physicsmode.pumpmaxacceleration", "physicsmode.pumpmaxdeceleration",
+                                       "physicsmode.unintentionalpumpscalar", "physicspumping.pumpangle", "physicspumping.pumpminfactor",
+                                       "physicspumping.pumpoutoftransitionscalar", "physicspumping.pumpoutoftransitioncheckdistancescalar",
+                                       "physicsantipumping.maxdownwardangledeg", "physicsantipumping.maxdownwardangledeg_nobanks"};
+constexpr std::span<const std::string_view> transition_lists[]{coping_rows, reentry_rows, plant_rows, lip_rows, vert_rows, pump_rows};
+// Once per snapshot: where each of those rows is in the table, and each section's other named rows in their order.
+void place_rows(Page &p, const trainer::View &view) {
+    if (p.placed_revision == view.revision) return;
+    p.placed_revision = view.revision;
+    p.placed.assign(view.rows.size(), 0);
+    std::vector<std::string> ids(view.rows.size());
+    for (std::size_t i = 0; i < view.rows.size(); ++i) ids[i] = lower(view.rows[i].id);
+    const auto find = [&](std::string_view key, std::vector<std::size_t> &into) {
+        for (std::size_t i = 0; i < ids.size(); ++i)
+            if (ids[i] == key) {
+                into.push_back(i);
+                p.placed[i] = 1;
+                return;
+            }
+    };
+    for (std::size_t g = 0; g < std::size(trick_groups); ++g) {
+        p.trick_rows[g].clear();
+        const std::string_view keys = trick_groups[g];
+        for (std::size_t start = 0; start < keys.size();) {
+            auto end = keys.find(' ', start);
+            if (end == std::string_view::npos) end = keys.size();
+            if (end > start) find(keys.substr(start, end - start), p.trick_rows[g]);
+            start = end + 1;
+        }
+    }
+    for (std::size_t g = 0; g < std::size(transition_lists); ++g) {
+        p.transition_rows[g].clear();
+        for (const auto key : transition_lists[g]) find(key, p.transition_rows[g]);
+    }
+    for (auto &rows : p.topic_rows) rows.clear();
+    for (std::size_t i = 0; i < view.rows.size(); ++i)
+        if (const auto &row = view.rows[i]; row.topic && row.topic < trainer::topic_count && !row.friendly.empty() && !p.placed[i]) p.topic_rows[row.topic].push_back(i);
+    for (auto &rows : p.topic_rows) std::ranges::sort(rows, {}, [&](std::size_t i) { return view.rows[i].rank; });
+}
+// A row belongs on a section when it does something: the game was found reading it, or it has been changed or locked
+// (so it can be put back). The rest are on EVERY VALUE only.
+bool row_works(const trainer::Row &row) { return row.used || row.touched || row.frozen; }
 
 void value_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const trainer::Row &row,
                bool with_group, bool friendly) {
@@ -246,52 +336,101 @@ void dial_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trai
     ImGui::PopID();
 }
 
-// One screen for everything that changes how the game plays: the presets as dials and
-// switches, the trick multipliers, the player's own presets and the values themselves. All of
-// them show the same values, so none can disagree with another.
-// The player's own presets: save what is set now under a name, turn one on or off, share one as a
-// line of text, import one that was shared.
-void your_presets(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, bool can_edit) {
-    begin_card(menu, "preset-save", "YOUR PRESETS", "Save a setup you like, go back to it, share it");
-    ImGui::BeginDisabled(!can_edit);
-    const float button = ImGui::CalcTextSize("Turn off").x + ImGui::GetStyle().FramePadding.x * 2;
-    for (const auto &preset : view.presets) {
-        if (preset.builtin) continue;
-        ImGui::PushID(preset.name.c_str());
-        if (preset.active) {
-            ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
-            if (ImGui::Button("Turn off", ImVec2(button, 0))) trainer_command(menu, callbacks, "preset remove " + preset.name);
-            ImGui::PopStyleColor();
-        } else if (ImGui::Button("Turn on", ImVec2(button, 0))) {
-            trainer_command(menu, callbacks, "preset apply " + preset.name);
+// The player's own presets, above the tabs: pick one and load it, save what is set now under a name. "Manage" opens
+// the list: share one as a line of text, import one that was shared, delete, tie one to this map.
+void preset_row(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
+    std::vector<const trainer::PresetRow *> own;
+    for (const auto &preset : view.presets)
+        if (!preset.builtin) own.push_back(&preset);
+    const bool can_edit = view.editable && callbacks.queue_console_command != nullptr;
+    if (p.preset_pick < 0 || p.preset_pick >= static_cast<int>(own.size())) {
+        p.preset_pick = 0;
+        for (std::size_t i = 0; i < own.size(); ++i)
+            if (own[i]->active) p.preset_pick = static_cast<int>(i);
+    }
+    const trainer::PresetRow *picked = own.empty() ? nullptr : own[static_cast<std::size_t>(p.preset_pick)];
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Preset");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(px(190));
+    if (ImGui::BeginCombo("##preset", picked ? picked->name.c_str() : "none saved yet")) {
+        for (std::size_t i = 0; i < own.size(); ++i) {
+            const auto label = own[i]->active ? own[i]->name + "   (on)" : own[i]->name;
+            ImGui::PushID(static_cast<int>(i));
+            if (ImGui::Selectable(label.c_str(), static_cast<int>(i) == p.preset_pick)) p.preset_pick = static_cast<int>(i);
+            ImGui::PopID();
         }
-        tip("Turn on sets every value saved in this preset. Turn off puts those values back to the game's own.");
-        ImGui::SameLine();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(preset.name.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", preset.note.c_str());
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - px(170));
-        if (ImGui::SmallButton("This map")) trainer_command(menu, callbacks, "profile set " + preset.name);
-        tip("Applies this preset by itself every time this map loads.");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Share")) trainer_command(menu, callbacks, "preset export " + preset.name);
-        if (ImGui::IsItemHovered()) wrapped_tooltip("Copies this preset to the clipboard as one line of text. Paste it in a chat;\nanyone with the trainer can import it.");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Delete")) trainer_command(menu, callbacks, "preset delete " + preset.name);
-        tip("Removes this preset from your list.");
-        ImGui::PopID();
+        if (own.empty()) ImGui::TextDisabled("Set the game up the way you like it, give it a name, press Save.");
+        ImGui::EndCombo();
+    }
+    tip("Your saved setups. Pick one, then Load: it sets every value and setting saved in it on top of what is set now.");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!picked || !can_edit);
+    if (picked && picked->active) {
+        ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
+        if (ImGui::Button("Turn off")) {
+            clear_edits(p);
+            trainer_command(menu, callbacks, "preset remove " + picked->name);
+        }
+        ImGui::PopStyleColor();
+        tip("Puts everything this preset set back to the game's own.");
+    } else {
+        if (ImGui::Button("Load") && picked) {
+            clear_edits(p);
+            trainer_command(menu, callbacks, "preset apply " + picked->name);
+        }
+        tip("Sets every value and setting saved in this preset. Press RESET EVERYTHING first to get exactly the preset and nothing else.");
     }
     ImGui::EndDisabled();
-    field(menu, "Name");
-    const float save = ImGui::CalcTextSize("Save").x + ImGui::GetStyle().FramePadding.x * 2;
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - save - ImGui::GetStyle().ItemSpacing.x);
-    ImGui::InputText("##preset-name", p.preset_name.data(), p.preset_name.size());
+    ImGui::SameLine(0, px(18));
+    ImGui::SetNextItemWidth(px(140));
+    ImGui::InputTextWithHint("##preset-name", "new preset name", p.preset_name.data(), p.preset_name.size());
     tip("A name for the preset you are about to save.");
     ImGui::SameLine();
     ImGui::BeginDisabled(!p.preset_name[0] || view.stock);
-    if (ImGui::Button("Save", ImVec2(save, 0))) trainer_command(menu, callbacks, std::string("preset save ") + p.preset_name.data());
-    tip("Saves every value, dial and trick setting that is changed right now as a preset under this name. Share it from its row afterwards.");
+    if (ImGui::Button("Save")) trainer_command(menu, callbacks, std::string("preset save ") + p.preset_name.data());
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        wrapped_tooltip("%s", view.stock ? "Nothing is changed, so there is nothing to save yet."
+                                         : "Saves everything that is changed right now under this name: tuning values, trick, grind, transition and bending "
+                                           "settings. Not saved: locks, No Bail, Noclip, Dark Pop, the game speed and your game's own settings.");
+    ImGui::SameLine();
+    if (p.manage) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
+    const bool pressed = ImGui::Button("Manage");
+    if (p.manage) ImGui::PopStyleColor();
+    if (pressed) p.manage = !p.manage;
+    tip("Share a preset as a line of text, import one, delete one, or have one load by itself on this map.");
+    if (!p.manage) return;
+    begin_card(menu, "preset-manage", "YOUR PRESETS", "Share, import, delete, load by itself on this map");
+    ImGui::BeginDisabled(!can_edit);
+    const float button = ImGui::CalcTextSize("Turn off").x + ImGui::GetStyle().FramePadding.x * 2;
+    for (const auto *preset : own) {
+        ImGui::PushID(preset->name.c_str());
+        if (preset->active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
+            if (ImGui::Button("Turn off", ImVec2(button, 0))) trainer_command(menu, callbacks, "preset remove " + preset->name);
+            ImGui::PopStyleColor();
+        } else if (ImGui::Button("Load", ImVec2(button, 0))) {
+            trainer_command(menu, callbacks, "preset apply " + preset->name);
+        }
+        tip("Load sets every value and setting saved in this preset. Turn off puts those back to the game's own.");
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(preset->name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", preset->note.c_str());
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - px(205));
+        if (ImGui::SmallButton("This map")) trainer_command(menu, callbacks, "profile set " + preset->name);
+        tip("Loads this preset by itself every time this map loads.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Share")) trainer_command(menu, callbacks, "preset export " + preset->name);
+        if (ImGui::IsItemHovered()) wrapped_tooltip("Copies this preset to the clipboard as one line of text. Paste it in a chat;\nanyone with the trainer can import it.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Delete")) trainer_command(menu, callbacks, "preset delete " + preset->name);
+        tip("Removes this preset from your list.");
+        ImGui::PopID();
+    }
+    if (own.empty()) note("No preset saved yet: set the game up, type a name above and press Save.");
     ImGui::EndDisabled();
     // Sharing: a preset travels as one line of text on the clipboard.
     ImGui::BeginDisabled(view.stock);
@@ -304,15 +443,201 @@ void your_presets(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const 
         if (text && trainer::stage_import(text)) trainer_command(menu, callbacks, "preset import");
         else feedback(menu, "The clipboard holds no text.");
     }
-    if (ImGui::IsItemHovered()) wrapped_tooltip("Copy a preset line someone shared (it starts with RST1:), then press this.\nIt is added to your presets; nothing changes until you turn it on.");
+    if (ImGui::IsItemHovered()) wrapped_tooltip("Copy a preset line someone shared (it starts with RST1:), then press this.\nIt is added to your presets; nothing changes until you load it.");
     if (!view.map.empty()) {
-        info(menu, "This map applies", view.profile_preset.empty() ? "nothing" : view.profile_preset);
-        if (!view.profile_preset.empty() && ImGui::Button("Stop applying it on this map")) trainer_command(menu, callbacks, "profile clear");
-        note("\"This map\" beside one of your presets applies it every time this map loads.");
+        info(menu, "This map loads", view.profile_preset.empty() ? "nothing by itself" : view.profile_preset);
+        if (!view.profile_preset.empty() && ImGui::Button("Stop loading it on this map")) trainer_command(menu, callbacks, "profile clear");
     }
     end_card();
 }
 
+// ---- the Tune tab: one page of sections ----------------------------------------------------------
+// The bar that opens and closes one section; `summary` says what is changed inside.
+bool topic_header(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, std::uint8_t topic, const std::string &summary, bool open_by_default) {
+    const auto &one = trainer::topics[topic];
+    const std::string id = "section-" + std::string(one.key);
+    bool open = fold_open(id, open_by_default);
+    if (p.scroll_to == topic) {
+        if (!open) set_fold(id, open = true);
+        ImGui::SetScrollHereY(0.0f);
+        p.scroll_to = -1;
+    }
+    const auto at = ImGui::GetCursorScreenPos();
+    const float height = ImGui::GetFrameHeight() + px(6), width = ImGui::GetContentRegionAvail().x;
+    ImGui::PushID(id.c_str());
+    const bool pressed = ImGui::InvisibleButton("##section", ImVec2(width, height));
+    const bool hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
+    if (pressed) {
+        set_fold(id, open = !open);
+        trainer_command(menu, callbacks, std::format("fold {} {}", id, open ? 1 : 0));
+    }
+    auto *draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(at, ImVec2(at.x + width, at.y + height), hovered ? skate_theme::tile_light : skate_theme::tile_grey);
+    draw->AddRectFilled(at, ImVec2(at.x + px(4), at.y + height), skate_theme::blue);
+    fold_arrow(ImVec2(at.x + px(10), at.y), height, open, IM_COL32(255, 255, 255, 255));
+    const float text_y = at.y + (height - ImGui::GetFontSize()) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(at.x + px(16) + ImGui::GetFontSize() * 0.9f, text_y));
+    ImGui::PushFont(menu.bold);
+    ImGui::TextUnformatted(one.title.data(), one.title.data() + one.title.size());
+    ImGui::PopFont();
+    const float summary_width = summary.empty() ? 0.0f : ImGui::CalcTextSize(summary.c_str()).x + px(20);
+    ImGui::SameLine(0, px(12));
+    if (ImGui::GetCursorScreenPos().x + ImGui::CalcTextSize(one.about.data(), one.about.data() + one.about.size()).x < at.x + width - summary_width)
+        ImGui::TextDisabled("%.*s", static_cast<int>(one.about.size()), one.about.data());
+    else ImGui::NewLine();
+    if (!summary.empty()) {
+        ImGui::SetCursorScreenPos(ImVec2(at.x + width - summary_width + px(10), text_y));
+        ImGui::PushStyleColor(ImGuiCol_Text, skate_theme::blue);
+        ImGui::TextUnformatted(summary.c_str());
+        ImGui::PopStyleColor();
+    }
+    ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + height));
+    ImGui::Dummy(ImVec2(0, px(open ? 8.0f : 4.0f)));
+    return open;
+}
+// The built-in presets of one section: a dial each, then the ones that are plain switches.
+void dials_card(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, std::uint8_t topic, bool can_edit) {
+    const auto shown = [&](const trainer::PresetRow &preset) {
+        return preset.builtin && preset.topic == topic && preset.name != "Stock" && !preset.name.starts_with("Skate 3") && !preset.name.starts_with("Transition:");
+    };
+    if (std::ranges::none_of(view.presets, shown)) return;
+    const std::string id = "dials-" + std::string(trainer::topics[topic].key);
+    if (card(menu, p, id.c_str(), "DIALS AND SWITCHES", "1 is the game's own. A dial moves every value its preset moves.")) {
+        ImGui::BeginDisabled(!can_edit);
+        for (const auto &preset : view.presets)
+            if (shown(preset) && preset.dial) dial_row(menu, callbacks, p, preset);
+        bool first = true;
+        for (const auto &preset : view.presets) {
+            if (!shown(preset) || preset.dial) continue;
+            if (!first && ImGui::GetItemRectMax().x + ImGui::CalcTextSize(preset.name.c_str()).x + ImGui::GetStyle().FramePadding.x * 4 <
+                              ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x)
+                ImGui::SameLine();
+            first = false;
+            preset_switch(menu, callbacks, preset);
+        }
+        ImGui::EndDisabled();
+    }
+    card_end(p);
+}
+// A section's named values that no other card of it shows, one at a time.
+void fine_card(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, std::uint8_t topic) {
+    const auto &rows = p.topic_rows[topic];
+    if (std::ranges::none_of(rows, [&](std::size_t i) { return row_works(view.rows[i]); })) return;
+    const std::string id = "fine-" + std::string(trainer::topics[topic].key);
+    if (card(menu, p, id.c_str(), "FINE TUNING", "One value at a time. Blue = changed. The box on the left locks a value.")) {
+        for (const auto i : rows)
+            if (row_works(view.rows[i])) value_row(menu, callbacks, p, view, view.rows[i], false, true);
+    }
+    card_end(p);
+}
+// The whole table: every tuning value the trainer knows, by the game's own groups.
+void every_value(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
+    // The list includes the game's tuning classes, which the trainer has to find in memory
+    // before an edit to one does anything: with the list open, it looks now.
+    trainer::note_class_list_shown();
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.42f);
+    if (p.group < 1) p.group = 1;
+    const char *current = p.group > 1 && static_cast<std::size_t>(p.group) <= view.groups.size() + 1
+        ? view.groups[static_cast<std::size_t>(p.group) - 2].c_str() : "Every group";
+    if (ImGui::BeginCombo("##group", current)) {
+        if (ImGui::Selectable("Every group", p.group == 1)) p.group = 1;
+        for (std::size_t i = 0; i < view.groups.size(); ++i)
+            if (ImGui::Selectable(view.groups[i].c_str(), p.group == static_cast<int>(i) + 2)) p.group = static_cast<int>(i) + 2;
+        ImGui::EndCombo();
+    }
+    tip("Shows one group of tuning values at a time.");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!view.editable || !callbacks.queue_console_command || !view.touched);
+    if (ImGui::Button("Reset values")) {
+        clear_edits(p);
+        trainer_command(menu, callbacks, "reset all");
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) wrapped_tooltip("Every tuning value back to the game's own. Locked values stay, and so do the trick, grind and transition settings.");
+    ImGui::EndDisabled();
+    ImGui::Checkbox("Only what I changed", &p.only_changed);
+    tip("Lists only the values that differ from the game's own.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Graph points", &p.graph_points);
+    if (ImGui::IsItemHovered()) wrapped_tooltip("Show every point of the tuning graphs, not just one multiplier per graph.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Values with no use found", &p.show_unused);
+    if (ImGui::IsItemHovered())
+        wrapped_tooltip("Also list the tuning values that the game was never found or seen reading.\nChanging those will probably do nothing.");
+    filter_rows(p, view);
+    ImGui::SameLine();
+    if (p.hidden_unused) ImGui::TextDisabled("%zu shown, %zu changed, %zu hidden", p.shown.size(), view.touched, p.hidden_unused);
+    else ImGui::TextDisabled("%zu shown, %zu changed", p.shown.size(), view.touched);
+    const bool with_group = p.group <= 1 || p.only_changed;
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(p.shown.size()));
+    while (clipper.Step())
+        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+            value_row(menu, callbacks, p, view, view.rows[p.shown[static_cast<std::size_t>(i)]], with_group, false);
+    if (p.shown.empty()) note("Nothing matches.");
+}
+// What one section holds. Cards that live in the two long functions are picked out of them by id.
+void topic_body(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, std::uint8_t topic, bool can_edit) {
+    const auto from_trickline = [&](std::initializer_list<std::string_view> ids) {
+        p.pick.assign(ids);
+        trickline_section(menu, model, callbacks, p, view);
+        p.pick.clear();
+    };
+    const auto from_transition = [&](std::initializer_list<std::string_view> ids) {
+        p.pick.assign(ids);
+        transition_section(menu, callbacks, p, view);
+        p.pick.clear();
+    };
+    switch (topic) {
+    case trainer::topic_game:
+        if (card(menu, p, "feel", "PLAY LIKE", "The game's own tuning, or Skate 3's on one of its difficulties")) {
+            ImGui::BeginDisabled(!can_edit);
+            feel_buttons(menu, callbacks, view);
+            ImGui::EndDisabled();
+            note("A Skate 3 choice sets Skate 3's own numbers for everything the two games share (pop, grind pops, pushing, pumping, steering, "
+                 "manuals, spins, bails), and for grinds the way they were before skate.: the older grind friction, Skate 3's lock-on distances, wider slide "
+                 "angles, and no automatic turning between grinds. What a number cannot change stays skate.'s: animations and which stick "
+                 "motion asks for which grind. GRINDS and TRANSITION each have a Skate 3 feel of their own for the controls.");
+        }
+        card_end(p);
+        dials_card(menu, callbacks, p, view, topic, can_edit);
+        break;
+    case trainer::topic_pop:
+        dials_card(menu, callbacks, p, view, topic, can_edit);
+        ImGui::BeginDisabled(!can_edit);
+        trick_heights(menu, callbacks, p, view, std::string{}, 1);
+        ImGui::EndDisabled();
+        from_trickline({"trick-pops", "trick-spins"});
+        break;
+    case trainer::topic_grinds:
+        from_trickline({"grind-feel", "grind-stick", "grind-exits"});
+        dials_card(menu, callbacks, p, view, topic, can_edit);
+        break;
+    case trainer::topic_trickline:
+        from_trickline({"trickline", "trick-revert"});
+        // Dark Pop is ReSkate's own switch (not a tuning value), so it is live even where the tuning is locked.
+        dark_pop_controls(menu, model, callbacks);
+        from_trickline({"trick-manuals"});
+        dials_card(menu, callbacks, p, view, topic, can_edit);
+        break;
+    case trainer::topic_transition:
+        from_transition({"transition-feel", "transition-coping", "transition-reentry", "transition-plant", "transition-lip", "transition-vert"});
+        break;
+    case trainer::topic_pumping:
+        from_transition({"transition-pump"});
+        break;
+    case trainer::topic_foot:
+        dials_card(menu, callbacks, p, view, topic, can_edit);
+        ImGui::BeginDisabled(!can_edit);
+        trick_heights(menu, callbacks, p, view, std::string{}, 2);
+        ImGui::EndDisabled();
+        break;
+    default:
+        dials_card(menu, callbacks, p, view, topic, can_edit);
+        break;
+    }
+    fine_card(menu, callbacks, p, view, topic);
+}
 void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     if (!view.ready) {
         begin_card(menu, "tune-wait", "PHYSICS TUNING");
@@ -321,145 +646,110 @@ void tune_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks,
         end_card();
         return;
     }
-    // Two short lists, the trick line section and the whole table (modes 0, 1, 3 and 2).
-    {
-        static constexpr std::pair<const char *, int> modes[]{{"REALISTIC", 0}, {"FUN", 1}, {"TRICKLINING", 3}, {"TRANSITION", 4}, {"EVERYTHING", 2}};
-        const float width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 4) / 5;
-        bool first = true;
-        for (const auto &[label, mode] : modes) {
-            if (!first) ImGui::SameLine();
-            first = false;
-            const bool on = p.mode == mode;
-            if (on) ImGui::PushStyleColor(ImGuiCol_Button, skate_theme::blue);
-            if (ImGui::Button(label, ImVec2(width, 0))) p.mode = mode;
-            tip(mode == 0 ? "A short list for toning the game down: lower pops, slower pushes, harder bails."
-                : mode == 1 ? "A short list for turning the game up: bigger pops, faster pushes, moon jumps."
-                : mode == 3 ? "Everything that makes a trick line in one place: board bending, reverts, pumping, pops, spins, manuals and grinds."
-                : mode == 4 ? "Bowls, quarter pipes, vert and spines in one place: coping grinds, coming back in, hang-ups, handplants, lip tricks, vert airs and pumping."
-                            : "Every dial and every tuning value the trainer knows.");
-            if (on) ImGui::PopStyleColor();
-        }
-    }
-    const std::uint8_t list = p.mode == 0 ? trainer::mode_realistic : p.mode == 1 ? trainer::mode_fun : std::uint8_t{0xff};
     const bool can_edit = view.editable && callbacks.queue_console_command != nullptr;
+    constexpr std::uint8_t order[]{trainer::topic_game, trainer::topic_pop, trainer::topic_speed, trainer::topic_bails, trainer::topic_grinds, trainer::topic_trickline,
+                                   trainer::topic_transition, trainer::topic_pumping, trainer::topic_foot, trainer::topic_none};
     // One search for the whole tab: dials, switches, trick sliders and every value.
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::InputTextWithHint("##search", "Search: dials, tricks and every value...", p.search.data(), p.search.size());
-    tip("Type a word to find dials, trick sliders and tuning values on every list at once. Clear the box to go back to the list.");
+    {
+        const float open_all = ImGui::CalcTextSize("Open all").x + ImGui::GetStyle().FramePadding.x * 2, fold_all = ImGui::CalcTextSize("Fold all").x + ImGui::GetStyle().FramePadding.x * 2;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - open_all - fold_all - ImGui::GetStyle().ItemSpacing.x * 2);
+        ImGui::InputTextWithHint("##search", "Search: dials, tricks and every value...", p.search.data(), p.search.size());
+        tip("Type a word to find dials, trick sliders and tuning values in every section at once. Clear the box to go back to the sections.");
+        const auto all = [&](bool open) {
+            for (const auto topic : order) {
+                const std::string id = "section-" + std::string(trainer::topics[topic].key);
+                set_fold(id, open);
+                trainer_command(menu, callbacks, std::format("fold {} {}", id, open ? 1 : 0));
+            }
+        };
+        ImGui::SameLine();
+        if (ImGui::Button("Open all", ImVec2(open_all, 0))) all(true);
+        tip("Opens every section.");
+        ImGui::SameLine();
+        if (ImGui::Button("Fold all", ImVec2(fold_all, 0))) all(false);
+        tip("Closes every section. A click on a section's bar opens it; a click on a card's title folds that card.");
+    }
     const auto words = lower(p.search.data());
-    const bool searching = !words.empty();
-    const auto listed = [&](const trainer::PresetRow &preset) {
-        return searching ? contains_words(lower(preset.title + " " + preset.name + " " + preset.note), words) : p.mode == 2 || (preset.modes & list) != 0;
-    };
-
-    // The whole-game choices (Play like, the player's saved setups) are on MAP & HUD; a trick line
-    // is the one list that is about a whole feel, so it keeps the choice at hand.
-    if (!searching && p.mode == 3) {
-        begin_card(menu, "feel", "PLAY LIKE", "The game's own tuning, or Skate 3's on one of its difficulties");
-        note("A Skate 3 choice sets Skate 3's own numbers for everything the two games share (pop, grind pops, pushing, pumping, steering, "
-                 "manuals, spins, bails), and for grinds the way they were before skate.: the older grind friction, Skate 3's lock-on distances, wider slide "
-                 "angles, and no automatic turning between grinds. What a number cannot change stays skate.'s: animations and which stick "
-                 "motion asks for which grind.");
-        ImGui::BeginDisabled(!can_edit);
-        feel_buttons(menu, callbacks, view);
-        ImGui::EndDisabled();
-        end_card();
-    }
-    if (p.mode == 3 && !searching) {
-        trickline_section(menu, model, callbacks, p, view);
-        return;
-    }
-    if (p.mode == 4 && !searching) {
-        transition_section(menu, callbacks, p, view);
-        return;
-    }
-    begin_card(menu, "dials", p.mode == 0 ? "FEEL: TONE IT DOWN" : p.mode == 1 ? "FEEL: TURN IT UP" : "FEEL",
-               "1 is the game's own. A dial moves every value its preset moves.");
-    ImGui::BeginDisabled(!can_edit);
-    for (const auto &preset : view.presets)
-        if (preset.builtin && preset.dial && listed(preset)) dial_row(menu, callbacks, p, preset);
-    // The presets that are plain switches, and the ones that set several dials at once.
-    bool first = true;
-    for (const auto &preset : view.presets) {
-        if (!preset.builtin || preset.dial || preset.name == "Stock" || preset.name.starts_with("Skate 3") || preset.name.starts_with("Transition:") || !listed(preset)) continue;
-        if (!first && ImGui::GetItemRectMax().x + ImGui::CalcTextSize(preset.name.c_str()).x + ImGui::GetStyle().FramePadding.x * 4 <
-                          ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x)
-            ImGui::SameLine();
-        first = false;
-        preset_switch(menu, callbacks, preset);
-    }
-    ImGui::EndDisabled();
-    ImGui::BeginDisabled(!can_edit || !view.touched);
-    if (ImGui::Button("Reset values")) trainer_command(menu, callbacks, "reset all");
-    if (ImGui::IsItemHovered()) wrapped_tooltip("Every tuning value back to the game's own. Locked values stay.");
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("%zu values changed", view.touched);
-    note("To save or share the whole setup under a name, or to play like Skate 3: MAP & HUD, at the bottom. No Bail, Noclip and the boosts: MOVEMENT.");
-    end_card();
-
-    ImGui::BeginDisabled(!can_edit);
-    trick_heights(menu, callbacks, p, view, words);
-    ImGui::EndDisabled();
-
-
-    // The values themselves: the short list's, or all of them.
-    ImGui::Spacing();
-    ImGui::SeparatorText(p.mode == 2 ? "EVERY VALUE" : "FINE TUNING");
-    if (p.mode == 2) {
-        // The list includes the game's tuning classes, which the trainer has to find in memory
-        // before an edit to one does anything: with the list open, it looks now.
-        trainer::note_class_list_shown();
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.42f);
-        if (p.group < 1) p.group = 1;
-        const char *current = p.group > 1 && static_cast<std::size_t>(p.group) <= view.groups.size() + 1
-            ? view.groups[static_cast<std::size_t>(p.group) - 2].c_str() : "Every group";
-        if (ImGui::BeginCombo("##group", current)) {
-            if (ImGui::Selectable("Every group", p.group == 1)) p.group = 1;
-            for (std::size_t i = 0; i < view.groups.size(); ++i)
-                if (ImGui::Selectable(view.groups[i].c_str(), p.group == static_cast<int>(i) + 2)) p.group = static_cast<int>(i) + 2;
-            ImGui::EndCombo();
+    place_rows(p, view);
+    if (!words.empty()) {
+        // Searching looks through everything at once, whatever section it is in.
+        const auto listed = [&](const trainer::PresetRow &preset) {
+            return preset.builtin && preset.name != "Stock" && !preset.name.starts_with("Skate 3") && !preset.name.starts_with("Transition:") &&
+                   contains_words(lower(preset.title + " " + preset.name + " " + preset.note), words);
+        };
+        if (std::ranges::any_of(view.presets, listed)) {
+            begin_card(menu, "dials-found", "DIALS AND SWITCHES", "1 is the game's own. A dial moves every value its preset moves.");
+            ImGui::BeginDisabled(!can_edit);
+            for (const auto &preset : view.presets)
+                if (listed(preset) && preset.dial) dial_row(menu, callbacks, p, preset);
+            bool first = true;
+            for (const auto &preset : view.presets) {
+                if (!listed(preset) || preset.dial) continue;
+                if (!first) ImGui::SameLine();
+                first = false;
+                preset_switch(menu, callbacks, preset);
+            }
+            ImGui::EndDisabled();
+            end_card();
         }
-        tip("Shows one group of tuning values at a time.");
-        ImGui::Checkbox("Only what I changed", &p.only_changed);
-        tip("Lists only the values that differ from the game's own.");
-        ImGui::SameLine();
-        ImGui::Checkbox("Graph points", &p.graph_points);
-        if (ImGui::IsItemHovered()) wrapped_tooltip("Show every point of the tuning graphs, not just one multiplier per graph.");
-        ImGui::SameLine();
-        ImGui::Checkbox("Values with no use found", &p.show_unused);
-        if (ImGui::IsItemHovered())
-            wrapped_tooltip("Also list the tuning values that the game was never found or seen reading.\nChanging those will probably do nothing.");
-    } else if (searching) {
+        ImGui::BeginDisabled(!can_edit);
+        trick_heights(menu, callbacks, p, view, words, 0);
+        ImGui::EndDisabled();
         trainer::note_class_list_shown();
-    } else {
-        note("The same values the dials move, one at a time. The box on the left locks a value against presets, dials and Reset values.");
+        filter_rows(p, view);
+        ImGui::TextDisabled("%zu values match", p.shown.size());
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(p.shown.size()));
+        while (clipper.Step())
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+                value_row(menu, callbacks, p, view, view.rows[p.shown[static_cast<std::size_t>(i)]], true, false);
+        if (p.shown.empty()) note("No value matches. Grind, transition and bending settings are in their sections: clear the box to see them.");
+        return;
     }
-    filter_rows(p, view);
-    if (p.mode != 2 && searching) ImGui::TextDisabled("%zu values match", p.shown.size());
-    if (p.mode == 2) {
-        ImGui::SameLine();
-        if (p.hidden_unused) ImGui::TextDisabled("%zu shown, %zu changed, %zu hidden", p.shown.size(), view.touched, p.hidden_unused);
-        else ImGui::TextDisabled("%zu shown, %zu changed", p.shown.size(), view.touched);
+    for (const auto topic : order) {
+        const auto &one = trainer::topics[topic];
+        const std::size_t count = topic ? view.changed[topic] : view.touched;
+        const auto summary = !count ? std::string{} : topic ? std::format("{} changed", count) : std::format("{} values changed in all", count);
+        // A section with something changed in it starts open, so nothing that is on can hide.
+        if (!topic_header(menu, callbacks, p, topic, summary, topic != trainer::topic_none && count > 0)) continue;
+        ImGui::Indent(px(10));
+        ImGui::PushID(static_cast<int>(topic));
+        if (!topic) {
+            every_value(menu, callbacks, p, view);
+        } else {
+            topic_body(menu, model, callbacks, p, view, topic, can_edit);
+            if (topic != trainer::topic_game) {
+                ImGui::BeginDisabled(!can_edit || !view.changed[topic]);
+                if (ImGui::SmallButton(std::format("Reset {}", std::string(one.title)).c_str())) {
+                    clear_edits(p);
+                    trainer_command(menu, callbacks, std::format("reset section {}", one.key));
+                }
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    wrapped_tooltip("%s", "Puts everything this section shows back to the game's own: its values, dials and settings. Locked values stay. "
+                                          "Nothing in the other sections is touched.");
+            }
+        }
+        ImGui::PopID();
+        ImGui::Unindent(px(10));
+        ImGui::Dummy(ImVec2(0, px(6)));
     }
-    const bool with_group = searching || (p.mode == 2 && (p.group <= 1 || p.only_changed));
-    const bool friendly = p.mode < 2;
-    ImGuiListClipper clipper;
-    clipper.Begin(static_cast<int>(p.shown.size()));
-    while (clipper.Step())
-        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
-            value_row(menu, callbacks, p, view, view.rows[p.shown[static_cast<std::size_t>(i)]], with_group, friendly);
-    if (p.shown.empty()) note("Nothing matches.");
 }
 
-void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words) {
+// The trick sliders. `part` 0: every one that matches the search words; 1: the TRICKS card of POP AND TRICKS; 2: the
+// jump on foot (ON FOOT). Pump power is on PUMPING and the board bending boost on TRICKLINING.
+void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view, const std::string &words, int part) {
     static constexpr const char *advanced_label = "Advanced trick speed (a speed for each flip trick: kickflip, heelflip, 360 flip, varial, shuvit, hardflip, laser flip, impossible)";
     static constexpr const char *labels[]{"Flip trick speed", advanced_label, "Pump power (pumping transitions)", "Manual pop height", "No comply height", "Boneless height", "Hippy jump height", "Off-board jump height",
                                            "Board bending boost (revert speed)"};
-    const auto wanted = [&](const char *label) { return words.empty() || contains_words(lower(std::string(label) + " tricks"), words); };
+    const auto wanted = [&](const char *label) {
+        const std::string_view name(label);
+        if (part == 2) return name == "Off-board jump height";
+        if (part == 1) return name != "Off-board jump height" && !name.starts_with("Pump power") && !name.starts_with("Board bending");
+        return contains_words(lower(std::string(label) + " tricks"), words);
+    };
     if (std::ranges::none_of(labels, wanted)) return;
-    begin_card(menu, "trick-heights", "TRICKS", "1.0 is the game's own");
+    if (card(menu, p, part == 2 ? "trick-foot" : part == 1 ? "trick-heights" : "trick-found", part == 2 ? "JUMP" : "TRICKS", "1.0 is the game's own")) {
     // `limited`: the game itself stops at the slider's end, so a typed number is held to it too.
     const auto slider = [&](const char *label, const char *option, float value, float &edit, bool &editing, const char *help, float high = 50.0f, bool limited = false, bool always = false) {
         if (!always && !wanted(label)) return false;
@@ -559,7 +849,7 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         if (ImGui::IsItemHovered())
             wrapped_tooltip("Board bending: land with the board turned out of line and the game snaps it straight. With this on, that snap\n"
                               "throws you forward, as it did in Skate 3: chain bends to keep and build speed without pushing.\n"
-                              "x 1 gives about +1.5 to +2.6 m/s a landing. 0 is off, the game's own. The Tricklining list has the details.\n"
+                              "x 1 gives about +1.5 to +2.6 m/s a landing. 0 is off, the game's own. TRICKLINING has the details.\n"
                               "From AutoRevertBoost by Sivaes, jaq and OVM.");
         ImGui::SameLine();
         float typed = view.revert_boost;
@@ -571,20 +861,21 @@ void trick_heights(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const
         if (ImGui::IsItemHovered()) wrapped_tooltip("Type any strength and press Enter: the slider's end is not a limit.");
         ImGui::PopID();
     }
-    if (ImGui::Button("Reset tricks")) {
-        p.revert_editing = false;
-        p.manual_editing = p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = false;
-        p.trick_editing = {};
-        trainer_command(menu, callbacks, "reset tricks");
+    if (part == 1) {
+        if (ImGui::Button("Reset tricks")) {
+            clear_edits(p);
+            trainer_command(menu, callbacks, "reset tricks");
+        }
+        tip("Puts every slider and switch on this card back to the game's own.");
     }
-    tip("Puts every slider and switch on this card back to the game's own.");
     note("Not tuning values: the game sets these in its trick scripts and flip curves. Type in the box to go past a slider's end.");
-    end_card();
+    }
+    card_end(p);
 }
 
 void practice_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     const auto telemetry = trainer::telemetry();
-    begin_card(menu, "speed", "GAME SPEED", "Slow motion for learning a line");
+    if (card(menu, p, "speed", "GAME SPEED", "Slow motion for learning a line")) {
     {
         const NamedSettingModel *setting = nullptr;
         for (const auto &row : model.engine_settings)
@@ -628,9 +919,10 @@ void practice_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
             note("The jump read-out measures real time, so it reads low while the game is slowed.");
         }
     }
-    end_card();
+    }
+    card_end(p);
 
-    begin_card(menu, "markers", "MARKERS", "Saved for each map");
+    if (card(menu, p, "markers", "MARKERS", "Saved for each map")) {
     int slot = view.slot;
     if (choice(menu, "marker-slot", slot, {"1", "2", "3", "4", "5"})) trainer_command(menu, callbacks, std::format("slot {}", slot + 1));
     const auto &marker = view.markers[static_cast<std::size_t>(std::clamp(view.slot, 0, static_cast<int>(trainer::marker_slots) - 1))];
@@ -664,9 +956,10 @@ void practice_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     if (toggle_row(menu, "Open this menu from the controller",
             "LB + RB + click the right stick opens and closes the menu. Inside: D-pad or left stick moves, A presses, B goes back, LB / RB change a slider in big steps.", pad_menu))
         trainer_command(menu, callbacks, std::format("option pad_menu {}", pad_menu ? 1 : 0));
-    end_card();
+    }
+    card_end(p);
 
-    begin_card(menu, "teleport", "TELEPORT");
+    if (card(menu, p, "teleport", "TELEPORT")) {
     // The waypoint line is why the map's registry is read at all: only while this is drawn.
     trainer::note_teleport_card_shown();
     info(menu, "Map waypoint", view.waypoint_set ? std::format("{:.1f}, {:.1f}, {:.1f}", view.waypoint[0], view.waypoint[1], view.waypoint[2])
@@ -695,7 +988,8 @@ void practice_tab(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
         ImGui::SetClipboardText(std::format("{:.3f}, {:.3f}, {:.3f}", telemetry.position[0], -telemetry.position[2], telemetry.position[1]).c_str());
         tip("Copies where you are in Blender's axes (Z up), for map makers.");
     ImGui::EndDisabled();
-    end_card();
+    }
+    card_end(p);
 }
 
 void jump_lines(SkateMenu &menu, const trainer::Jump &jump) {
@@ -736,27 +1030,21 @@ void feel_buttons(SkateMenu &menu, const CallbacksV3 &callbacks, const trainer::
 
 // Everything that makes a trick line, in one place: the same values and sliders as the Tune tab,
 // gathered, with one button for Skate 3's and one for the game's own.
-void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
+void trickline_section(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     const bool can_edit = view.editable && callbacks.queue_console_command != nullptr;
     ImGui::BeginDisabled(!can_edit);
-    begin_card(menu, "trickline", "TRICKLINING EXTRAS", "What Skate 3's tricklining had beyond its tuning");
+    if (card(menu, p, "trickline", "TRICKLINING EXTRAS", "What Skate 3's tricklining had beyond its tuning")) {
     bool extras = view.revert_boost > 0;
     if (toggle_row(menu, "Skate 3's tricklining extras",
             "The board bending boost below at x 1, heavier revert and powerslide friction (x 3 and x 1.5) and higher footplants (no comply and "
             "boneless height x 1.5). First guesses: tune each of them below.", extras))
         trainer_command(menu, callbacks, extras ? "trickline extras on" : "trickline extras off");
-    note("Pick the game to play like above, then tune the tricklining part of it here. Blue = changed; Reset puts one value back. Type in a box to go past a slider's end.");
-    end_card();
-    // Dark Pop is ReSkate's own switch (not a tuning value), so it is live even where the tuning is locked.
-    ImGui::EndDisabled();
-    dark_pop_controls(menu, model, callbacks);
-    ImGui::BeginDisabled(!can_edit);
-    begin_card(menu, "grind-exits", "GRIND EXITS AND TRANSFERS", "The game's own switches for leaving a grind, each left to the game or held off or on");
+    note("Turning it off puts back only what still holds these numbers: a value you have since moved stays yours. Blue = changed; Reset puts one value "
+         "back. Type in a box to go past a slider's end.");
+    }
+    card_end(p);
+    if (card(menu, p, "grind-feel", "GRINDS FEEL LIKE", "The game's own, or the way Skate 3 rode a grind")) {
     {
-        if (!p.grind_watching) {
-            trainer_command(menu, callbacks, "grind watch 1");
-            p.grind_watching = true;
-        }
         {
             // The two feels: every switch the game's own, or skate.'s own ways off a grind held off.
             bool like_skate = true, like_skate3 = true;
@@ -770,21 +1058,27 @@ void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &c
             }
             if (view.grind_push != 0.0f) like_skate = false;
             if (std::abs(view.grind_push - 1.8f) > 0.005f) like_skate3 = false;
-            if (view.grind_lean != 0.0f) like_skate = false;
-            if (view.grind_turn != 0.0f || view.grind_tip != 0.0f) like_skate = false;
-            if (view.grind_turn == 0.0f) like_skate3 = false; // any turn speed of your own keeps it Skate 3
             if (view.grind_range != 0.0f) like_skate = false;
             if (view.grind_range == 0.0f) like_skate3 = false; // any range of your own keeps it Skate 3
             field(menu, "Grinds feel like");
             if (ImGui::RadioButton("skate.", like_skate)) trainer_command(menu, callbacks, "grind feel skate");
-            tip("Every switch below is left to the game.");
+            tip("Every grind setting and switch is left to the game.");
             ImGui::SameLine();
             if (ImGui::RadioButton("Skate 3", like_skate3)) trainer_command(menu, callbacks, "grind feel skate3");
             tip("Turns off what skate. added to leaving a grind: leaning off without a pop, the sideways ollie, "
-                "exits onto another grind, double grinds, stronger and camera-relative exits, linear drive. The left stick still turns and tips the "
-                "board on the grind, as it did in Skate 3. Change any row below afterwards to make your own mix.");
+                "exits onto another grind, double grinds, stronger and camera-relative exits, linear drive. The left stick alone turns the board on a "
+                "one-truck grind, the right stick tips it (5-0, nose grind) and pops, and a pop goes sideways the way the left stick is held. Change any "
+                "row on the two cards below afterwards to make your own mix.");
+            note("Skate 3 feel holds five of your game's own grind settings for as long as it is on. Your own settings are not changed: the game's "
+                 "Settings menu keeps showing yours, and they are back the moment you pick skate. here. The left stick's turn needs an Xbox-style "
+                 "(XInput) controller.");
         }
-        field(menu, "Side force of a pop off a grind");
+    }
+    }
+    card_end(p);
+    if (card(menu, p, "grind-stick", "STICK AND POPS ON A GRIND", "How far the left stick turns the board, and which way a pop goes")) {
+    {
+        field(menu, "Pop: side force");
         float side = p.grind_side_editing ? p.grind_side_edit : view.grind_side;
         const float side_box = px(64);
         ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - side_box - ImGui::GetStyle().ItemSpacing.x));
@@ -806,7 +1100,7 @@ void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &c
         }
         if (ImGui::IsItemHovered()) wrapped_tooltip("%s", "Type any multiplier and press Enter: the slider's end is not a limit.");
         {
-            field(menu, "Sideways pop with the stick");
+            field(menu, "Pop: push with stick");
             float push = p.grind_push_editing ? p.grind_push_edit : view.grind_push;
             const float push_box = px(64);
             ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - push_box - ImGui::GetStyle().ItemSpacing.x));
@@ -829,30 +1123,14 @@ void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &c
             if (ImGui::IsItemHovered()) wrapped_tooltip("%s", "Type any speed and press Enter: the slider's ends are not a limit.");
         }
         {
-            field(menu, "Left stick turns the board on a grind");
-            bool lean = view.grind_lean != 0.0f;
-            if (ImGui::Checkbox("##grind-lean", &lean)) trainer_command(menu, callbacks, lean ? "grind lean 1" : "grind lean 0");
-            tip("Skate 3 turns the board on a grind with the left stick; skate. turns it with the right stick's sideways push. With this on the left "
-                "stick turns it while you are on a grind (the game is shown the left stick's sideways push on the right stick, unless you are pushing "
-                "the right stick sideways yourself). The left stick's up and down tips the board too (5-0, nose grind); the right stick still tips it and still pops. "
-                "`trainer grind lean -1` mirrors it if the board turns the wrong way.");
-        }
-        {
-            // The two speeds the stick moves the board at on a grind: slider, and a box for any number.
+            // How far the stick turns the board on a grind: slider, and a box for any number.
             struct Speed { const char *label, *key, *help; float view; float *edit; bool *editing; float low{0}, high{10}; const char *zero{"game's own"}; };
             const Speed speeds[]{
-                {"Left stick turns the board this far", "range",
+                {"Left stick turn range", "range",
                  "Skate 3's turn on a grind: the left stick alone turns the board, with Skate 3's own dead zone, curve and easing, up to this many degrees "
                  "at the end of the stick. The right stick's sideways push no longer turns it; its up and down still tips the board (5-0, nose grind) and "
                  "pops. 0 is off: skate.'s own turn, which follows where the right stick points. A negative number turns the other way.", view.grind_range,
                  &p.grind_range_edit, &p.grind_range_editing, -180.0f, 180.0f, "off"},
-                {"Board turn speed on a grind", "turn",
-                 "How fast the stick turns the board on a grind. 0 leaves the game's own, 0.2 (8 with Legacy grinds on). Skate 3 starts at 1: raise or "
-                 "lower it until the board follows the left stick the way Skate 3's does.", view.grind_turn, &p.grind_turn_edit,
-                 &p.grind_turn_editing},
-                {"Board tip speed on a grind", "tip",
-                 "How fast the stick tips the board up or down on a grind (5-0, nose grind). 0 leaves the game's own: 0.8 on its newer grinds, 2 with Legacy "
-                 "grinds on.", view.grind_tip, &p.grind_tip_edit, &p.grind_tip_editing},
             };
             for (const auto &one : speeds) {
                 field(menu, one.label);
@@ -878,24 +1156,37 @@ void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &c
                 ImGui::PopID();
             }
         }
+    }
+    }
+    card_end(p);
+    if (card(menu, p, "grind-exits", "GRIND EXITS AND TRANSFERS", "Your game's own grind settings and switches, each left to the game or held off or on")) {
+    {
+        if (!p.grind_watching) {
+            trainer_command(menu, callbacks, "grind watch 1");
+            p.grind_watching = true;
+        }
+        note("GAME SETTINGS: the first six rows are settings of your own game (its Settings menu has them). Ticking one here holds it on or off for as long "
+             "as the trainer says so; your own setting is not changed and comes back with \"Game's own\", RESET EVERYTHING or leaving the game.");
         // The game's own settings first: they change which grind code runs.
         for (std::size_t i = 0; i < trainer::grind_settings.size(); ++i) {
             const auto &one = trainer::grind_settings[i];
             const std::string label(one.label), help = std::string(one.help) + " (The game's setting " + std::string(one.setting) + ", " +
-                                                       (one.stock ? "on" : "off") + " by default.) Tick or untick to force it; Game's own gives it back.";
+                                                       (one.stock ? "on" : "off") + " by default.) Tick or untick to hold it there while the trainer runs; your own setting is not changed, and Game's own gives it back.";
             field(menu, label.c_str());
             ImGui::PushID(static_cast<int>(100 + i));
             const bool forced = view.grind_setting[i] >= 0;
-            bool on = forced ? view.grind_setting[i] != 0 : one.stock;
+            bool on = forced ? view.grind_setting[i] != 0 : view.grind_own[i] != 0;
             if (ImGui::Checkbox("##on", &on)) trainer_command(menu, callbacks, std::format("grind {} {}", one.key, on ? "on" : "off"));
             tip(help.c_str());
             ImGui::SameLine();
             if (forced) {
-                ImGui::TextUnformatted(view.grind_setting[i] ? "forced on" : "forced off");
+                ImGui::TextUnformatted(view.grind_setting[i] ? "held on" : "held off");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(yours: %s)", view.grind_own[i] ? "on" : "off");
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Game's own")) trainer_command(menu, callbacks, std::format("grind {} game", one.key));
             } else {
-                ImGui::TextDisabled("%s", "game's own");
+                ImGui::TextDisabled("%s", view.grind_own[i] ? "your game setting: on" : "your game setting: off");
             }
             ImGui::PopID();
         }
@@ -929,63 +1220,27 @@ void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &c
              "changes in play has not been measured yet. A switch has no value until the game first uses it (most appear "
              "once you are on the board, the rest on the first grind), and they take hold about 15 seconds after a level loads.");
     }
-    end_card();
-
-    // Rows of the value table by id, looked up once per snapshot.
-    static constexpr const char *groups[][2]{
-        {"REVERTS AND POWERSLIDES", "onboard_powerslide.frictionscalar_revert onboard_powerslide.frictionscalar_autorevert "
-                                    "onboard_powerslide.powerslide_forwardforcescalar_revert onboard_powerslide.powerslide_forwardforcescalar_autorevert "
-                                    "onboard_powerslide.frictionscalar_slide onboard_powerslide.powerslide_forwardforcescalar_slide"},
-        {"PUMPING", "physicsmode.pumpeffectfactor physicsmode.pumpmaxacceleration physicsmode.pumpmaxdeceleration physicsmode.unintentionalpumpscalar "
-                    "physicspumping.pumpangle physicspumping.pumpminfactor physicspumping.pumpoutoftransitionscalar"},
-        {"POPS", "physicsmode.jumpmaxheight physicsmode.jumpminheight physicsmode.jumpminheightmanual physicsmode.grindjumpcommonmax physicsmode.grindjumpcommonmin "
-                 "physicsmode.grindjumpboardslidemax physicsmode.grindjumpboardslidemin physicsmode.grindjumptipslidemax physicsmode.grindjumptipslidemin "
-                 "physicsonboardjumptuning.jumpadjustvelocityboostlimitground physicsonboardjumptuning.jumpadjustvelocityboostlimitgrind"},
-        {"SPINS AND FLIPS", "physicsairstates.maxspinspeed physicsmode.maxautobodyspinspeed physicsmode.easybodyspins physicsreckoning.flipscalar "
-                            "physicsreckoning.flipmaxspeed heldflip.straightflipcatchtime heldflip.shuvmincatchtime heldflip.varialmincatchtime "
-                            "heldflip.bigflipmincatchtime"},
-        {"MANUALS AND GRINDS", "physicsmanual.manualscalar_p physicsmanual.manualscalar_i physicsmanual.manualscalar_d physicsmanual.maxtiltangle "
-                               "physicsmode.grindlockdist physicsgrind.commonfrictionscalar physicsgrindsair.maxdistboardslide physicsgrindsair.maxdisttipslide "
-                               "physicsgrind.grind_tipslide_minangletoprimitive physicsgrind.slowgrindexitspeed physicsgrind.copingexitstarttime "
-                               "physicsgrind.curbexitstarttime physicsgrind.fairlysteepexitstarttime physicsfriction.noinputtime "
-                               "physicssteering.generalscalar physicssteering.damping"},
-    };
-    // What each group is for in a line, said once at the top of its card.
-    static constexpr const char *group_notes[]{
-        "",
-        "Pumping is speed without pushing: crouch into a transition and stand up out of it. Strength is how much a pump gives, the limit how "
-        "fast it may build. Skate 3 pumped harder (18 against 13) but capped it lower.",
-        "A line lives on pops you can count on. Max is a held pop, min a quick flick; bring them together and every pop is the same height. "
-        "Each kind of grind has its own pair, and the stick boost is the speed you can add by pushing the stick as you pop.",
-        "How fast you and the board turn, and how long a flip may take to come round (its catch time). Slower spins and longer catch times "
-        "read as style; faster ones fit more into a small gap.",
-        "Manual balance (the three balance numbers are how hard the game corrects you), how far a rail reaches out to grab you, how quickly a "
-        "grind loses speed, and when the game ends a grind for you. The tuning skate. grew out of ended slow grinds by itself; in skate. those exit timers are off (-1).",
-    };
-    if (p.trick_revision != view.revision) {
-        p.trick_revision = view.revision;
-        for (std::size_t g = 0; g < std::size(groups); ++g) {
-            p.trick_rows[g].clear();
-            const std::string keys = groups[g][1];
-            for (std::size_t start = 0; start < keys.size();) {
-                auto end = keys.find(' ', start);
-                if (end == std::string::npos) end = keys.size();
-                const auto key = keys.substr(start, end - start);
-                for (std::size_t i = 0; i < view.rows.size() && !key.empty(); ++i)
-                    if (lower(view.rows[i].id) == key) {
-                        p.trick_rows[g].push_back(i);
-                        break;
-                    }
-                start = end + 1;
-            }
-        }
     }
+    card_end(p);
+
+    // What each group of rows is for in a line, said once at the top of its card.
+    static constexpr const char *group_cards[][3]{
+        {"", "", ""},
+        {"trick-pops", "POPS",
+         "A line lives on pops you can count on. Max is a held pop, min a quick flick; bring them together and every pop is the same height. The stick "
+         "boost is the speed you can add by pushing the stick as you pop. Pops out of grinds are on GRINDS."},
+        {"trick-spins", "SPINS AND FLIPS",
+         "How fast you and the board turn, and how long a flip may take to come round (its catch time). Slower spins and longer catch times "
+         "read as style; faster ones fit more into a small gap."},
+        {"trick-manuals", "MANUALS AND STEERING",
+         "Manual balance (the three balance numbers are how hard the game corrects you), how far the board may tip, and how the board steers and settles."},
+    };
     const auto rows = [&](std::size_t g) {
         for (const auto i : p.trick_rows[g])
-            if (i < view.rows.size()) value_row(menu, callbacks, p, view, view.rows[i], false, true);
+            if (i < view.rows.size() && row_works(view.rows[i])) value_row(menu, callbacks, p, view, view.rows[i], false, true);
     };
 
-    begin_card(menu, "trick-revert", "BOARD BENDING, REVERTS AND POWERSLIDES", "Speed out of a bent landing");
+    if (card(menu, p, "trick-revert", "BOARD BENDING, REVERTS AND POWERSLIDES", "Speed out of a bent landing")) {
     {
         // The revert speed boost: its strength, then what counts and what it is worth.
         const auto number_row = [&](const char *label, const char *command, float value, float low, float high, const char *format, const char *tip) {
@@ -1040,14 +1295,15 @@ void trickline_section(SkateMenu &menu, const Model &model, const CallbacksV3 &c
     note("Friction: how much speed a revert or a powerslide scrubs off (higher loses more). Skate 3's were heavier, which is why bending "
          "mattered there. Forward force: a push the game adds while you revert or slide.");
     rows(0);
-    end_card();
-    trick_heights(menu, callbacks, p, view, std::string{});
-    for (std::size_t g = 1; g < std::size(groups); ++g) {
-        if (p.trick_rows[g].empty()) continue;
-        begin_card(menu, groups[g][0], groups[g][0]);
-        note(group_notes[g]);
-        rows(g);
-        end_card();
+    }
+    card_end(p);
+    for (std::size_t g = 1; g < std::size(group_cards); ++g) {
+        if (std::ranges::none_of(p.trick_rows[g], [&](std::size_t i) { return i < view.rows.size() && row_works(view.rows[i]); })) continue;
+        if (card(menu, p, group_cards[g][0], group_cards[g][1])) {
+            note(group_cards[g][2]);
+            rows(g);
+        }
+        card_end(p);
     }
     ImGui::EndDisabled();
 }
@@ -1086,20 +1342,23 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
             const auto &one = trainer::transition_settings[i];
             if (one.card != card) continue;
             const std::string label(one.label), help = std::string(one.help) + " (The game's setting " + std::string(one.setting) + ", " +
-                                                       (one.stock ? "on" : "off") + " by default.) Tick or untick to force it; Game's own gives it back.";
+                                                       (one.stock ? "on" : "off") + " by default.) A setting of your own game: ticking it here holds it there while the trainer runs. Your own "
+                                                       "setting is not changed, and Game's own gives it back.";
             field(menu, label.c_str());
             ImGui::PushID(static_cast<int>(200 + i));
             const bool forced = view.tr_setting[i] >= 0;
-            bool on = forced ? view.tr_setting[i] != 0 : one.stock;
+            bool on = forced ? view.tr_setting[i] != 0 : view.tr_own[i] != 0;
             if (ImGui::Checkbox("##on", &on)) trainer_command(menu, callbacks, std::format("transition {} {}", one.key, on ? "on" : "off"));
             tip(help.c_str());
             ImGui::SameLine();
             if (forced) {
-                ImGui::TextUnformatted(view.tr_setting[i] ? "forced on" : "forced off");
+                ImGui::TextUnformatted(view.tr_setting[i] ? "held on" : "held off");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(yours: %s)", view.tr_own[i] ? "on" : "off");
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Game's own")) trainer_command(menu, callbacks, std::format("transition {} game", one.key));
             } else {
-                ImGui::TextDisabled("%s", "game's own");
+                ImGui::TextDisabled("%s", view.tr_own[i] ? "your game setting: on" : "your game setting: off");
             }
             ImGui::PopID();
         }
@@ -1109,7 +1368,7 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
         for (std::size_t i = 0; i < trainer::grind_switches.size(); ++i) {
             const auto &one = trainer::grind_switches[i];
             if (one.key != key) continue;
-            const std::string label(one.label), help = std::string(one.help) + " " + more + " (" + std::string(one.state) + "; the same switch as on TRICKLINING.)";
+            const std::string label(one.label), help = std::string(one.help) + " " + more + " (" + std::string(one.state) + "; the same switch as on GRINDS.)";
             field(menu, label.c_str());
             ImGui::PushID(static_cast<int>(300 + i));
             const bool held = view.grind_mode[i] >= 0;
@@ -1127,46 +1386,7 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
             ImGui::PopID();
         }
     };
-    // Rows of the value table by id, looked up once per snapshot.
-    static constexpr std::string_view coping_rows[]{"physicsgrind.copingexitstarttime", "physicsgrind.fairlysteepexitstarttime", "physicsgrind.curbexitstarttime",
-                                                    "physicsgrind.slowgrindexitspeed", "physicsgrind.nonpopexitangledeg", "physicsgrind.grindreckoningsmoothnessonexit",
-                                                    "physicsgrind.grindreckoningsmoothnessdropin"};
-    static constexpr std::string_view reentry_rows[]{"physicstrajectory.scoregrind", "physicsgrindsair.maxdist50_50", "physicsgrindsair.maxdist5_0",
-                                                     "physicsgrindsair.maxdisttipslide", "physicsgrindsair.maxdistboardslide", "physicstrajectory.grindlandingmaxangle"};
-    static constexpr std::string_view plant_rows[]{"physicshandplant.exitanglerangestart", "physicshandplant.exitanglerangeend", "physicshandplant.minnormalvel",
-                                                   "physicshandplant.maxnormalvel", "physicshandplant.maxparallelvel", "physicshandplant.maxverticalvel",
-                                                   "physicshandplant.minlipclearance", "physicshandplant.maxlipclearance", "physicshandplant.maxangleofapproach",
-                                                   "physicshandplant.waitforanimtime", "physicshandplant.bstofsanglethreshold", "physicshandplant.fstobsanglethreshold",
-                                                   "physicshandplant.linesegmentoffset", "physicshandplant.linesegmentpad", "physicshandplant.segmentcastheightpad"};
-    static constexpr std::string_view lip_rows[]{"physicsliptrick.liptrickcomapexheight", "physicsliptrick.timetoapexvsspeed x", "physicsliptrick.skateboardrotationslerpvstime x",
-                                                 "physicsliptrick.maxrotationpersecond", "physicsliptrick.lipquerymaxlipdistance",
-                                                 "physicsliptrick.lipquerymaxdirectionchangedegrees", "physicsliptrick.launchgroundslopethreshold",
-                                                 "physicsliptrick.lipquerylipslopethreshold", "physicsliptrick.lipquerygroundslopethreshold", "physicsrollin.maxrollintime",
-                                                 "physicsrollin.skateboardrollinduration", "physicsrollin.minlipbashdownwardspeed", "physicsrollin.undershootamount"};
-    static constexpr std::string_view vert_rows[]{"physicsreckoning.vertjumpalignmaxgroundnormaly", "physicsreckoning.vertjumpalignmaxangle",
-                                                  "physicsreckoning.vertjumpalignminjumpdiry", "physicsreckoning.vertjumpalignfactor",
-                                                  "physicstrajectory.naturalairoffvertsscalar", "physicsairstates.naturalairmaxdist", "physicstrajectory.scoretransition",
-                                                  "physicstrajectory.mintimeafterapexfortransition", "physicstrajectory.scoremiddlebonus",
-                                                  "physicstrajectory.scorelandingdirection", "physicstrajectory.maxtrajectoryadjust", "physicstrajectory.coneanglex",
-                                                  "physicstrajectory.coneanglez", "physicstrajectory.mintimefortrajectorytobevalid"};
-    static constexpr std::string_view pump_rows[]{"physicsmode.pumpeffectfactor", "physicsmode.pumpmaxacceleration", "physicsmode.pumpmaxdeceleration",
-                                                  "physicsmode.unintentionalpumpscalar", "physicspumping.pumpangle", "physicspumping.pumpminfactor",
-                                                  "physicspumping.pumpoutoftransitionscalar", "physicspumping.pumpoutoftransitioncheckdistancescalar",
-                                                  "physicsantipumping.maxdownwardangledeg", "physicsantipumping.maxdownwardangledeg_nobanks"};
-    static constexpr std::span<const std::string_view> lists[]{coping_rows, reentry_rows, plant_rows, lip_rows, vert_rows, pump_rows};
-    if (p.transition_revision != view.revision) {
-        p.transition_revision = view.revision;
-        for (std::size_t g = 0; g < std::size(lists); ++g) {
-            p.transition_rows[g].clear();
-            for (const auto key : lists[g])
-                for (std::size_t i = 0; i < view.rows.size(); ++i)
-                    if (lower(view.rows[i].id) == key) {
-                        p.transition_rows[g].push_back(i);
-                        break;
-                    }
-        }
-    }
-    // Only rows that do something: a value the game was never found reading is left out (it is still on EVERYTHING),
+    // Only rows that do something: a value the game was never found reading is left out (it is still on EVERY VALUE),
     // unless it has been changed, so it can be put back.
     const auto rows = [&](std::size_t g, std::size_t first = 0, std::size_t count = ~std::size_t{0}) {
         for (std::size_t n = first; n < p.transition_rows[g].size() && n - first < count; ++n)
@@ -1179,7 +1399,7 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
         return false;
     };
 
-    begin_card(menu, "transition-feel", "TRANSITION FEELS LIKE", "Bowls, quarter pipes, vert and spines: the game's own, or the way Skate 3 rode them");
+    if (card(menu, p, "transition-feel", "TRANSITION FEELS LIKE", "Bowls, quarter pipes, vert and spines: the game's own, or the way Skate 3 rode them")) {
     {
         const bool preset_on = std::ranges::any_of(view.presets, [](const trainer::PresetRow &row) { return row.builtin && row.active && row.name == "Transition: Skate 3"; });
         bool like_skate = !preset_on, like_skate3 = preset_on;
@@ -1199,13 +1419,14 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
             "back in, handplants that come back in high on the wall. Sets Skate 3's coping exit timers and handplant exit. Airs stay skate.'s own, which is "
             "already Skate 3's rule (stick forward flies out onto the deck, anything else comes back in), and so does pumping (use Pump power and Pump assist). "
             "Change any row afterwards to make your own mix.");
-        note("New in this build, and built from Skate 3's own rules before any of it was measured in skate.: tell us what each help does on your ramps. "
+        note("New in this version, and built from Skate 3's own rules before any of it was measured in skate.: tell us what each help does on your ramps. "
              "With the jump read-out on (MAP & HUD) every coping grind, handplant and hang-up writes a line starting \"Trainer transition:\" to the log. "
-             "Grinds have their own choice of feel on TRICKLINING.");
+             "Grinds have their own choice of feel on GRINDS. The lean needs an Xbox-style (XInput) controller.");
     }
-    end_card();
+    }
+    card_end(p);
 
-    begin_card(menu, "transition-coping", "COPING GRINDS AND STALLS", "On the lip of a bowl, a pipe or a quarter");
+    if (card(menu, p, "transition-coping", "COPING GRINDS AND STALLS", "On the lip of a bowl, a pipe or a quarter")) {
     number_row("Lean into the ramp", "transition lean", view.tr_lean, -1.0f, 1.0f, view.tr_lean == 0.0f ? "off" : "%.2f",
                "skate. stands the skater straight up on top of the coping. With this the skater leans into the ramp, the more the faster the grind runs along the "
                "coping (nothing below 1 m/s, all of it from 5 m/s). It works by showing the game your left stick pushed toward the ramp for as long as you leave that "
@@ -1223,9 +1444,10 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
     note("The exit timers: in Skate 3 a coping grind ended by itself. After the time set here the skater leaned further and further into the ramp and rolled "
          "in. skate. has them off (-1). Skate 3: 0.1 s riding straight up into the coping, 0.8 s coming at it from below, 2 s on a curb.");
     rows(0);
-    end_card();
+    }
+    card_end(p);
 
-    begin_card(menu, "transition-reentry", "RE-ENTRY AND HANG-UPS", "Coming back in off the coping, and over a spine");
+    if (card(menu, p, "transition-reentry", "RE-ENTRY AND HANG-UPS", "Coming back in off the coping, and over a spine")) {
     number_row("No hang-ups", "transition unstick", view.tr_unstick, 0.0f, 5.0f, view.tr_unstick == 0.0f ? "off" : "x %.2f",
                "Skate 3's rule for a hang-up: slower than 1.1 m/s for longer than a sixth of a second after leaving the coping (or after landing an air off a "
                "transition without riding away). The skater is then pushed into the ramp and down until they are moving again. The number is how hard; 1 is "
@@ -1243,9 +1465,10 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
     }
     note("How far the skater reaches for an edge from the air, and what an edge is worth against the ground as a place to land:");
     rows(1);
-    end_card();
+    }
+    card_end(p);
 
-    begin_card(menu, "transition-plant", "HANDPLANTS", "Where a plant lets you go");
+    if (card(menu, p, "transition-plant", "HANDPLANTS", "Where a plant lets you go")) {
     number_row("Skate 3 plant exit", "transition plant", view.tr_plant, 0.0f, 1.0f, view.tr_plant == 0.0f ? "off" : "x %.2f",
                "When a handplant ends the skater leaves the lip at 0.9 m/s or more into the ramp and starts falling from rest, as off the top of an arc, in place of "
                "the downward speed the plant leaves them with. 1 is all the way, 0 is off. If plants still come down at the bottom of the ramp with this on, "
@@ -1254,47 +1477,58 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
     note("The game's own numbers for a plant. It looks for a wall to come down on in a fan of directions from along the coping (0) to straight in (90), and "
          "leaves the lip with a speed between the two limits. Skate 3: fan to 69 degrees, 0.9 m/s out, up to 2 m/s along the coping.");
     rows(2);
-    end_card();
+    }
+    card_end(p);
 
-    begin_card(menu, "transition-lip", "LIP TRICKS AND DROP-INS", "Stalls on the lip, rolling in from the deck");
+    if (card(menu, p, "transition-lip", "LIP TRICKS AND DROP-INS", "Stalls on the lip, rolling in from the deck")) {
     settings(trainer::transition_card_lip);
     rows(3);
-    end_card();
+    }
+    card_end(p);
 
-    begin_card(menu, "transition-vert", "VERT AIRS AND LANDINGS", "The pop off a wall, and where the game brings you down");
+    if (card(menu, p, "transition-vert", "VERT AIRS AND LANDINGS", "The pop off a wall, and where the game brings you down")) {
     settings(trainer::transition_card_vert);
     note("A pop off a steep wall is straightened to go up the wall, tipped in or out by the stick; in the air the game picks a landing from a fan of "
          "directions by score. These are the numbers for both.");
     rows(4);
-    end_card();
+    }
+    card_end(p);
 
-    begin_card(menu, "transition-pump", "PUMPING", "Speed without pushing");
+    if (card(menu, p, "transition-pump", "PUMP POWER AND GAME SETTINGS", "How much a pump gives, and how much of it you have to do")) {
     number_row("Pump power", "option pump_power", view.pump_power, 0.0f, 10.0f, "x %.2f",
-               "How much a pump of a transition gives: the trainer's own share on top of the game's. 1 is the game's own. The same slider as under TRICKS.");
+               "How much speed pumping a transition gives. 1 is the game's own; 2 gives about one more of the game's pumps on top of each of yours, 10 about "
+               "nine more, and under 1 takes speed away. The game still decides when you are pumping: the extra comes for as long as it counts you as "
+               "pumping. It is found in the game about 15 seconds after a level loads.");
+    if (view.pump_blocked) ImGui::TextDisabled("Off in this multiplayer game: the host's rules apply here.");
+    else if (view.pump_power != 1.0f && !view.pump_live) ImGui::TextDisabled("Finding the game's pumping in memory: it acts about 15 seconds after a level loads.");
+    note("GAME SETTINGS: the next three rows are your game's own settings, the same ones its Settings menu shows. Changing one here changes it there, "
+         "and the other way round. They are yours, not the trainer's: no preset carries them, no reset touches them and they never count as MODIFIED.");
     // The game's own options: the same values its Settings menu holds, changed from either place.
+    ImGui::EndDisabled(); // these are the player's own game settings: theirs to change in any session
     for (std::size_t i = 0; i < trainer::transition_options.size(); ++i) {
         const auto &one = trainer::transition_options[i];
-        const std::string label(one.label), help = std::string(one.help) + " This is the game's own setting (" + std::string(one.setting) +
-                                                   "): the game's Settings menu shows the same value, and changing it there changes it here.";
+        const std::string label(one.label), help = std::string(one.help) + " GAME SETTING (" + std::string(one.setting) +
+                                                   "): this is your game's own setting. The game's Settings menu shows the same value, changing it here "
+                                                   "changes it there, and it is not part of presets, resets or the STOCK badge.";
         ImGui::PushID(static_cast<int>(400 + i));
         field(menu, label.c_str());
         if (one.boolean) {
             bool on = view.tr_option[i] != 0;
             if (ImGui::Checkbox("##on", &on)) trainer_command(menu, callbacks, std::format("transition {} {}", one.key, on ? "on" : "off"));
             tip(help.c_str());
-            ImGui::SameLine();
-            ImGui::TextDisabled("%s", "the game's own setting");
         } else {
             const auto key = std::string("transition-option:") + std::string(one.key);
             int shown = p.active == key ? static_cast<int>(p.active_value) : view.tr_option[i];
-            ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - px(64) - ImGui::GetStyle().ItemSpacing.x));
-            if (ImGui::SliderInt("##value", &shown, one.low, one.high)) trainer_command(menu, callbacks, std::format("transition {} {}", one.key, shown));
+            ImGui::SetNextItemWidth(std::max(px(70), ImGui::GetContentRegionAvail().x - px(64) - px(104) - ImGui::GetStyle().ItemSpacing.x * 2));
+            ImGui::SliderInt("##value", &shown, one.low, one.high);
             if (ImGui::IsItemActive()) {
                 p.active = key;
                 p.active_value = shown;
-            } else if (p.active == key) {
+            } else if (p.active == key && (shown == view.tr_option[i] || !ImGui::IsItemDeactivatedAfterEdit())) {
                 p.active.clear();
             }
+            // Written once, when the slider is let go: every write is a write to the player's profile.
+            if (ImGui::IsItemDeactivatedAfterEdit()) trainer_command(menu, callbacks, std::format("transition {} {}", one.key, shown));
             if (ImGui::IsItemHovered()) wrapped_tooltip("%s", help.c_str());
             ImGui::SameLine();
             int typed = view.tr_option[i];
@@ -1302,8 +1536,12 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
             if (ImGui::InputInt("##typed", &typed, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue)) trainer_command(menu, callbacks, std::format("transition {} {}", one.key, typed));
             if (ImGui::IsItemHovered()) wrapped_tooltip("%s", "Type a number and press Enter.");
         }
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "GAME SETTING");
+        if (ImGui::IsItemHovered()) wrapped_tooltip("%s", help.c_str());
         ImGui::PopID();
     }
+    ImGui::BeginDisabled(!can_edit);
     settings(trainer::transition_card_pump);
     // The first seven rows are the older pumping code's numbers: skate.'s newer pumping does not read them, so they
     // are only shown while Legacy pumping is forced on (or to put back one that was changed).
@@ -1318,13 +1556,14 @@ void transition_section(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, 
                 value_row(menu, callbacks, p, view, view.rows[i], false, true);
     }
     rows(5, 7);
-    end_card();
+    }
+    card_end(p);
     ImGui::EndDisabled();
 }
 
 void map_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const trainer::View &view) {
     const auto telemetry = trainer::telemetry();
-    begin_card(menu, "hud", "HUD");
+    if (card(menu, p, "hud", "HUD")) {
     bool hud = view.hud, jump = view.hud_jump, logging = view.logging;
     if (toggle_row(menu, "Speed and air HUD", "Speed, air time and height in the corner while you skate.", hud))
         trainer_command(menu, callbacks, std::format("option hud {}", hud ? 1 : 0));
@@ -1333,9 +1572,10 @@ void map_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const train
     if (toggle_row(menu, "Record telemetry", "Write position and speed every frame to a CSV in %LOCALAPPDATA%\\ReSkate\\trainer\\telemetry.",
             logging))
         trainer_command(menu, callbacks, std::format("option log {}", logging ? 1 : 0));
-    end_card();
+    }
+    card_end(p);
 
-    begin_card(menu, "now", "RIGHT NOW");
+    if (card(menu, p, "now", "RIGHT NOW")) {
     if (!telemetry.skater) {
         note("No skater yet.");
     } else {
@@ -1343,20 +1583,23 @@ void map_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const train
         info(menu, "Position", std::format("{:.2f}, {:.2f}, {:.2f}", telemetry.position[0], telemetry.position[1], telemetry.position[2]));
         info(menu, "Heading", std::format("{:.0f} degrees", telemetry.heading));
     }
-    end_card();
+    }
+    card_end(p);
 
     if (telemetry.last.serial) {
-        begin_card(menu, "last-jump", "LAST JUMP", std::format("Jump {}", telemetry.last.serial).c_str());
+        if (card(menu, p, "last-jump", "LAST JUMP", std::format("Jump {}", telemetry.last.serial).c_str())) {
         jump_lines(menu, telemetry.last);
-        end_card();
+        }
+    card_end(p);
     }
     if (telemetry.best.serial && telemetry.best.serial != telemetry.last.serial) {
-        begin_card(menu, "best-jump", "LONGEST JUMP ON THIS MAP");
+        if (card(menu, p, "best-jump", "LONGEST JUMP ON THIS MAP")) {
         jump_lines(menu, telemetry.best);
-        end_card();
+        }
+    card_end(p);
     }
 
-    begin_card(menu, "map", "THIS MAP", view.map.empty() ? "No level loaded" : view.map.c_str());
+    if (card(menu, p, "map", "THIS MAP", view.map.empty() ? "No level loaded" : view.map.c_str())) {
     if (!view.map_note.empty()) note(view.map_note.c_str());
     if (!view.map_preset.empty()) {
         info(menu, "Author's preset", view.map_preset);
@@ -1376,21 +1619,10 @@ void map_tab(SkateMenu &menu, const CallbacksV3 &callbacks, Page &p, const train
     }
     if (view.map_note.empty() && view.map_preset.empty() && view.spots.empty())
         note("Map makers can ship a trainer.json in their mod folder with spots and a recommended preset.");
-    end_card();
-
-    // The whole game at once: which game it plays like, and the player's own saved setups. (The
-    // presets on TUNE each change one thing.)
-    if (view.ready) {
-        const bool can_edit = view.editable && callbacks.queue_console_command != nullptr;
-        begin_card(menu, "feel", "PLAY LIKE", "The game's own tuning, or Skate 3's on one of its difficulties");
-        ImGui::BeginDisabled(!can_edit);
-        feel_buttons(menu, callbacks, view);
-        ImGui::EndDisabled();
-        note("A Skate 3 choice sets Skate 3's own numbers for everything the two games share. The dials and switches on TUNE each change one "
-             "thing: set those as you like, then save the whole setup below.");
-        end_card();
-        your_presets(menu, callbacks, p, view, can_edit);
     }
+    card_end(p);
+
+    note("Your presets are above the tabs now, beside RESET EVERYTHING. Play like Skate 3 is on TUNE, under WHOLE GAME.");
 }
 } // namespace
 
@@ -1399,11 +1631,18 @@ bool trainer_take_open() {
     auto &p = page();
     if (view->open_serial == p.open_serial) return false;
     p.open_serial = view->open_serial;
-    // "presets": the player's saved setups are at the bottom of MAP & HUD.
-    p.tab = view->open_tab == 7 ? 3 : view->open_tab == 3 || view->open_tab == 1 ? 2 : view->open_tab == 2 ? 1 : 0; // by name, see `trainer open`
-    if (view->open_tab == 8) p.mode = 3; // the trick line section of the Tune tab
-    if (view->open_tab == 9) p.mode = 4; // the transition section
-    if (view->open_tab >= 4 && view->open_tab < 7) p.mode = std::clamp(view->open_tab - 4, 0, 2);
+    // By name, see `trainer open`: 0 tune, 1 presets, 2 practice, 3 map, 7 movement; the rest are sections of TUNE
+    // (4 realistic and 5 fun were lists of earlier versions: the top of TUNE).
+    const int tab = view->open_tab;
+    p.tab = tab == 7 ? 3 : tab == 2 ? 1 : tab == 3 ? 2 : 0;
+    if (tab == 1) p.manage = true;
+    constexpr int sections[]{-1, -1, -1, -1, -1, -1, trainer::topic_none, -1, trainer::topic_trickline, trainer::topic_transition, trainer::topic_pop, trainer::topic_speed,
+                             trainer::topic_bails, trainer::topic_grinds, trainer::topic_pumping, trainer::topic_foot, trainer::topic_trickline, trainer::topic_pop,
+                             trainer::topic_game};
+    if (tab >= 0 && tab < static_cast<int>(std::size(sections)) && sections[tab] >= 0) {
+        p.scroll_to = sections[tab];
+        p.search[0] = 0;
+    }
     p.show_page = true;
     return true;
 }
@@ -1413,32 +1652,80 @@ bool trainer_page_wanted() {
     p.show_page = false;
     return wanted;
 }
+// The game speed the PRACTICE tab sets (1: the game's own; also when it cannot be read).
+double game_speed(const Model &model) {
+    for (const auto &row : model.engine_settings)
+        if (row.name == "SimulationTime.TimeScale" && row.available) {
+            try {
+                const auto first = row.value.find_first_of("-.0123456789");
+                if (first != std::string::npos) return std::stod(row.value.substr(first));
+            } catch (...) {}
+        }
+    return 1.0;
+}
 void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks) {
     auto &p = page();
     const auto view = trainer::view();
+    // Which sections and cards are open is the player's, kept in the trainer's file.
+    if (!p.folds_seeded && view->revision) {
+        p.folds_seeded = true;
+        for (const auto &[id, open] : view->folds) set_fold(id, open);
+    }
+    {
+        std::string id;
+        bool open{};
+        while (take_fold_change(id, open)) trainer_command(menu, callbacks, std::format("fold {} {}", id, open ? 1 : 0));
+    }
+    // Everything that changes how the game plays, said in words. The first parts are the trainer's own; No Bail,
+    // Noclip, Dark Pop and the game speed are ReSkate's and count all the same.
+    const double speed = game_speed(model);
+    std::string what;
+    const auto add = [&](const std::string &part) { what += (what.empty() ? "" : ", ") + part; };
+    if (view->ready) {
+        if (view->touched) add(std::format("{} value{}", view->touched, view->touched == 1 ? "" : "s"));
+        static constexpr std::pair<std::uint8_t, const char *> kinds[]{{trainer::topic_pop, "trick settings"}, {trainer::topic_grinds, "grind settings"},
+                                                                      {trainer::topic_trickline, "bending settings"}, {trainer::topic_transition, "transition settings"},
+                                                                      {trainer::topic_pumping, "pumping settings"}, {trainer::topic_foot, "on-foot jump"}};
+        for (const auto &[topic, name] : kinds)
+            if (view->settings[topic]) add(name);
+    }
+    if (model.debug.noclip) add("Noclip");
+    if (model.debug.no_bail) add("No Bail");
+    if (model.debug.dark_pop) add("Dark Pop");
+    if (std::abs(speed - 1.0) > 1e-3) add(std::format("game speed x{:.2f}", speed));
     // A guest under the host's physics would only wipe a setup they cannot see at work here.
     ImGui::BeginDisabled(!callbacks.queue_console_command || view->session_enforced);
     if (ImGui::Button("RESET EVERYTHING")) {
-        p.manual_editing = p.hippy_editing = p.nocomply_editing = p.boneless_editing = p.offboard_editing = p.flip_editing = p.pump_editing = p.revert_editing = false;
-        p.trick_editing = {};
+        clear_edits(p);
         trainer_command(menu, callbacks, "reset everything");
-        // No Bail and Noclip change how the game plays too: off with the rest.
+        // No Bail, Noclip, Dark Pop and the game speed change how the game plays too: off with the rest.
         if (callbacks.queue_debug && model.debug.noclip) debug_request(menu, callbacks, {DebugAction::set_noclip, false});
         if (callbacks.queue_debug && model.debug.no_bail) debug_request(menu, callbacks, {DebugAction::set_no_bail, false});
+        if (callbacks.queue_debug && model.debug.dark_pop) debug_request(menu, callbacks, {DebugAction::set_dark_pop_enabled, false});
+        if (callbacks.queue_debug && model.debug.probe) debug_request(menu, callbacks, {DebugAction::set_probe_enabled, false});
+        if (std::abs(speed - 1.0) > 1e-3) send_console(menu, callbacks, "reset SimulationTime.TimeScale");
     }
-    tip("Puts back every value, lock, preset, dial, trick setting, and turns No Bail and Noclip off: the game exactly as it shipped.");
+    tip("Puts back every value, lock, preset, dial, trick, grind, transition and bending setting, turns No Bail, Noclip and Dark Pop off, sets the "
+        "game speed to normal and stops loading a preset on this map: the game exactly as it shipped. Your saved presets are kept, and so are your "
+        "game's own settings.");
     ImGui::EndDisabled();
     if (view->session_enforced && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         wrapped_tooltip("%s", "Off in this multiplayer game: the host controls physics here. Your own setup is kept for when you leave.");
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
+    const auto locks = view->locks ? std::format("  ({} locked value{})", view->locks, view->locks == 1 ? "" : "s") : std::string{};
     if (view->session_enforced) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "HOST'S PHYSICS: your own setup is kept for when you leave.");
-    else if (view->ready && view->stock && (model.debug.noclip || model.debug.no_bail))
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), model.debug.noclip ? "MODIFIED: Noclip is on (MOVEMENT). This button turns it off."
-                                                                                : "MODIFIED: No Bail is on (MOVEMENT). This button turns it off.");
-    else if (view->ready && view->stock) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "STOCK: the game is exactly as it shipped. Nothing of the trainer's is on.");
-    else if (view->ready) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "MODIFIED: this button puts back every value, lock, preset and trick slider.");
-    else ImGui::TextDisabled("The game as it shipped: every value, lock, preset and trick slider.");
+    else if (!view->ready && what.empty()) ImGui::TextDisabled("The game as it shipped: every value, lock, preset and setting.");
+    else if (what.empty()) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "STOCK: the game is exactly as it shipped.%s", locks.c_str());
+    else {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "MODIFIED: %s.%s", what.c_str(), locks.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    if (ImGui::IsItemHovered())
+        wrapped_tooltip("%s", "STOCK means nothing here is changing how the game plays. Your game's own settings (the rows marked GAME SETTING) are yours and never "
+                              "count; a locked value that is still the game's own does not count either. Open TUNE: every section that holds a change says so on its bar.");
+    if (view->ready) preset_row(menu, callbacks, p, *view);
     // `preset export` leaves its line here; the clipboard belongs to this thread.
     if (!p.share_seen) {
         p.share_seen = true;
@@ -1449,19 +1736,22 @@ void trainer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callba
     }
     // Above the tabs, so every tab says why its controls do nothing in this session.
     if (view->session_enforced) {
-        begin_card(menu, "session-note", "MULTIPLAYER: THE HOST CONTROLS PHYSICS");
+        if (card(menu, p, "session-note", "MULTIPLAYER: THE HOST CONTROLS PHYSICS")) {
         warn("You are in a multiplayer game where the host controls physics. This menu will not work in this multiplayer game.");
         note("You skate with the host's setup. HUD and markers still work. Your own setup comes back when you leave.");
-        end_card();
+        }
+    card_end(p);
     } else if (view->boosts_blocked) {
-        begin_card(menu, "session-note", "MULTIPLAYER: BOOSTS ARE OFF");
+        if (card(menu, p, "session-note", "MULTIPLAYER: BOOSTS ARE OFF")) {
         warn("The host has turned boosts off in this multiplayer game: trick sliders, flip speed, auto push and the board bending boost will not work here.");
         note("The physics values still apply. The rest comes back when the host allows boosts or you leave.");
-        end_card();
+        }
+    card_end(p);
     }
     category_tabs(menu, p.tab, {"TUNE", "PRACTICE", "MAP & HUD", "MOVEMENT"}, "trainer-tabs");
     ImGui::PushID(p.tab);
     ImGui::BeginChild("trainer-tab", ImVec2(0, page_body_height(menu)));
+    p.pick.clear();
     switch (p.tab) {
     case 0: tune_tab(menu, model, callbacks, p, *view); break;
     case 1: practice_tab(menu, model, callbacks, p, *view); break;

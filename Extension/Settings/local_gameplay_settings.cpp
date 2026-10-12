@@ -99,7 +99,8 @@ void save_gameplay_setting(const void* reference, const dingosdk::Json& value) {
 
 bool gameplay_get_bool(std::uintptr_t m, const void* a) {
     // The trainer's grind settings ("Grinds feel like Skate 3"): forced for as long as the trainer holds them.
-    if (const auto forced = dingosdk::trainer::forced_gameplay_bool(a)) return *forced;
+    // Never to the game's own Settings screen: it shows, and would save, the player's own value.
+    if (const auto forced = dingosdk::trainer::forced_gameplay_bool(a); forced && !gameplay_user_edit()) return *forced;
     if (const auto value = saved_gameplay_setting<bool>(a)) return *value;
     return gameplay_settings().get_bool(m, a);
 }

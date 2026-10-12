@@ -144,7 +144,7 @@ void camera_controls(SkateMenu& menu, const Model& model, const CallbacksV3& cal
 
 void movement_controls(SkateMenu& menu, const Model& model, const CallbacksV3& callbacks) {
     const auto& debug = model.debug;
-    begin_card(menu, "movement", "FLIGHT & BAILS");
+    if (fold_card(menu, "movement", "FLIGHT & BAILS")) {
     bool noclip = debug.noclip;
     if (toggle_row(menu, "Noclip", "Fly with the normal player camera. Includes No Bail; uses the Freecam flight speed.", noclip,
             (debug.noclip_available || debug.noclip) && callbacks.queue_debug))
@@ -184,9 +184,10 @@ void movement_controls(SkateMenu& menu, const Model& model, const CallbacksV3& c
                 : "A hard slam can snap your board. Needs one of the Board Break deck packs.",
             board_break, model.board_break.available && callbacks.queue_console_command))
         send_console(menu, callbacks, board_break ? "boardbreak 1" : "boardbreak 0");
+    }
     end_card();
 
-    begin_card(menu, "boosts", "BOOSTS", "Buttons are set in Settings > Controls");
+    if (fold_card(menu, "boosts", "BOOSTS", "Buttons are set in Settings > Controls")) {
     ImGui::BeginDisabled(!callbacks.queue_debug);
     field(menu, "Forward boost");
     float forward_velocity = debug.forward_velocity_speed;
@@ -203,13 +204,14 @@ void movement_controls(SkateMenu& menu, const Model& model, const CallbacksV3& c
     ImGui::EndDisabled();
     note("Controller: left stick moves, right stick looks, RT / LT rise and fall, click the left stick to boost.");
     note("Keyboard: WASD / Q E, Shift to boost. Close the menu to fly.");
+    }
     end_card();
 }
 
 // Dark Pop (Extension/Skater/no_bail.cpp, input_capture.cpp): shown with the tricklining tools on PHYSICS > TUNE > TRICKLINING.
 void dark_pop_controls(SkateMenu& menu, const Model& model, const CallbacksV3& callbacks) {
     const auto& debug = model.debug;
-    begin_card(menu, "dark-pop", "DARK POP", "Catch with RB, then D-pad Right in the air");
+    if (fold_card(menu, "dark-pop", "DARK POP", "Catch with RB, then D-pad Right in the air")) {
     bool dark_pop = debug.dark_pop;
     if (toggle_row(menu, "Dark Pop", "Catch your trick with RB, then press D-pad Right in the air and hold it or let go: the game sees it held and let go at the time set above, counted from your takeoff. D-pad Right without RB is left alone. From the press until the pop lands, bails are held off, and a landing the game would bail becomes the pop. Best on flat ground.",
             dark_pop, callbacks.queue_debug != nullptr))
@@ -227,6 +229,8 @@ void dark_pop_controls(SkateMenu& menu, const Model& model, const CallbacksV3& c
             probe, callbacks.queue_debug != nullptr))
         debug_request(menu, callbacks, {DebugAction::set_probe_enabled, probe});
     note("Start with the release at 0.60 to 0.68 s: on a flat kickflip the default 0.715 s is later than the landing and does nothing.");
+    note("Needs an Xbox-style (XInput) controller: the game reads a PlayStation controller another way, which this cannot reach unless Steam Input presents it as an Xbox one.");
+    }
     end_card();
 }
 
