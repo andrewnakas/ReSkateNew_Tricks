@@ -1,5 +1,89 @@
 # Changelog
 
+## v0.5.0 - 2026-10-11
+
+Built on ReSkate 2.0.6.
+
+### The menu
+
+- **TUNE is one page of sections.** The REALISTIC / FUN / TRICKLINING / TRANSITION / EVERYTHING lists are gone.
+  Everything is sorted by what it is about: WHOLE GAME, POP AND TRICKS, SPEED AND PUSHING, BAILS AND LANDINGS,
+  GRINDS, TRICKLINING, TRANSITION, PUMPING, ON FOOT and EVERY VALUE (the whole table). A click on a section's
+  bar opens or closes it, a click on a card's title folds that card, on every tab; what you leave open is
+  remembered. A section that holds a change says so on its bar ("3 changed") and starts open, and each has
+  its own reset that touches nothing outside it (`trainer reset section <name>`). `trainer open <section>`
+  opens the menu there. The search box still looks through everything at once.
+- **Your presets are above the tabs**, beside RESET EVERYTHING: pick one and Load it, or name what is set now
+  and Save it. Manage opens the list (share as a line of text, import, delete, load by itself on this map).
+- **The badge says what is modified**, in words: "MODIFIED: 14 values, grind settings, No Bail". STOCK means
+  nothing at all is changing how the game plays. Dark Pop and the game speed now count (they did not), and
+  RESET EVERYTHING turns them off too, along with a preset set to load on this map.
+- **Presets carry the whole setup.** A saved or shared preset used to leave out the grind settings, the
+  transition settings, the bending rules and the two flip switches; it now holds all of them. Presets from
+  earlier versions still load. Not in a preset: locks, No Bail, Noclip, Dark Pop, the game speed, your
+  game's own settings.
+- **Rows that are your game's own settings say so.** Pump assist, Pump strength and Forward to push are
+  marked GAME SETTING: the game's Settings menu shows the same value, changing it here changes it there,
+  and they are never part of presets, resets or the STOCK badge. The grind and transition settings the
+  trainer can hold ("held on / held off") show your own value beside them, are never written to your
+  profile, are not shown to the game's own Settings screen, and come back the moment you let go.
+
+### New since 0.4.3
+
+- **MOVEMENT tab** on PHYSICS with ReSkate's Noclip, No Bail, Hall of Meat and the boost sliders (one No Bail).
+- **Dark Pop** (from Sivaes/darkpop, GPL-3.0) under TRICKLINING: catch with RB, press D-pad Right in the air.
+  Start with the release at 0.60 to 0.68 s. Measured with a scripted pad; not yet confirmed by hand.
+- **Manual pop height** (x 1 = 0.31 m, x 2 = 0.71 m measured; a riding ollie is untouched).
+- **Slow flips pop higher, so they land clean**: with flip trick speed below 1, every pop into a flip trick
+  (riding, out of a manual, out of a grind) goes as high as the slowed trick needs. Owner-confirmed.
+- **Flick tricks at full speed**: front foot and nollie impossibles and 360 pop shuvits no longer turn slower
+  than a kickflip at the same setting. Owner-confirmed.
+- **Twenty per-trick speeds** under Advanced trick speed (ollie, nollie impossibles and late flip added), and
+  the flip trick speed leaves a plain ollie alone.
+- **GRINDS: feel like skate. or Skate 3.** Skate 3 feel: the left stick alone turns the board on a one-truck
+  grind (Skate 3's own dead zone, curve and easing), the right stick tips and pops, a pop goes sideways the
+  way the left stick is held (1.8 m/s), and what skate. added to leaving a grind is off. Owner-confirmed
+  ("feels perfect"). Every setting and switch behind it has its own row; hippy jumps off a grind are boosted
+  by the hippy slider.
+- **TRANSITION: feel like skate. or Skate 3**, with rows for leaning into the ramp on a coping grind, rolling
+  off the coping at your angle, no hang-ups, the coping re-catch delay, the handplant exit, and the game's own
+  lip, vert and handplant numbers. First builds from Skate 3's rules: none of the coping, hang-up or
+  handplant helps has been measured on a ramp yet. Tell us what they do.
+- **PUMPING**: Pump power (owner-confirmed) beside the game's own Pump assist and Pump strength.
+
+### Fixed
+
+- "Reset tricks" also wiped every grind and transition setting. It resets its own card now.
+- Taking a Skate 3 feel off could put back values you had set yourself, and a feel that was on by its values
+  but not by name could not be taken off. A feel now takes back exactly the values that still hold its numbers.
+- Turning Tricklining extras off reset bending boost and footplant heights you had raised yourself.
+- The badge read MODIFIED for per-trick speeds with Advanced unticked and for a lock on an untouched value.
+- A held grind switch could stay where the trainer put it after a new skater was built.
+- The stick the game is shown on a grind or a coping, the held switches and the held settings now expire by
+  themselves within half a second if the trainer stops running.
+- `trainer reset everything` from the console is refused under a host's physics, like the button.
+
+### Removed
+
+- "Board turn / tip speed on a grind" and "Left stick turns the board on a grind" (the tick box): they did
+  nothing. The working control is "Left stick turn range".
+- The dials "On board: gravity" and "Get-on-board speed" (measured: no effect), "Catch flips at a set point",
+  and the old PUMPING card's strength rows unless Legacy pumping is held on (the game's newer pumping does not
+  read them).
+- Values the game was never seen reading are no longer on a section; they are all still under EVERY VALUE.
+
+### Known
+
+- The Skate 3 grind stick, the lean into a ramp and Dark Pop work by changing what the game reads from an
+  Xbox-style (XInput) controller. The game reads a PlayStation controller another way unless Steam Input
+  presents it as an Xbox one.
+- A slowed flip without "Slow flips pop higher" still hangs in the air.
+- Flip speeds, pump power and the grind switches take hold about 15 seconds after every level load.
+
+## v0.4.3 - 2026-10-07
+
+Built on ReSkate 1.1.4 (0.4.2 was built on 1.1.3). The trainer itself is unchanged.
+
 ## v0.4.2 - 2026-10-07
 
 - **Flip trick speed really sets the speed, both ways, and each trick can have its own.** The
