@@ -159,7 +159,7 @@ struct Runtime {
     // The trick node's rows to the landing node have no branch window but want the family before ground to be air
     // (EnumGS.LastFilteredPhysicsState == 2); the game leaves it at ground when only the current one is written.
     std::uint32_t primo_air_delay{250}; // ms from takeoff before a caught primo's way in starts (when the time to land is not known)
-    float primo_air_left{0.33f};        // a caught primo's way in starts with this much time left to land
+    float primo_air_left{5.0f};        // a caught primo's way in starts with this much time left to land
     std::uintptr_t s_time_to_land{};
     bool air_last_fps{true};
     std::uintptr_t s_last_filtered{};
@@ -189,6 +189,19 @@ struct Runtime {
     float primo_roll{90.0f}, primo2_roll{90.0f}, casper_roll{0.0f}, casper_drop{0.0f};
     bool protect{true};
     bool keep{false}; // a held pose is not left for the game's own dismount
+    // The posed board held rigidly to its clip on the ground (the drive's strength; the game's own is 1), and the
+    // game's wipeout and run-out checks told to stand down while a pose is held (Bool.Anim.ForceDisableAllWipeouts):
+    // at 25 km/h the owner's poses rocked 60 to 90 degrees and the game ran the skater off a second in (2026-10-13).
+    float rigid{30.0f};
+    bool level{true};
+    std::uint32_t level_delay{0};
+    bool no_runout{true}, no_runout_on{};
+    std::uintptr_t s_no_wipeouts{};
+    // The poses' way-in clips started part of the way in, so a catch snaps to the pose (casper_into has its board
+    // within 10 degrees of the pose from tick 34 of 70; primo_into is on its edge from tick 38 of 95).
+    float snap_casper{22.0f}, snap_primo{38.0f};
+    bool snap_dirty{}, snap_applied{};
+    std::uint64_t next_snap{};
     bool stomp{true}; // a caught pose's board touching down goes straight to the ground animation state (no bounce)
     std::uint64_t low_last{};
     float catch_drop{0.1f}; // the caught board is moved down from under the feet: on its side or upside down it would sit in them
@@ -415,6 +428,19 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             if (const auto stomps = take_pose_stomps(contact))
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: bounce stopped {} times (wheels {}, truck {}, deck {}, body {}, trajectory {}).", stomps, contact & 0xf, contact >> 4 & 1,
                              contact >> 5 & 1, contact >> 6 & 1, contact >> 7 & 1);
+            {
+                float first{};
+                if (const auto writes = take_board_rigid(first))
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: board held rigid for {} steps (the drive's own strength was {:.2f}).", writes, first);
+            }
+            if (last_state == 103) {
+                float lean[6]{};
+                if (take_board_lean(lean))
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: board target lean (height of right, up, forward rows): {:.2f}..{:.2f}, {:.2f}..{:.2f}, {:.2f}..{:.2f}.", lean[0], lean[1],
+                                 lean[2], lean[3], lean[4], lean[5]);
+            }
+            if (const auto levelled = take_board_level())
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: board target held level for {} steps.", levelled);
             if (const auto kept = take_pose_kept())
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: bounce: a dismount was refused {} times.", kept);
             if (last_state == 103) {
@@ -486,6 +512,17 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
     }
     // </dev>
     // The states the game itself uses, as soon as its EnableCaspers write has shown where they live.
+    // The way-in clips' start ticks, written into the two transitions once per level (their objects come with it).
+    if (!playing) r.snap_applied = false;
+    if (playing && skater_key_known() && state_objects_known() && !r.snap_applied && now >= r.next_snap) {
+        r.next_snap = now + 2000;
+        const int casper = set_transition_start(base, "animation/dingo/transition_onboard.freestyle.conduit_to_onboard.freestyle.casper.into", r.snap_casper);
+        const int primo = set_transition_start(base, "animation/dingo/transition_onboard.freestyle.conduit_to_onboard.freestyle.primo.into", r.snap_primo);
+        if (casper >= 0 && primo >= 0) {
+            r.snap_applied = true;
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: way-in clips start at tick {:.0f} (casper) and {:.0f} (primo).", r.snap_casper, r.snap_primo);
+        }
+    }
     if (skater_key_known() && (!state_objects_resolved() || !state_objects_known()) && now >= r.next_resolve) {
         r.resolved_count = resolve_state_objects(base);
         r.next_resolve = now + 500;
@@ -647,10 +684,27 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 const Freestyle current = r.after_primo != Freestyle::off ? r.after_primo : r.freestyle;
                 if (in_pose && (r.primo_out_at || r.after_primo != Freestyle::off || (zone != Freestyle::off && zone != current))) r.unhold_until = now + 900;
                 set_freestyle_slide_hold(in_pose && now - r.pose_since > 450 && now >= r.unhold_until);
+                // Level and on one heading from the moment the pose is in (not while it changes to another or leaves).
+                set_board_level(r.level && in_pose && now - r.pose_since >= r.level_delay && now >= r.unhold_until && !r.primo_out_at
+                                    ? (current == Freestyle::casper ? 1 : 2)
+                                    : 0);
             }
             // No wipeout while a pose is being caught, landed or held: only the stick loses it.
             if (r.protect && r.by_hold && r.freestyle != Freestyle::off) protect_pose(300);
             if (r.stomp && r.by_hold && r.freestyle != Freestyle::off) stomp_pose(300);
+            {
+                const bool posed = r.by_hold && r.freestyle != Freestyle::off;
+                set_board_rigid(posed && physics.valid && physics.state == 103 ? r.rigid : 0.0f);
+                // <dev> Watched once the pose has been in for a second (its way in turns the board on purpose).
+                set_board_lean_watch(posed && physics.valid && physics.state == 103 && r.landed_at && now - r.landed_at > 1000);
+                // </dev>
+                const bool want = r.no_runout && posed;
+                if (want || r.no_runout_on) {
+                    if (!r.s_no_wipeouts) r.s_no_wipeouts = find_state(base, "Animation/Dingo/Bool.Anim.ForceDisableAllWipeouts");
+                    (void)write_state_at(base, r.s_no_wipeouts, 0, want ? 1 : 0);
+                    r.no_runout_on = want;
+                }
+            }
             // Not stepped off the board either, unless the player asks for it (Y).
             if (r.keep && r.by_hold && r.freestyle != Freestyle::off && !(buttons & 0x8000)) keep_pose_on_board(200);
             else if (buttons & 0x8000) keep_pose_on_board(0);
@@ -1414,6 +1468,42 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         if (arguments.empty() || !number(arguments[0], ms) || ms > 2000) return "usage: tricks soft <ms 0 to 2000>";
         set_freestyle_slide_soft(ms);
         return std::format("A landed pose is held level for {} ms.", ms);
+    }
+    if (verb == "rigid") {
+        if (arguments.empty()) return std::format("The posed board's drive strength is {:.0f} (0: the game's own, 1).", r.rigid);
+        r.rigid = std::clamp(static_cast<float>(std::atof(arguments[0].c_str())), 0.0f, 1000.0f);
+        return std::format("A posed board is held to its pose with strength {:.0f}.", r.rigid);
+    }
+    if (verb == "level2") {
+        // tricks level2 on|off | delay <ms>: the held pose's target kept level (the older `level` is the slide's pitch knob).
+        if (arguments.size() == 2 && arguments[0] == "tilt") {
+            set_board_level_tilt(static_cast<float>(std::atof(arguments[1].c_str())));
+            return "The held casper's tilt is set.";
+        }
+        if (arguments.size() == 2 && arguments[0] == "delay" && number(arguments[1], r.level_delay)) return std::format("A held pose is levelled {} ms after it takes the board.", r.level_delay);
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks level2 on|off | delay <ms>";
+        r.level = arguments[0] == "on";
+        return r.level ? "A held pose's board target is kept level and on one heading." : "A held pose's board target follows the skater.";
+    }
+    if (verb == "norunout") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks norunout on|off";
+        r.no_runout = arguments[0] == "on";
+        return r.no_runout ? "The game's wipeout and run-out checks stand down while a pose is held." : "The game's wipeout and run-out checks run in a pose.";
+    }
+    if (verb == "snap") {
+        // tricks snap <casper tick> <primo tick>: where the way-in clips start (0: at their beginning, as shipped).
+        if (arguments.size() != 2) return std::format("The way-in clips start at tick {:.0f} (casper) and {:.0f} (primo). usage: tricks snap <casper tick> <primo tick>", r.snap_casper, r.snap_primo);
+        r.snap_casper = std::clamp(static_cast<float>(std::atof(arguments[0].c_str())), 0.0f, 69.0f);
+        r.snap_primo = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 94.0f);
+        float was_casper{}, was_primo{};
+        int casper = set_transition_start(r.base, "animation/dingo/transition_onboard.freestyle.conduit_to_onboard.freestyle.casper.into", r.snap_casper, &was_casper);
+        int primo = set_transition_start(r.base, "animation/dingo/transition_onboard.freestyle.conduit_to_onboard.freestyle.primo.into", r.snap_primo, &was_primo);
+        if (casper == -1) casper = set_transition_start(r.base, "Animation/Dingo/Transition_onboard.freestyle.conduit_to_onboard.freestyle.casper.into", r.snap_casper, &was_casper);
+        if (primo == -1) primo = set_transition_start(r.base, "Animation/Dingo/Transition_onboard.freestyle.conduit_to_onboard.freestyle.primo.into", r.snap_primo, &was_primo);
+        r.snap_dirty = casper < 0 || primo < 0;
+        r.snap_applied = !r.snap_dirty;
+        return std::format("Way-in clips: casper from tick {:.0f} (was mode {}, tick {:.0f}), primo from tick {:.0f} (was mode {}, tick {:.0f}). Below 0: -1 not found, -2 unexpected layout, -3 write failed.",
+                           r.snap_casper, casper, was_casper, r.snap_primo, primo, was_primo);
     }
     if (verb == "stomp") {
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks stomp on|off";

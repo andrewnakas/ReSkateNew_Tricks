@@ -66,6 +66,9 @@ std::uintptr_t find_state(std::uintptr_t base, const char *name) noexcept;
 bool write_state_at(std::uintptr_t base, std::uintptr_t state, int kind, double value) noexcept;
 bool read_state_at(std::uintptr_t base, std::uintptr_t state, int kind, double &value) noexcept;
 bool state_objects_resolved() noexcept;
+// A state-flow transition, by its asset name, made to start its destination clip `tick` ticks in (0: as shipped).
+// Returns the phase mode that was there (0 or 7; `before`: the tick offset), or below 0 when nothing was written.
+int set_transition_start(std::uintptr_t base, const char *name, float tick, float *before = nullptr) noexcept;
 bool skater_key_known() noexcept;
 std::uint64_t skater_key() noexcept;
 // Forget the key (the skater is gone).

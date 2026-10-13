@@ -361,6 +361,41 @@ std::uintptr_t find_state(std::uintptr_t base, const char *name) noexcept {
     } __except (1) {}
     return 0;
 }
+// A state-flow transition (by its asset name) made to start its destination clip `tick` ticks in: the transition's
+// phase mode (i16 at + 0x74) set to 7, "tick offset", and its DestinationTickOffset (f32 at + 0x6c) to the tick. 0
+// puts the shipped values back (mode 0, offset 0). Returns what was there, or below 0: -1 not found, -2 not the
+// layout expected (nothing written), -3 the write failed.
+// An asset by name in any loaded asset domain (the state-flow's own assets are not in the game states' domains).
+std::uintptr_t find_anywhere(std::uintptr_t base, const char *name) noexcept {
+    const auto find = game::native_data().find_asset;
+    if (!find || !name) return 0;
+    __try {
+        for (std::uint16_t domain = 0; domain < 0xbbf; ++domain) {
+            std::uintptr_t owner{};
+            if (!peek(base + addr::engine::domain_owners + domain * std::uintptr_t{8}, owner) || !owner) continue;
+            const auto asset = find(domain, name);
+            if (!asset) continue;
+            const auto text = *reinterpret_cast<const std::uintptr_t *>(asset + object_name);
+            if (text && _stricmp(reinterpret_cast<const char *>(text), name) == 0) return asset;
+        }
+    } __except (1) {}
+    return 0;
+}
+int set_transition_start(std::uintptr_t base, const char *name, float tick, float *before) noexcept {
+    auto asset = find_state(base, name);
+    if (!asset) asset = find_anywhere(base, name);
+    if (!asset) return -1;
+    std::int16_t mode{};
+    float offset{}, phase{};
+    if (!peek(asset + 0x74, mode) || !peek(asset + 0x6c, offset) || !peek(asset + 0x68, phase)) return -2;
+    if ((mode != 0 && mode != 7) || !(offset >= 0.0f && offset < 400.0f) || !(phase >= 0.0f && phase <= 1.0f)) return -2;
+    if (before) *before = offset;
+    __try {
+        *reinterpret_cast<volatile float *>(asset + 0x6c) = tick > 0 ? tick : 0.0f;
+        *reinterpret_cast<volatile std::int16_t *>(asset + 0x74) = tick > 0 ? std::int16_t{7} : std::int16_t{0};
+        return mode;
+    } __except (1) { return -3; }
+}
 // SetFloatGameState: (key, state reference, value in xmm2).
 constexpr std::uintptr_t set_float_native = 0x10906a0;
 constexpr unsigned char set_float_bytes[]{0x48, 0x83, 0xec, 0x38, 0xc5, 0xf8, 0x29, 0x74, 0x24, 0x20, 0x4c, 0x8d, 0x0d};

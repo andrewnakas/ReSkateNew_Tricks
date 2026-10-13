@@ -19,6 +19,19 @@ void start_board_spin(float roll, float yaw, float pitch, std::uint32_t millisec
 void stop_board_spin() noexcept;
 // After start_board_spin: the board is also moved down its own up axis by this much as the turn goes.
 void set_board_drop(float metres) noexcept;
+// Keeps a held pose's target level and on the heading it was taken with: 1 a casper, 2 a primo, 0 off.
+void set_board_level(int mode) noexcept;
+// The height of a held casper's forward row (the pose's own tilt; 0.30 as measured).
+void set_board_level_tilt(float rise) noexcept;
+std::uint32_t take_board_level() noexcept;
+// <dev> The range of the height (y) of the target frame's right, up and forward rows while watched: min, max of each.
+void set_board_lean_watch(bool on) noexcept;
+bool take_board_lean(float values[6]) noexcept;
+// </dev>
+// Holds the board's angular drive to its animated pose at this strength (the game's own is 1; 0 gives it back).
+void set_board_rigid(float strength) noexcept;
+// How many steps it was held since the last call, and the strength found there the first time (below 0: never seen).
+std::uint32_t take_board_rigid(float &first_seen) noexcept;
 // Lifts the board up its own up axis, most at the middle of the running turn (0 at both ends).
 void set_board_hop(float metres) noexcept;
 bool board_spin_running() noexcept;
