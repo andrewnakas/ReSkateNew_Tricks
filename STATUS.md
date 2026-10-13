@@ -1,11 +1,15 @@
 # ReSkate Tricks: status
 
-## START HERE (written 2026-10-13 ~01:00)
-**Next session: plan, then do, three things the owner asked for:** (1) the casper/primo catch taken early in mid-air, cancelling the flip animation like a dark catch does; (2) no bouncing or tilting on landing (casper bounced once in ~9 runs; the owner has not yet confirmed the 00:53 build); (3) the small no-pop shuv on his roll gesture.
-- The newest entries are at the **bottom** of this file. Read the 23:29, 00:15, 00:31 and 00:53 entries for the mechanisms and the measured dead ends; the same summary is in the Claude memory file `project_reskate_tricks.md`.
-- Installed in the Skate folder: the 00:53 build. Start the launcher with `--no-update` (its auto-update is on). Owner's pre-mod files: `dev\backup\20261012-122134`.
-- Nothing is committed. D: dropped off twice on 2026-10-12: offer a local commit.
-- The "READY TO TEST" tables just below describe the first evening's click + flick controls (`tricks scheme flick`); the default is now the owner's hold scheme described in the bottom entries.
+## START HERE (written 2026-10-13 ~04:30)
+**The 04:26 build is installed** (the trainer session may swap it overnight; it was told how to put it back: both files from `build\vs2022-x64\Release`). It carries the four things the owner asked for on 2026-10-13. All of it is checked by scripted runs only: **the owner's hands are the next test.**
+- **Casper caught in the air:** the feet and board take the pose 63 ms after the catch (it was ~560 ms, at touchdown). Lands straight into the pose, no bounce: 11 of 11 scripted landings, 3 of them with a wandering left stick.
+- **Primo:** starts in the air 0.33 s before touchdown (not at the catch: started earlier, its board is on edge at touchdown, gets knocked flat and the game steps the skater off). 7 of 7 held. Making it start at the catch is OPEN.
+- **Flip-outs:** casper kickflip, heelflip, tre flip and primo kickflip all pop and land riding; a new trick or catch can follow as soon as the flip-out is down (it was locked for 2.5 s).
+- **Ground shuv:** the roll gesture now turns the board (it never did before): riding goes to the ground animation state for 0.45 s, the board turns 180 with a 5 cm lift, speed kept. A held quarter turn is in `dev\shots\sheet_i1.png` (bottom middle).
+- **Open, in order:** (1) owner playtest of all four; (2) primo from the catch; (3) what the skater's stance / the game makes of the board after a ground shuv (not seen in a still); (4) primo rocking: the meter reads 6 to 70 degrees but includes the board's own roll into the pose, so it needs eyes or a better meter; (5) `FreeStyleFlipTrick` 16 and primo2 flick-out, untouched; (6) the dead levers `stable` / `level` / `upright` are still in the code.
+- Read the 04:30 entry at the bottom for mechanisms, knobs and what failed. Test helper: `dev\pass.ps1` (several passes per game start, prints only this run's lines).
+- Committed locally on `tricks` (not pushed). D: stalled for an hour during the night (see the bottom entry).
+- The "READY TO TEST" tables just below describe the first evening's click + flick controls (`tricks scheme flick`); the default is the owner's hold scheme described in the bottom entries.
 
 
 ## READY TO TEST (build installed in the game folder 2026-10-12 ~16:00)
@@ -336,3 +340,27 @@ All runs used `dev/run.ps1`. It installs the build, boots Gravy Train, mounts wi
 - Casper + air pose is FLAKY: 8 clean landings earlier, but one run bounced 201 -> 200 three times from touchdown and lost the pose (mask on, before any left-stick input). Cause unknown.
 - Angular-velocity writes at part +0x90 / flag 0x20 have no measurable effect in 103 (rocking meter identical with `tricks stable` on/off): that lever does nothing; the earlier 'upright' knobs probably never did either.
 - Why the pose is late in the air: a flip trick's clip carries its own landing and is only left at its branch windows - to riding at branch_end_early (tick 42 of the hardflip clip, with EBool.Intent.Action and FilteredPhysicsState ground), ~0.3 s into the air. The land node has no window but needs EBool.Anim.Is.GenericLanding; forcing Bool.Anim.IsInAir.Loop/PreLand true to get it made caspers bounce and cost most of the speed (reverted; `tricks airpose states ...` to retry). The dark catch has its own early window (branch_end_fliptricktodarkcatch, tick 18). Owner's own catches latch ~0.2 s into the air (stick still travelling). NEXT IDEAS: time-warp the flip clip while a catch is armed (PTMTrickTag TimeWarpScale = Float.Anim.TrickFlipSpeed), or find what else satisfies GenericLanding.
+
+## 2026-10-13 04:30 build installed: early casper, no bounce, re-catch, ground shuv (sheets sheet_i1.png, sheet_j1.png)
+Plan: `C:\Users\andre\.claude\plans\peppy-stirring-moler.md`. Every number below is from `dev\pass.ps1` runs on the THPS training map (kickflip or heelflip, one push, ~17 km/h).
+
+**Early catch (casper).**
+- New dev log line `Tricks: nodes trick/land/riding` (reads Bool.State.Is.TrickInAir, Is.Landing, Onboard.Riding). It showed the old belief was wrong: with FilteredPhysicsState held at ground the graph was already in the landing node 16 ms after the catch, but that node carries the flip clip on in phase and only leaves at the clip's own early window, ~560 ms later, 30 ms before touchdown.
+- Writing `EnumGS.LastFilteredPhysicsState` = 2 as well (`tricks airpose last on|off`, default on) changed nothing on its own.
+- **What works:** one term of the graph's generic landing held true from the catch, `Bool.GP.DidInAirTuck` (now the default of `tricks airpose states`; `Name=value` holds an enum). The landing node then plays a generic landing clip whose early exit is at tick 4: landing node for 63 ms, then riding -> freestyle. Pose 63 ms after the catch.
+- A term that turns true later does nothing (the row is chosen when the landing node is entered).
+
+**The bounce.** With the pose complete in the air the casper lands on its deck (contact log: wheels 0, truck 0, deck 1) and the selector's landing check holds the air state: 201 -> 200 -> 201 twice, pose lost. This is the same failure as the old `IsInAir.Loop / PreLand` "dead end": it was never those states, it was landing in the pose.
+- **Fix (`tricks stomp on|off`, default on):** in the state selector hook (`choose_state`, no_bail.cpp), while a pose is caught, a grounded board (wheels, truck or deck, as the selector counts it) in 200 / 201 for 0.04 s goes straight to 103; a grounded 103 is not left for 200 / 201 either. Result: 201 -> 103 in one step, rocking meter 0.3 degrees (it read 18 to 24 on the old route).
+- With a wandering left stick one casper still came back off the ground once (103 for 80 ms, then air, then caught again). The left stick is now hidden in the air too while a pose is caught (`tricks leftmask air on|off`, default on: it costs spinning into a pose). After that: 3 of 3 clean, rocking 5 to 14 degrees.
+
+**Primo.** Started at the catch it is at its way-in clip's tick ~31 on touchdown, board on edge; the board is knocked flat and ~0.55 s later the game asks for a dismount (103 -> 504; stills: skater standing beside an upside-down board). Refusing the dismount (`tricks keep on`, default off) only hides it. A softened touchdown (`tricks soft <ms>`: no part moves up or down for that long) did not help.
+- **What works:** the whole in-air start held back until `Float.Physics.TimeToLand` (read in place from the states block, `peek_state_value`) is at most 0.33 s (`tricks airpose primoleft <s>`; `primodelay <ms>` from takeoff stands in if it cannot be read). 0.27 and 0.35 hold, 0.42 fails. It then lands on its wheels (201 -> 100 or 101 -> 103).
+
+**Flip-outs.** Casper kickflip / heelflip / tre flip and primo kickflip (via the casper, 200 ms): all pop, land in 100 and ride. The lock after a flip-out (`leaving`, 2.5 s) now ends 150 ms after the flip-out's touchdown: a second kickflip into a casper straight after a casper kickflip was caught and landed. Untouched: value 16, primo2.
+
+**Ground shuv.** Cause of "fires but does not turn": riding holds the board on its physics, so CurrentGroundTrick 7 never got the physics from 100 to 103. Now the selector hook sends 100 -> 103 for the length of the turn (`hold_ground_animation`), 7 keeps it, the board hook turns the frame +-180 with a lift at the middle (`tricks groundshuv hop <m>`, default 0.05). Log: 103 for ~450 ms, frame turned on every step (27 of 27); the owner's roll gesture fires it both ways; speed kept (4.7 m/s in, 4.6 m/s 0.9 s later). The "10.7 m/s" in the log line at the end of a shuv is the telemetry's one-part speed, not real. `tricks groundshuv quarter` holds a quarter turn for 4 s for a still. The slide holds the mean of the parts' speed during a shuv (`set_freestyle_slide_mean`).
+
+**Test rig notes.** `dev\pass.ps1 -Tag x1 -Passes '<commands>',...` (macros KICKCASPER, KICKPRIMO, ...LONG). Stills taken with `echo shot-` land seconds late (the script polls the log): only a pose held for several seconds can be photographed.
+
+**The machine.** From 01:37 to 02:30 D: stalled (queue of 7, no throughput, a one-line write took 12 s) while memory was also full; my linker and the trainer session's both hung in I/O wait. Two links at once on D: seem to trigger it.

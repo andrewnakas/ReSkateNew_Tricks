@@ -21,6 +21,7 @@ struct Spin {
     std::atomic<bool> on{};
     std::atomic<float> roll{}, yaw{}, pitch{};
     std::atomic<float> drop{}; // metres the board is moved down its own up axis (a pose caught in the air: under the feet)
+    std::atomic<float> hop{};  // metres the board is lifted at the middle of the turn (a ground shuvit: just off the ground)
     std::atomic<std::uint64_t> start{}; // QueryPerformanceCounter
     std::atomic<std::uint64_t> length{};
 };
@@ -66,6 +67,8 @@ bool turn_frame(std::uintptr_t board) noexcept {
                     pitch = spin.pitch.load(std::memory_order_relaxed) * progress;
         if (const float drop = spin.drop.load(std::memory_order_relaxed) * progress; drop != 0)
             for (int i = 0; i < 3; ++i) frame[12 + i] -= up[i] * drop;
+        if (const float hop = spin.hop.load(std::memory_order_relaxed) * std::sin(progress * 3.14159265358979f); hop != 0)
+            for (int i = 0; i < 3; ++i) frame[12 + i] += up[i] * hop;
         if (yaw != 0) turn(forward, right, yaw);   // about up
         if (pitch != 0) turn(up, forward, pitch);  // about right
         if (roll != 0) turn(right, up, roll);      // about forward
@@ -100,6 +103,7 @@ void set_board_context(std::uintptr_t context) noexcept { local_context.store(co
 void start_board_spin(float roll, float yaw, float pitch, std::uint32_t milliseconds) noexcept {
     spin.on.store(false, std::memory_order_release);
     spin.drop.store(0, std::memory_order_relaxed);
+    spin.hop.store(0, std::memory_order_relaxed);
     spin.roll.store(roll, std::memory_order_relaxed);
     spin.yaw.store(yaw, std::memory_order_relaxed);
     spin.pitch.store(pitch, std::memory_order_relaxed);
@@ -112,6 +116,7 @@ void stop_board_spin() noexcept {
     spin.drop.store(0, std::memory_order_relaxed);
 }
 void set_board_drop(float metres) noexcept { spin.drop.store(metres, std::memory_order_relaxed); }
+void set_board_hop(float metres) noexcept { spin.hop.store(metres, std::memory_order_relaxed); }
 bool board_spin_running() noexcept {
     if (!spin.on.load(std::memory_order_acquire)) return false;
     return clock_now() - spin.start.load(std::memory_order_relaxed) < spin.length.load(std::memory_order_relaxed);

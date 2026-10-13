@@ -204,6 +204,29 @@ void hold_off_board(std::uintptr_t selector, std::uint32_t current) noexcept {
     (void)cancel_request(current_owner.context, animation_request_offset, mount_request_mask);
 }
 std::atomic<std::uint64_t>& forced_wipeout_until() { static std::atomic<std::uint64_t> value{}; return value; }
+// ReSkate Tricks: a pose landed in the air comes down on its deck (a casper's board is upside down). The selector's
+// landing check holds the air state for a deck contact, then drops to plain air and back: the bounce. While a pose is
+// being landed, a grounded board (wheels, a truck or the deck touching, as the selector itself counts it) goes straight
+// to the ground animation state, which the pose's ground trick value then keeps.
+std::atomic<std::uint64_t>& pose_stomp_until() { static std::atomic<std::uint64_t> value{}; return value; }
+std::atomic<std::uint32_t>& pose_stomps() { static std::atomic<std::uint32_t> value{}; return value; }
+std::atomic<std::uint32_t>& pose_stomp_contact() { static std::atomic<std::uint32_t> value{}; return value; }
+// ReSkate Tricks: the ground shuvit. Riding holds the board on its physics, so the selector never asks for the ground
+// animation state (103) on its own; while this lasts, riding (100) goes there, and the ground trick value keeps it.
+std::atomic<std::uint64_t>& ground_animation_until() { static std::atomic<std::uint64_t> value{}; return value; }
+std::atomic<std::uint64_t>& pose_keep_until() { static std::atomic<std::uint64_t> value{}; return value; }
+std::atomic<std::uint32_t>& pose_kept() { static std::atomic<std::uint32_t> value{}; return value; }
+bool pose_grounded(std::uintptr_t selector, std::uint32_t& contact, bool& grounded) noexcept {
+    grounded = false;
+    const auto context = pointer(selector, 8);
+    std::int32_t wheels{};
+    std::uint32_t flags{};
+    float in_state{};
+    if (!context || !read(context + 0x17b0, wheels) || !read(context + 0x13c4, flags) || !read(context + 0x1838, in_state)) return false;
+    contact = (static_cast<std::uint32_t>(wheels > 0 ? wheels & 0xf : 0)) | (flags >> 16 & 1) << 4 | (flags >> 19 & 1) << 5 | (flags >> 22 & 1) << 6 | (flags >> 27 & 1) << 7;
+    grounded = wheels > 0 || (flags & 0x90000);
+    return grounded && in_state >= 0.04f;
+}
 std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
     {
         LastError error;
@@ -223,6 +246,39 @@ std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
         forced_wipeout_until().store(0, std::memory_order_release);
         chosen = wipeout_physics_state;
     }
+    if (selector == w.selector.load(std::memory_order_acquire) && (current == 200 || current == 201) && (chosen == 200 || chosen == 201) &&
+        GetTickCount64() < pose_stomp_until().load(std::memory_order_acquire)) {
+        std::uint32_t contact{};
+        bool grounded{};
+        if (pose_grounded(selector, contact, grounded)) {
+            chosen = 103;
+            pose_stomps().fetch_add(1, std::memory_order_relaxed);
+            pose_stomp_contact().store(contact, std::memory_order_relaxed);
+        }
+    }
+    // Nor does a landed pose pop back up while its board is still on the ground (seen once with the left stick
+    // moving through the landing: 103 for 80 ms, then the air again).
+    if (selector == w.selector.load(std::memory_order_acquire) && current == 103 && (chosen == 200 || chosen == 201) &&
+        GetTickCount64() < pose_stomp_until().load(std::memory_order_acquire)) {
+        std::uint32_t contact{};
+        bool grounded{};
+        (void)pose_grounded(selector, contact, grounded);
+        if (grounded) {
+            chosen = 103;
+            pose_stomps().fetch_add(1, std::memory_order_relaxed);
+            pose_stomp_contact().store(contact, std::memory_order_relaxed);
+        }
+    }
+    // A pose just landed is not stepped off either (the game asks for a dismount half a second into a primo landed in
+    // the pose: measured 2026-10-13).
+    if (selector == w.selector.load(std::memory_order_acquire) && current == 103 && chosen == 504 &&
+        GetTickCount64() < pose_keep_until().load(std::memory_order_acquire)) {
+        chosen = 103;
+        pose_kept().fetch_add(1, std::memory_order_relaxed);
+    }
+    if (selector == w.selector.load(std::memory_order_acquire) && (current == 100 || current == 103) && chosen == 100 &&
+        GetTickCount64() < ground_animation_until().load(std::memory_order_acquire))
+        chosen = 103;
     if (selector == w.selector.load(std::memory_order_acquire) && GetTickCount64() < w.until.load(std::memory_order_acquire)) {
         if (const auto before = w.state.exchange(chosen, std::memory_order_acq_rel); before != chosen) {
             LARGE_INTEGER now{};
@@ -439,6 +495,14 @@ void watch_physics_state(std::uintptr_t client, std::uintptr_t entity) noexcept 
     w.until.store(GetTickCount64() + 500, std::memory_order_release);
 }
 void protect_pose(std::uint64_t milliseconds) noexcept { pose_protected_until().store(GetTickCount64() + milliseconds, std::memory_order_release); }
+void hold_ground_animation(std::uint64_t milliseconds) noexcept { ground_animation_until().store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_release); }
+void keep_pose_on_board(std::uint64_t milliseconds) noexcept { pose_keep_until().store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_release); }
+std::uint32_t take_pose_kept() noexcept { return pose_kept().exchange(0, std::memory_order_relaxed); }
+void stomp_pose(std::uint64_t milliseconds) noexcept { pose_stomp_until().store(GetTickCount64() + milliseconds, std::memory_order_release); }
+std::uint32_t take_pose_stomps(std::uint32_t& contact) noexcept {
+    contact = pose_stomp_contact().load(std::memory_order_relaxed);
+    return pose_stomps().exchange(0, std::memory_order_relaxed);
+}
 void request_wipeout() noexcept { forced_wipeout_until().store(GetTickCount64() + 300, std::memory_order_release); }
 PhysicsStateWatch watched_physics_state() noexcept {
     auto& w = state_watch();

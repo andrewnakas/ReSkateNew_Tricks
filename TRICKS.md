@@ -18,7 +18,7 @@ Tiers describe how a trick gets built:
 | 5 | No comply flips and shuvs | Punkrek, strumzino | B | No comply state, then a flip enum and the flip clip | ready to test: flick after the no comply starts (procedural board turn; no name/score yet) |
 | 6 | Boneless/footplant fingerflips and flips | strumzino, Punkrek | B | Boneless state plus the fingerflip clips | code in (boneless/footplant opens the flick window); not verified, boneless inputs not found for the scripted pad |
 | 7 | One-foot grabs with fingerflips | Punkrek | B | Grab-to-fingerflip | todo |
-| 8 | Ground shuv-its, not pop shuvs (as in Session) | Don Kedic | B | Shuv setup plus the pop shuv board path, no pop | todo |
+| 8 | Ground shuv-its, not pop shuvs (as in Session) | Don Kedic | B | Riding sent to the ground animation state for the turn; the board's frame turned 180 with a small lift | needs test: L3 held, stick down, rolled to a lower diagonal, released (turn seen in a held still 2026-10-13; not played by hand) |
 | 9 | Push shuvs out of grinds | Gitty | B | Grind exit into a shuv | partly: pop out, then click + stick left/right (late shuvit); not run on a grind |
 | 10 | Nightmare flip and Daydream flip | strumzino | C | Varial clip plus an extra roll | ready to test: tap the click in the air on a varial flip (extra flip verified on a heelflip; varials not run) |
 | 11 | Dolphin flip and 360 dolphin/dragon flip | sake, DS | C | Board pitch rotation done procedurally | ready to test: in-air click with the stick up/down (dolphin turn) or on an up-diagonal (dragon flip: dolphin + 360 shuv); both checked on an ollie |

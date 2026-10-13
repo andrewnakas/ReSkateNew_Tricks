@@ -360,6 +360,10 @@ struct FreestyleSlide {
     float roll_angle{};
     std::atomic<float> roll_peak{}, roll_swing{};
     std::atomic<bool> hold{}, stable{true};
+    // A pose landed from the air: for this long from the touchdown no part moves up or down, so the board is not
+    // knocked out of the pose by its own landing (a primo's board lands on its edge).
+    std::atomic<std::uint32_t> soft_ms{};
+    std::atomic<bool> mean{};
     bool was_hold{}; // how much of the parts' motion against each other is taken out each step // take the pitch out of the board's turning while it slides
 };
 FreestyleSlide& freestyle_slide() { static auto* value = new FreestyleSlide; return *value; }
@@ -385,7 +389,17 @@ void tricks_freestyle_slide(std::uintptr_t core) noexcept {
             flags[i] = reader.value<std::uint32_t>(bodies.parts[i], 0x60);
         }
         reader.verify();
-        const float speed = std::sqrt(velocities[0][0] * velocities[0][0] + velocities[0][2] * velocities[0][2]);
+        // The way and speed of travel: the first part's, or (a ground shuvit, whose board turns under the feet: one
+        // part's own speed then has the turn in it, and holding that to the slide's speed drove the skater faster)
+        // the mean of all the parts'.
+        float travel_x = velocities[0][0], travel_z = velocities[0][2];
+        if (f.mean.load(std::memory_order_relaxed) && count) {
+            travel_x = travel_z = 0.0f;
+            for (std::size_t i = 0; i < count; ++i) { travel_x += velocities[i][0]; travel_z += velocities[i][2]; }
+            travel_x /= static_cast<float>(count);
+            travel_z /= static_cast<float>(count);
+        }
+        const float speed = std::sqrt(travel_x * travel_x + travel_z * travel_z);
         if (!(speed < 1000.0f)) return;
         // The game's own friction in this state stops the board within a second (measured on flat ground: 15 km/h to
         // under 2 in one second), so the slide's speed is the mod's: it starts at the speed the pose was entered
@@ -397,7 +411,7 @@ void tricks_freestyle_slide(std::uintptr_t core) noexcept {
         f.was_hold = hold;
         if (speed > 0.5f && hold) {
             const auto turn0 = reader.value<std::array<float, 3>>(bodies.parts[0], 0x90);
-            const float rate = (turn0[0] * velocities[0][0] + turn0[2] * velocities[0][2]) / speed;
+            const float rate = (turn0[0] * travel_x + turn0[2] * travel_z) / speed;
             if (std::isfinite(rate) && std::abs(rate) < 100.0f) {
                 f.roll_angle += rate * bodies.seconds;
                 if (std::abs(rate) > f.roll_peak.load(std::memory_order_relaxed)) f.roll_peak.store(std::abs(rate), std::memory_order_relaxed);
@@ -415,15 +429,16 @@ void tricks_freestyle_slide(std::uintptr_t core) noexcept {
         // skater goes over backwards with it (seen at 15 km/h: on its back for the first second). That turn about
         // the sideways axis is taken out of each part's angular velocity (+0x90, pending flag 0x20); the roll that
         // turns the board into the pose is along the travel and stays.
-        const float side[3]{velocities[0][2] / speed, 0.0f, -velocities[0][0] / speed}; // up x travel
+        const float side[3]{travel_z / speed, 0.0f, -travel_x / speed}; // up x travel
         const bool level = f.level.load(std::memory_order_relaxed) && speed > 1.0f;
         // Held upright: every part is brought toward the one velocity of the slide, so the skater does not rock on
         // the board when it touches down in the pose, and what is left of the parts' tipping is damped.
         const float keep = 1.0f - std::clamp(f.upright.load(std::memory_order_relaxed), 0.0f, 1.0f);
-        const float slide_x = velocities[0][0] * scale, slide_z = velocities[0][2] * scale;
+        const float slide_x = travel_x * scale, slide_z = travel_z * scale;
         for (std::size_t i = 0; i < count; ++i) {
             velocities[i][0] = slide_x + (velocities[i][0] * scale - slide_x) * keep;
             velocities[i][2] = slide_z + (velocities[i][2] * scale - slide_z) * keep;
+            if (now - f.started < f.soft_ms.load(std::memory_order_relaxed)) velocities[i][1] = 0.0f;
             body_write(bodies.parts[i] + 0x70, velocities[i]);
             std::uint32_t pending = flags[i] | 8u;
             if (hold && f.stable.load(std::memory_order_relaxed)) {
@@ -596,6 +611,8 @@ void take_freestyle_slide_roll(float& peak_rate, float& swing) noexcept {
     swing = freestyle_slide().roll_swing.exchange(0, std::memory_order_relaxed);
 }
 void set_tricks_step(void (*step)() noexcept) noexcept { tricks_step().store(step, std::memory_order_release); }
+void set_freestyle_slide_mean(bool mean) noexcept { freestyle_slide().mean.store(mean, std::memory_order_relaxed); }
+void set_freestyle_slide_soft(std::uint32_t milliseconds) noexcept { freestyle_slide().soft_ms.store(milliseconds, std::memory_order_relaxed); }
 void set_freestyle_slide_level(bool level) noexcept { freestyle_slide().level.store(level, std::memory_order_relaxed); }
 void set_freestyle_slide(std::uintptr_t client, std::uintptr_t entity, float deceleration) noexcept {
     auto& f = freestyle_slide();

@@ -30,6 +30,10 @@ void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, 
 void set_freestyle_slide(std::uintptr_t client, std::uintptr_t entity, float deceleration) noexcept;
 // Whether the slide also keeps the board from pitching up under the ground's friction (on by default).
 void set_freestyle_slide_level(bool level) noexcept;
+// ReSkate Tricks: for this long from a slide's start no part moves up or down (a pose landed from the air).
+void set_freestyle_slide_soft(std::uint32_t milliseconds) noexcept;
+// ReSkate Tricks: the slide holds the mean speed of the parts, not the first part's (a board turning under the feet).
+void set_freestyle_slide_mean(bool mean) noexcept;
 // ReSkate Tricks: called at the end of every physics step (physics thread), nullptr for none.
 void set_tricks_step(void (*step)() noexcept) noexcept;
 // ReSkate Tricks: the pose is in and held: the board's tipping (every turn but about the vertical) is taken out each step.

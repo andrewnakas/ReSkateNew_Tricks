@@ -30,6 +30,15 @@ void request_wipeout() noexcept;
 // ReSkate Tricks: the watched skater cannot wipe out for this long (a casper or primo being caught, landed or held:
 // the game's contact tests throw the skater off a board that is on its side or upside down).
 void protect_pose(std::uint64_t milliseconds) noexcept;
+// ReSkate Tricks: while it lasts, a grounded board in an air state lands straight into the ground animation state.
+void stomp_pose(std::uint64_t milliseconds) noexcept;
+// ReSkate Tricks: while it lasts, the ground animation state is not left for a dismount. 0 ends it.
+void keep_pose_on_board(std::uint64_t milliseconds) noexcept;
+std::uint32_t take_pose_kept() noexcept;
+// ReSkate Tricks: while it lasts, riding goes to the ground animation state, where the board follows its target frame. 0 ends it.
+void hold_ground_animation(std::uint64_t milliseconds) noexcept;
+// How many times that happened since the last call; contact: wheels (low 4 bits), truck 0x10, deck 0x20, body 0x40, trajectory 0x80.
+std::uint32_t take_pose_stomps(std::uint32_t& contact) noexcept;
 // Stopping flight must not discard the independent manual preference.
 void clear_no_bail_flight() noexcept;
 // The local skater as No Bail follows it (update_no_bail publishes it), for a feature that reads it

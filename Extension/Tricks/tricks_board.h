@@ -19,6 +19,8 @@ void start_board_spin(float roll, float yaw, float pitch, std::uint32_t millisec
 void stop_board_spin() noexcept;
 // After start_board_spin: the board is also moved down its own up axis by this much as the turn goes.
 void set_board_drop(float metres) noexcept;
+// Lifts the board up its own up axis, most at the middle of the running turn (0 at both ends).
+void set_board_hop(float metres) noexcept;
 bool board_spin_running() noexcept;
 // How often the hook saw the local skater's frame since last asked, and how often it turned it.
 void board_hook_counts(std::uint32_t &seen, std::uint32_t &turned) noexcept;

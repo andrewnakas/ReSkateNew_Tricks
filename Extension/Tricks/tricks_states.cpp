@@ -292,6 +292,18 @@ bool poke_state_value(std::uintptr_t base, std::uintptr_t entity, std::uintptr_t
         return true;
     } __except (1) { return false; }
 }
+// The same place, read (a float state's bits come back as they are stored).
+bool peek_state_value(std::uintptr_t base, std::uintptr_t entity, std::uintptr_t at, std::uint32_t &value) noexcept {
+    const auto block = states_block(base, entity);
+    std::uint32_t handle{}, map{};
+    std::uintptr_t page{};
+    if (!block || !at || !peek(at + object_handle, handle) || !(handle >> 24)) return false;
+    const std::uint32_t index = handle & 0xfff, place = (handle >> 12) & 0x7ff;
+    if (index >= 16 || !peek(block + block_pages + index * 8, page) || !pointer(page) || !peek(page + page_map + (place >> 5) * 4, map) ||
+        !(map >> (place & 31) & 1))
+        return false;
+    return peek(page + place, value);
+}
 void keep_holds_alive() noexcept { holds_until.store(GetTickCount64() + 500, std::memory_order_relaxed); }
 std::uint32_t held_asked(State state) noexcept { return held[static_cast<std::size_t>(state)].asked.exchange(0, std::memory_order_relaxed); }
 

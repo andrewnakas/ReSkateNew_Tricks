@@ -7,6 +7,7 @@
 #include "Extension/Skater/client_source_spawn_internal.h"
 #include "Extension/UI/Overlay/overlay.h"
 #include <windows.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -122,6 +123,7 @@ struct Runtime {
     int gs_phase{};               // 0 none, 1 turning (7 held), 2 letting go (waiting for the physics to leave 103)
     std::uint64_t gs_until{};
     std::uint32_t gs_ms{380};
+    float gs_hop{0.05f}; // metres the board comes off the ground at the middle of the turn
     // The owner's control scheme (2026-10-12): poses are landed into and held on the right stick.
     //   Land a flip trick with the right stick held part of the way left / right: primo / primo2.
     //   Land it with the left stick clicked and the right stick held part of the way out: casper.
@@ -135,6 +137,7 @@ struct Runtime {
     float out_roll{}, out_yaw{};
     std::uint64_t out_until{}; // a flick out of the casper: its turn starts when the exit is in the air
     bool out_spinning{};
+    bool exit_air{}; // the flip out of a casper has left the ground
     std::uint64_t fall_until{};
     std::uintptr_t s_late_flip{};
     std::uint64_t mod_since{}, landed_at{}, air_last{};
@@ -144,10 +147,22 @@ struct Runtime {
     bool centre_fall{true}; // a casper with the stick back at the middle is lost
     bool fall_slam{};
     bool left_mask{true};
+    bool left_mask_air{true};
     bool air_pose{true}, air_pose_on{};
     // (Holding the plain in-air states true to cut a flip short made a casper bounce again and cost most of the speed:
     // measured 2026-10-13. None by default.)
-    std::vector<std::string> air_names;
+    // One term of the graph's generic landing (EBool.Anim.Is.GenericLanding), held so the flip is left for a generic
+    // landing clip, whose early exit to riding opens at its tick 4: the pose starts 60 ms after the catch (measured
+    // 2026-10-13; without it the landing node carries the flip clip on and the pose starts at touchdown).
+    std::vector<std::string> air_names{"Animation/Dingo/Bool.GP.DidInAirTuck"};
+    std::vector<int> air_values{0}; // 0: a bool held true; otherwise an enum held at this value
+    // The trick node's rows to the landing node have no branch window but want the family before ground to be air
+    // (EnumGS.LastFilteredPhysicsState == 2); the game leaves it at ground when only the current one is written.
+    std::uint32_t primo_air_delay{250}; // ms from takeoff before a caught primo's way in starts (when the time to land is not known)
+    float primo_air_left{0.33f};        // a caught primo's way in starts with this much time left to land
+    std::uintptr_t s_time_to_land{};
+    bool air_last_fps{true};
+    std::uintptr_t s_last_filtered{};
     std::uint64_t pose_since{}, unhold_until{};
     std::vector<std::uintptr_t> s_air;
     std::uintptr_t s_filtered{};
@@ -173,6 +188,8 @@ struct Runtime {
     // on its side, bounces back into the air twice and loses the pose, so the casper's board is left alone in the air.
     float primo_roll{90.0f}, primo2_roll{90.0f}, casper_roll{0.0f}, casper_drop{0.0f};
     bool protect{true};
+    bool keep{false}; // a held pose is not left for the game's own dismount
+    bool stomp{true}; // a caught pose's board touching down goes straight to the ground animation state (no bounce)
     std::uint64_t low_last{};
     float catch_drop{0.1f}; // the caught board is moved down from under the feet: on its side or upside down it would sit in them
     float upright{0.0f};
@@ -201,7 +218,7 @@ Runtime &runtime() {
 // The pose in the air: the graph's copy of the physics state family, written in place every physics step (the game
 // writes it back each step; the animation reads it after).
 struct AirPoke {
-    std::atomic<std::uintptr_t> base{}, entity{}, state{};
+    std::atomic<std::uintptr_t> base{}, entity{}, state{}, last{};
     std::atomic<std::uint64_t> until{};
     std::atomic<std::uint32_t> pokes{}, put_back{};
 };
@@ -213,10 +230,15 @@ void air_poke_step() noexcept {
         air_poke.pokes.fetch_add(1, std::memory_order_relaxed);
         if (before != 1) air_poke.put_back.fetch_add(1, std::memory_order_relaxed);
     }
+    // The family before this one, as the graph's landing rows want it: air (2).
+    if (const auto last = air_poke.last.load(std::memory_order_relaxed)) (void)poke_state_value(air_poke.base.load(std::memory_order_relaxed), air_poke.entity.load(std::memory_order_relaxed), last, 2, nullptr);
 }
 void announce(std::string_view name);
 void start_ground_shuv(Runtime &r, std::uint64_t now, bool frontside) {
+    std::uint32_t seen{}, turned{};
+    board_hook_counts(seen, turned); // counted afresh over the turn
     start_board_spin(0, frontside ? -180.0f : 180.0f, 0, r.gs_ms);
+    set_board_hop(r.gs_hop);
     r.gs_phase = 1;
     r.gs_until = now + r.gs_ms + 60;
     announce(frontside ? "FS Shuvit" : "Shuvit");
@@ -384,17 +406,40 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         static int last_state = -1;
         static std::uint64_t pose_seen{};
         const auto physics = watched_physics_state();
-        if (r.freestyle != Freestyle::off || r.leaving) pose_seen = now;
+        if (r.freestyle != Freestyle::off || r.leaving || r.gs_phase) pose_seen = now;
         if (physics.valid && static_cast<int>(physics.state) != last_state) {
             if (now - pose_seen < 4000)
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: physics {} -> {} ({}, {:.1f} m/s) at {} ms.", last_state, static_cast<int>(physics.state),
                              freestyle_name(r.freestyle), trainer::telemetry().speed, now % 100000);
+            std::uint32_t contact{};
+            if (const auto stomps = take_pose_stomps(contact))
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: bounce stopped {} times (wheels {}, truck {}, deck {}, body {}, trajectory {}).", stomps, contact & 0xf, contact >> 4 & 1,
+                             contact >> 5 & 1, contact >> 6 & 1, contact >> 7 & 1);
+            if (const auto kept = take_pose_kept())
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: bounce: a dismount was refused {} times.", kept);
             if (last_state == 103) {
                 float peak{}, swing{};
                 take_freestyle_slide_roll(peak, swing);
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: slide rocking: peak {:.2f} rad/s, swing {:.1f} degrees.", peak, swing);
             }
             last_state = static_cast<int>(physics.state);
+        }
+        // The animation graph's node, from the states its nodes hold true while active.
+        static const char *const node_names[]{"Animation/Dingo/Bool.State.Is.TrickInAir", "Animation/Dingo/Bool.State.Is.Landing", "Animation/Dingo/Bool.State.Onboard.Riding"};
+        static std::uintptr_t node_states[3]{};
+        static int last_nodes = -1;
+        if (now - pose_seen < 4000 && state_objects_known()) {
+            int nodes = 0;
+            for (int i = 0; i < 3; ++i) {
+                if (!node_states[i]) node_states[i] = find_state(base, node_names[i]);
+                double value{};
+                if (node_states[i] && read_state_at(base, node_states[i], 0, value) && value != 0) nodes |= 1 << i;
+            }
+            if (nodes != last_nodes) {
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: nodes trick {} land {} riding {} (physics {}, {}) at {} ms.", nodes & 1, nodes >> 1 & 1, nodes >> 2 & 1,
+                             physics.valid ? static_cast<int>(physics.state) : -1, freestyle_name(r.freestyle), now % 100000);
+                last_nodes = nodes;
+            }
         }
     }
     // </dev>
@@ -605,11 +650,18 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             }
             // No wipeout while a pose is being caught, landed or held: only the stick loses it.
             if (r.protect && r.by_hold && r.freestyle != Freestyle::off) protect_pose(300);
+            if (r.stomp && r.by_hold && r.freestyle != Freestyle::off) stomp_pose(300);
+            // Not stepped off the board either, unless the player asks for it (Y).
+            if (r.keep && r.by_hold && r.freestyle != Freestyle::off && !(buttons & 0x8000)) keep_pose_on_board(200);
+            else if (buttons & 0x8000) keep_pose_on_board(0);
             if (r.by_hold && r.freestyle != Freestyle::off) DingoSDKOverlayTricksMask();
             // On the ground in a pose the left stick is hidden as well. The owner's recording: with the click held his
             // left stick wanders over the whole range (x -0.9 to 1.0), and the game steers and leans the skater with it:
             // the rocking from side to side.
-            if (r.left_mask && r.by_hold && r.freestyle != Freestyle::off && !in_air) DingoSDKOverlayTricksMaskLeft();
+            // In the air with a pose caught, too: the same wandering stick turned the skater through the landing, and a
+            // casper then came back off the ground once (measured 2026-10-13). `tricks leftmask air off` gives the left
+            // stick back in the air (to spin into a pose).
+            if (r.left_mask && r.by_hold && r.freestyle != Freestyle::off && (!in_air || r.left_mask_air)) DingoSDKOverlayTricksMaskLeft();
             // The landing's clip only hands over to riding (and riding to the pose) at its end, 1.1 to 1.3 s after the
             // board is down (measured), unless the player is asking for an action: the landing node leaves at its early
             // window while EBool.Intent.Action is true, and a trick setup is one of the intents behind it. So that
@@ -620,7 +672,26 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 // 3 grind) says ground. Held at ground while a pose is caught in the air, the graph lands, leaves the
                 // landing early and goes into the pose while the board is still up, and in the air the board follows
                 // the animation: feet and board take the pose together.
-                const bool in_pose_air = r.air_pose && in_air && r.by_hold && r.freestyle != Freestyle::off;
+                // A primo's way in is only landed from its first ticks (later the board is on its edge in the air, is
+                // knocked flat by the touchdown and the game steps the skater off): its start is held back.
+                // (Measured 2026-10-13: started at takeoff it is at its tick 31 on touchdown and fails every time; started
+                // 0.42 s before the touchdown it fails too; 0.35 s and 0.27 s before, it lands on its wheels and holds.) The time left comes from the game's own
+                // Float.Physics.TimeToLand; the time since takeoff stands in when that cannot be read.
+                bool primo_due = now - r.air_start >= r.primo_air_delay;
+                if (r.air_pose && in_air && r.by_hold && r.freestyle != Freestyle::off && r.freestyle != Freestyle::casper && !r.air_pose_on) {
+                    if (!r.s_time_to_land) r.s_time_to_land = find_state(base, "Animation/Dingo/Float.Physics.TimeToLand");
+                    std::uint32_t bits{};
+                    float left{};
+                    if (r.primo_air_left > 0 && peek_state_value(base, r.entity, r.s_time_to_land, bits)) {
+                        std::memcpy(&left, &bits, sizeof(left));
+                        if (std::isfinite(left) && left > 0.0f && left < 20.0f) {
+                            primo_due = left <= r.primo_air_left;
+                            if (primo_due) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo started in the air with {:.2f} s to land.", left);
+                        }
+                    }
+                }
+                const bool in_pose_air = r.air_pose && in_air && r.by_hold && r.freestyle != Freestyle::off &&
+                                         (r.freestyle == Freestyle::casper || r.air_pose_on || primo_due);
                 if (in_pose_air || r.air_pose_on) {
                     if (!r.s_filtered) r.s_filtered = find_state(base, "Animation/Dingo/EnumGS.FilteredPhysicsState");
                     // Answered at the lookup (the game's own write of it wins over a write made here), and written too.
@@ -630,7 +701,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     for (std::size_t i = 0; i < r.air_names.size(); ++i) {
                         if (i >= r.s_air.size()) r.s_air.push_back(0);
                         if (!r.s_air[i]) r.s_air[i] = find_state(base, r.air_names[i].c_str());
-                        if (in_pose_air || r.air_pose_on) (void)write_state_at(base, r.s_air[i], 0, in_pose_air ? 1 : 0);
+                        const int air_value = i < r.air_values.size() ? r.air_values[i] : 0;
+                        (void)write_state_at(base, r.s_air[i], air_value ? 1 : 0, in_pose_air ? (air_value ? air_value : 1) : 0);
                     }
                     if (in_pose_air) {
                         if (!r.hooks) r.hooks = start_holds(base);
@@ -639,6 +711,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         air_poke.base.store(base, std::memory_order_relaxed);
                         air_poke.entity.store(r.entity, std::memory_order_relaxed);
                         air_poke.state.store(r.s_filtered, std::memory_order_relaxed);
+                        if (r.air_last_fps && !r.s_last_filtered) r.s_last_filtered = find_state(base, "Animation/Dingo/EnumGS.LastFilteredPhysicsState");
+                        if (r.air_last_fps && r.s_last_filtered) (void)write_state_at(base, r.s_last_filtered, 1, 2);
+                        air_poke.last.store(r.air_last_fps ? r.s_last_filtered : 0, std::memory_order_relaxed);
                         air_poke.until.store(now + 120, std::memory_order_relaxed);
                         set_tricks_step(&air_poke_step);
                         air_poke_step();
@@ -772,6 +847,15 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 stop_board_spin();
                 r.out_spinning = false;
             }
+            // A flip out has been in the air and is down again: the exit is over, so the next trick (and the next
+            // catch) can start now, not when the exit's own time runs out.
+            if (r.leaving && r.exit_flip && r.freestyle == Freestyle::off) {
+                if (in_air) r.exit_air = true;
+                else if (r.exit_air && on_ground) {
+                    r.exit_air = false;
+                    if (r.leaving_until > now + 150) r.leaving_until = now + 150;
+                }
+            } else r.exit_air = false;
             if (r.fall_until) {
                 if (!r.s_late_flip) r.s_late_flip = find_state(base, "Animation/Dingo/Bool.Intent.LateFlip");
                 const bool done = now >= r.fall_until;
@@ -849,7 +933,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         DingoSDKOverlayTricksMask();
         if (r.gs_phase == 1) {
             r.writes += write_state(base, State::ground_trick, 7);
+            // Riding keeps the board on its physics (ForcePhysicsSkateboard), so the ground trick value alone never
+            // reaches the ground animation state: the state selector is told to go there for the length of the turn.
+            if (now < r.gs_until) hold_ground_animation(120);
+            else hold_ground_animation(0);
             if (r.entity) set_freestyle_slide(client, r.entity, 0.5f); // keep the speed: 103's own friction stops the board
+            set_freestyle_slide_mean(true);
             if (now >= r.gs_until) {
                 r.writes += write_state(base, State::ground_trick, 0);
                 r.gs_phase = 2;
@@ -857,7 +946,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             }
         } else if ((physics.valid && physics.state != 103) || now >= r.gs_until) {
             stop_board_spin();
+            set_freestyle_slide_mean(false);
             r.gs_phase = 0;
+            std::uint32_t seen{}, turned{};
+            board_hook_counts(seen, turned);
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: ground shuvit over: the board's frame was turned {} times of {} (physics {}).", turned, seen,
+                         physics.valid ? static_cast<int>(physics.state) : -1);
         }
     }
     // No comply flips.
@@ -1281,15 +1375,56 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
     if (verb == "airpose") {
         if (!arguments.empty() && arguments[0] == "states") {
             r.air_names.clear();
+            r.air_values.clear();
             r.s_air.clear();
-            for (std::size_t i = 1; i < arguments.size(); ++i) r.air_names.push_back(arguments[i].find('/') == std::string::npos ? "Animation/Dingo/" + arguments[i] : arguments[i]);
-            return std::format("{} states held true while a pose is caught in the air.", r.air_names.size());
+            for (std::size_t i = 1; i < arguments.size(); ++i) {
+                auto name = arguments[i];
+                int value = 0;
+                if (const auto equals = name.find('='); equals != std::string::npos) {
+                    value = std::atoi(name.c_str() + equals + 1);
+                    name.resize(equals);
+                }
+                r.air_names.push_back(name.find('/') == std::string::npos ? "Animation/Dingo/" + name : name);
+                r.air_values.push_back(value);
+            }
+            return std::format("{} states held while a pose is caught in the air.", r.air_names.size());
         }
-        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks airpose on|off | states <bool state>...";
+        if (arguments.size() == 2 && arguments[0] == "primoleft") {
+            r.primo_air_left = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 2.0f);
+            return std::format("A caught primo starts with {:.2f} s left to land.", r.primo_air_left);
+        }
+        if (arguments.size() == 2 && arguments[0] == "primodelay" && number(arguments[1], r.primo_air_delay))
+            return std::format("A caught primo starts {} ms after takeoff.", r.primo_air_delay);
+        if (!arguments.empty() && arguments[0] == "last") {
+            if (arguments.size() < 2 || (arguments[1] != "on" && arguments[1] != "off")) return "usage: tricks airpose last on|off";
+            r.air_last_fps = arguments[1] == "on";
+            return r.air_last_fps ? "A caught pose leaves the flip through the landing (the family before ground is written as air)." : "A caught pose waits for the flip's own branch window.";
+        }
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks airpose on|off | last on|off | states <bool state | enum state=value>...";
         r.air_pose = arguments[0] == "on";
         return r.air_pose ? "A caught pose starts in the air (the animation is told the board is down)." : "A caught pose starts on the ground.";
     }
+    if (verb == "keep") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks keep on|off";
+        r.keep = arguments[0] == "on";
+        return r.keep ? "A held pose is not stepped off by the game." : "The game may step the skater off a held pose.";
+    }
+    if (verb == "soft") {
+        std::uint32_t ms{};
+        if (arguments.empty() || !number(arguments[0], ms) || ms > 2000) return "usage: tricks soft <ms 0 to 2000>";
+        set_freestyle_slide_soft(ms);
+        return std::format("A landed pose is held level for {} ms.", ms);
+    }
+    if (verb == "stomp") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks stomp on|off";
+        r.stomp = arguments[0] == "on";
+        return r.stomp ? "A caught pose lands straight onto the ground (no bounce)." : "A caught pose lands by the game's own landing check.";
+    }
     if (verb == "leftmask") {
+        if (arguments.size() == 2 && arguments[0] == "air" && (arguments[1] == "on" || arguments[1] == "off")) {
+            r.left_mask_air = arguments[1] == "on";
+            return r.left_mask_air ? "The left stick is hidden in the air too while a pose is caught." : "The left stick works in the air while a pose is caught.";
+        }
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks leftmask on|off";
         r.left_mask = arguments[0] == "on";
         return r.left_mask ? "In a pose the left stick does not steer or lean the skater." : "In a pose the left stick steers, and leans a casper.";
@@ -1371,7 +1506,19 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             r.gs_ms = ms;
             return std::format("Ground shuvits take {} ms.", ms);
         }
+        if (arguments.size() == 2 && arguments[0] == "hop") {
+            r.gs_hop = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 0.3f);
+            return std::format("Ground shuvits lift the board {:.2f} m.", r.gs_hop);
+        }
         if (!state_objects_known() || r.gs_phase) return "error: not ready (on the board, and not already turning).";
+        // <dev> A quarter turn held for four seconds, for a still of the turned board.
+        if (!arguments.empty() && arguments[0] == "quarter") {
+            start_board_spin(0, 90.0f, 0, 300);
+            r.gs_phase = 1;
+            r.gs_until = now + 4000;
+            return "Ground shuvit: a quarter turn, held.";
+        }
+        // </dev>
         start_ground_shuv(r, now, !arguments.empty() && arguments[0] == "fs");
         return "Ground shuvit.";
     }

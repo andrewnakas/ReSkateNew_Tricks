@@ -43,6 +43,7 @@ void hold(State state, bool hold, std::uint32_t value = 0) noexcept;
 void keep_holds_alive() noexcept;
 // Write an enumeration state's value in place, in the skater's own states block (any thread; `before`: what was there).
 bool poke_state_value(std::uintptr_t base, std::uintptr_t entity, std::uintptr_t state, std::uint32_t value, std::uint32_t *before = nullptr) noexcept;
+bool peek_state_value(std::uintptr_t base, std::uintptr_t entity, std::uintptr_t at, std::uint32_t &value) noexcept;
 // A state (by its object, as find_state gives it) answered at the lookup with `value` for this long; how often it was asked for.
 void hold_object(std::uintptr_t object, std::uint32_t value, std::uint64_t milliseconds) noexcept;
 std::uint32_t held_object_asked() noexcept;
