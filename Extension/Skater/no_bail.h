@@ -25,6 +25,11 @@ struct PhysicsStateWatch {
 };
 void watch_physics_state(std::uintptr_t client, std::uintptr_t entity) noexcept;
 PhysicsStateWatch watched_physics_state() noexcept;
+// ReSkate Tricks: the watched skater wipes out at its next state choice on the ground (a lost casper or primo).
+void request_wipeout() noexcept;
+// ReSkate Tricks: the watched skater cannot wipe out for this long (a casper or primo being caught, landed or held:
+// the game's contact tests throw the skater off a board that is on its side or upside down).
+void protect_pose(std::uint64_t milliseconds) noexcept;
 // Stopping flight must not discard the independent manual preference.
 void clear_no_bail_flight() noexcept;
 // The local skater as No Bail follows it (update_no_bail publishes it), for a feature that reads it

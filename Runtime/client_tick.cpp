@@ -36,6 +36,7 @@
 #include "Extension/Skater/skater_slot_override.h"
 #include "Extension/Throwdowns/native_throwdowns.h"
 #include "Extension/Trainer/trainer.h"
+#include "Extension/Tricks/tricks.h"
 #include "Extension/World/level_loading.h"
 #include "Extension/World/loading_screen.h"
 #include <dxgi.h>
@@ -1310,6 +1311,10 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
             DINGO_PROFILE_ZONE("tick/trainer");
             // A custom map is a sublevel of the root level: that is the map the player means.
             dingosdk::trainer::tick(r.base, client, multiplayer_ready, r.catalog_level.empty() ? r.last_level : r.catalog_level);
+        }
+        {
+            DINGO_PROFILE_ZONE("tick/tricks");
+            dingosdk::tricks::tick(r.base, client, multiplayer_ready);
         }
         {
             DINGO_PROFILE_ZONE("tick/Steam friend join");

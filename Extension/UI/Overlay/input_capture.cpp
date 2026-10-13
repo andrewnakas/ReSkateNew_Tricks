@@ -46,6 +46,9 @@ struct InputCaptureHooks {
     std::map<HANDLE, PlayStationPad> hid_devices;
     std::map<OVERLAPPED*, HidRead> hid_reads;
     Hook register_raw;
+    // <dev>
+    Hook foreground, active, focus;
+    // </dev>
     Hook async_key, key, keyboard, raw_data, raw_buffer, capture, release_capture, cursor, show_cursor, physical_cursor, cursor_position;
     std::array<Hook, 5> xinput_state, xinput_extended, xinput_keystroke;
     // Hooks other programs put in front of those, hooked in turn (keep_xinput_capture_first).
@@ -569,24 +572,168 @@ BOOL WINAPI captured_cursor_position(LPPOINT output) {
     if (result && output && !overlay_input_access) { last = *output; sampled = true; }
     return result;
 }
+// <dev>
+// A scripted controller (`tricks pad`): while on, the game's polls of the first controller read
+// this state, whether or not a real one is connected.
+struct ScriptedPad {
+    std::atomic<bool> on{};
+    std::atomic<std::uint64_t> low{};  // XINPUT_GAMEPAD bytes 0..7
+    std::atomic<std::uint32_t> high{}; // bytes 8..11
+    std::atomic<std::uint32_t> packet{1};
+    std::atomic<std::uint64_t> polls{}, served{};
+};
+ScriptedPad& scripted_pad() { static auto* value = new ScriptedPad; return *value; }
+// While a script owns the controller the game is the foreground window as far as it can tell,
+// so a scripted run does not need the desktop (the game reads no input in the background).
+HWND scripted_window(bool root) {
+    if (!scripted_pad().on.load(std::memory_order_acquire)) return nullptr;
+    const HWND window = state().window.load();
+    const HWND top = window && root ? GetAncestor(window, GA_ROOT) : nullptr;
+    return top ? top : window;
+}
+HWND WINAPI scripted_foreground() {
+    const HWND window = scripted_window(true);
+    return window ? window : original<HWND(WINAPI*)()>(input_hooks().foreground)();
+}
+HWND WINAPI scripted_active() {
+    const HWND window = scripted_window(true);
+    return window ? window : original<HWND(WINAPI*)()>(input_hooks().active)();
+}
+HWND WINAPI scripted_focus() {
+    const HWND window = scripted_window(false);
+    return window ? window : original<HWND(WINAPI*)()>(input_hooks().focus)();
+}
+// </dev>
+// ReSkate Tricks: the first controller as the game's last poll had it (scripted state included), and a mask that
+// hides the right stick and the left stick's click from the game while freestyle owns them. The mask only lasts
+// while Tricks keeps asking for it (each request is good for half a second).
+struct TricksPad {
+    std::atomic<std::uint64_t> low{};  // XINPUT_GAMEPAD bytes 0..7
+    std::atomic<std::uint32_t> high{}; // bytes 8..11
+    std::atomic<std::uint64_t> mask_until{};
+    // While asked for (the skater is in the air): a poll with the left stick clicked or the left trigger down is
+    // masked there and then. Waiting for Tricks' next tick lets the game see one poll of the stick that picks a pose.
+    std::atomic<std::uint64_t> auto_until{};
+    // The left stick hidden too (a held pose: the thumb holding the click down cannot keep the stick still, and the
+    // game steers and leans the skater with it).
+    std::atomic<std::uint64_t> left_until{};
+};
+TricksPad& tricks_pad() { static auto* value = new TricksPad; return *value; }
+// XInput exports can forward through one another, so one poll can pass through the hook more than once: the
+// innermost pass sees the state as it is (`record`), every pass hides what the mask hides.
+void tricks_filter(XINPUT_GAMEPAD& pad, bool record) noexcept {
+    auto& t = tricks_pad();
+    if (record) {
+        std::uint64_t low{};
+        std::uint32_t high{};
+        std::memcpy(&low, &pad, 8);
+        std::memcpy(&high, reinterpret_cast<const std::byte*>(&pad) + 8, 4);
+        t.low.store(low, std::memory_order_relaxed);
+        t.high.store(high, std::memory_order_relaxed);
+    }
+    const auto now = GetTickCount64();
+    if (now < t.left_until.load(std::memory_order_relaxed)) {
+        pad.sThumbLX = 0;
+        pad.sThumbLY = 0;
+    }
+    const bool held = (pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0 || pad.bLeftTrigger > 128;
+    if (now >= t.mask_until.load(std::memory_order_relaxed) && !(held && now < t.auto_until.load(std::memory_order_relaxed))) return;
+    pad.wButtons = static_cast<WORD>(pad.wButtons & ~XINPUT_GAMEPAD_LEFT_THUMB);
+    pad.sThumbRX = 0;
+    pad.sThumbRY = 0;
+    pad.bLeftTrigger = 0; // the left trigger catches a pose too: not a grab
+}
+// How deep the current poll is in forwarded XInput exports, and the deepest it went.
+struct XInputNesting { int depth{}, deepest{}; };
+thread_local XInputNesting xinput_nesting;
 template<std::size_t I, bool Extended = false>
 DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
     const auto& hook = Extended ? input_hooks().xinput_extended[I] : input_hooks().xinput_state[I];
     const bool capture = block_polled_input();
     note_prompt_read(prompt_xinput);
     DWORD result;
+    auto& [depth, deepest] = xinput_nesting; // shared by every instance of this template
+    const int level = ++depth;
+    if (level > deepest) deepest = level;
     { // XInput exports can forward through another hooked XInput export.
         OverlayInputAccess access;
         result = original<DWORD(WINAPI*)(DWORD, XINPUT_STATE*)>(hook)(user, output);
     }
+    const bool innermost = deepest == level;
+    if (--depth == 0) deepest = 0;
+    // <dev>
+    if (auto& scripted = scripted_pad(); user == 0 && output) {
+        if (!overlay_input_access) scripted.polls.fetch_add(1, std::memory_order_relaxed);
+        if (scripted.on.load(std::memory_order_acquire)) {
+            const auto low = scripted.low.load(std::memory_order_relaxed);
+            const auto high = scripted.high.load(std::memory_order_relaxed);
+            std::memcpy(&output->Gamepad, &low, 8);
+            std::memcpy(reinterpret_cast<std::byte*>(&output->Gamepad) + 8, &high, 4);
+            output->dwPacketNumber = scripted.packet.load(std::memory_order_relaxed);
+            scripted.served.fetch_add(1, std::memory_order_relaxed);
+            result = ERROR_SUCCESS;
+        }
+    }
+    // </dev>
     if (result == ERROR_SUCCESS && output && capture) {
         output->Gamepad = {};
         // The game must notice a neutral state even if the physical packet did
         // not change between opening the menu and its next controller poll.
         output->dwPacketNumber ^= 0x80000000u;
+    } else if (result == ERROR_SUCCESS && output && user == 0) {
+        tricks_filter(output->Gamepad, innermost);
     }
     return result;
 }
+// <dev>
+}
+// `gamepad`: twelve bytes laid out as XINPUT_GAMEPAD, or null to hand the controller back. (Ported from the
+// ReSkate Trainer's dev build, for scripted test runs.)
+extern "C" void DingoSDKOverlayScriptController(const void* gamepad) {
+    auto& scripted = dingosdk::overlay::detail::scripted_pad();
+    if (!gamepad) { scripted.on.store(false, std::memory_order_release); return; }
+    std::uint64_t low{};
+    std::uint32_t high{};
+    std::memcpy(&low, gamepad, 8);
+    std::memcpy(&high, static_cast<const std::byte*>(gamepad) + 8, 4);
+    if (low != scripted.low.load() || high != scripted.high.load() || !scripted.on.load()) scripted.packet.fetch_add(1);
+    if (!scripted.on.load())
+        if (const HWND window = dingosdk::overlay::detail::state().window.load()) {
+            PostMessageW(window, WM_ACTIVATEAPP, TRUE, 0);
+            PostMessageW(window, WM_ACTIVATE, WA_ACTIVE, 0);
+            PostMessageW(window, WM_SETFOCUS, 0, 0);
+        }
+    scripted.low.store(low, std::memory_order_relaxed);
+    scripted.high.store(high, std::memory_order_relaxed);
+    scripted.on.store(true, std::memory_order_release);
+}
+// ReSkate Tricks: the first controller as the game's last poll saw it (twelve bytes laid out as XINPUT_GAMEPAD,
+// before the mask below).
+extern "C" void DingoSDKOverlayTricksPad(void* gamepad) {
+    auto& t = dingosdk::overlay::detail::tricks_pad();
+    const auto low = t.low.load(std::memory_order_relaxed);
+    const auto high = t.high.load(std::memory_order_relaxed);
+    std::memcpy(gamepad, &low, 8);
+    std::memcpy(static_cast<std::byte*>(gamepad) + 8, &high, 4);
+}
+// Hide the right stick and the left stick's click from the game for the next half second.
+extern "C" void DingoSDKOverlayTricksMaskLeft() {
+    dingosdk::overlay::detail::tricks_pad().left_until.store(GetTickCount64() + 300, std::memory_order_relaxed);
+}
+extern "C" void DingoSDKOverlayTricksAutoMask() {
+    dingosdk::overlay::detail::tricks_pad().auto_until.store(GetTickCount64() + 300, std::memory_order_relaxed);
+}
+extern "C" void DingoSDKOverlayTricksMask() {
+    dingosdk::overlay::detail::tricks_pad().mask_until.store(GetTickCount64() + 500, std::memory_order_relaxed);
+}
+// How often the game polled the first controller, and how often it was given the scripted state.
+extern "C" void DingoSDKOverlayScriptControllerPolls(std::uint64_t* polls, std::uint64_t* served) {
+    auto& scripted = dingosdk::overlay::detail::scripted_pad();
+    if (polls) *polls = scripted.polls.load(std::memory_order_relaxed);
+    if (served) *served = scripted.served.load(std::memory_order_relaxed);
+}
+namespace dingosdk::overlay::detail {
+// </dev>
 template<std::size_t I>
 DWORD WINAPI captured_keystroke(DWORD user, DWORD reserved, PXINPUT_KEYSTROKE output) {
     const auto result = original<DWORD(WINAPI*)(DWORD, DWORD, PXINPUT_KEYSTROKE)>(
@@ -836,6 +983,11 @@ bool install_input_capture() {
         !add(h.cursor, "SetCursor", reinterpret_cast<void*>(captured_cursor)) ||
         !add(h.cursor_position, "GetCursorPos", reinterpret_cast<void*>(captured_cursor_position)) ||
         !add(h.show_cursor, "ShowCursor", reinterpret_cast<void*>(captured_show_cursor))) return false;
+    // <dev>
+    add(h.foreground, "GetForegroundWindow", reinterpret_cast<void*>(scripted_foreground));
+    add(h.active, "GetActiveWindow", reinterpret_cast<void*>(scripted_active));
+    add(h.focus, "GetFocus", reinterpret_cast<void*>(scripted_focus));
+    // </dev>
     // Some Windows builds alias both cursor-position exports to one function,
     // which is already intercepted by the overlay's SetCursorPos hook.
     const auto physical = GetProcAddress(user32, "SetPhysicalCursorPos");

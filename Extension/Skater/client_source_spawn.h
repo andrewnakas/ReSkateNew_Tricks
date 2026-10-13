@@ -25,6 +25,19 @@ JumpScaleResult take_jump_scale_result() noexcept;
 // rolling skater that is not braking gains speed up to it (m/s). Publish every client tick: it
 // expires after 500 ms.
 void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, float stock, float cruise) noexcept;
+// ReSkate Tricks: while the skater holds a casper or primo (physics state 103), take `deceleration` m/s off its
+// speed over the ground every second. Publish every client tick: it expires after 500 ms.
+void set_freestyle_slide(std::uintptr_t client, std::uintptr_t entity, float deceleration) noexcept;
+// Whether the slide also keeps the board from pitching up under the ground's friction (on by default).
+void set_freestyle_slide_level(bool level) noexcept;
+// ReSkate Tricks: called at the end of every physics step (physics thread), nullptr for none.
+void set_tricks_step(void (*step)() noexcept) noexcept;
+// ReSkate Tricks: the pose is in and held: the board's tipping (every turn but about the vertical) is taken out each step.
+void set_freestyle_slide_hold(bool held) noexcept;
+void set_freestyle_slide_stable(bool stable) noexcept;
+// The last slide's rocking, and reset: the peak turn rate about the way it travels (rad/s) and the widest swing (degrees).
+void take_freestyle_slide_roll(float& peak_rate, float& swing) noexcept;
+void set_freestyle_slide_upright(float strength) noexcept;
 // Engine-thread-only interactive controls. Presentation callbacks only queue requests.
 overlay::DebugModel on_client_debug_tick(std::uintptr_t base, std::uintptr_t client,
     bool can_control, bool camera_phase_observed, const overlay::DebugRequest* request = nullptr,

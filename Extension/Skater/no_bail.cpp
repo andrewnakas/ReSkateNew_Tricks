@@ -107,6 +107,7 @@ bool resolve(std::uintptr_t client, std::uintptr_t entity, Owner& o) noexcept {
     o.entity = entity;
     return true;
 }
+std::atomic<std::uint64_t>& pose_protected_until() { static std::atomic<std::uint64_t> value{}; return value; }
 bool protected_owner(std::uintptr_t object, std::uintptr_t Owner::* member, Owner* owner = nullptr) noexcept {
     auto& p = protection();
     if (!p.ready.load(std::memory_order_acquire)) return false;
@@ -115,7 +116,8 @@ bool protected_owner(std::uintptr_t object, std::uintptr_t Owner::* member, Owne
     AcquireSRWLockShared(&p.lock);
     const auto lease = p.lease;
     ReleaseSRWLockShared(&p.lock);
-    if (!lease.active(GetTickCount64()) || object != lease.owner.*member) return false;
+    const auto now = GetTickCount64();
+    if (!(lease.active(now) || now < pose_protected_until().load(std::memory_order_acquire)) || object != lease.owner.*member) return false;
     Owner current;
     if (!resolve(lease.owner.client, lease.owner.entity, current) || current != lease.owner) return false;
     if (owner) *owner = current;
@@ -201,6 +203,7 @@ void hold_off_board(std::uintptr_t selector, std::uint32_t current) noexcept {
     if (!resolve(board.owner.client, board.owner.entity, current_owner) || current_owner != board.owner) return;
     (void)cancel_request(current_owner.context, animation_request_offset, mount_request_mask);
 }
+std::atomic<std::uint64_t>& forced_wipeout_until() { static std::atomic<std::uint64_t> value{}; return value; }
 std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
     {
         LastError error;
@@ -212,8 +215,14 @@ std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
     const bool filtered = filter_requests(selector, &Owner::selector);
     const auto next = protection().choose_original(selector, current);
     LastError error;
-    const auto chosen = filtered && next == wipeout_physics_state && protected_owner(selector, &Owner::selector) ? current : next;
+    auto chosen = filtered && next == wipeout_physics_state && protected_owner(selector, &Owner::selector) ? current : next;
     auto& w = state_watch();
+    // ReSkate Tricks: a wipeout asked for (the selector's own result for a bad contact), taken on the ground only.
+    if (selector == w.selector.load(std::memory_order_acquire) && current >= 100 && current <= 105 &&
+        GetTickCount64() < forced_wipeout_until().load(std::memory_order_acquire)) {
+        forced_wipeout_until().store(0, std::memory_order_release);
+        chosen = wipeout_physics_state;
+    }
     if (selector == w.selector.load(std::memory_order_acquire) && GetTickCount64() < w.until.load(std::memory_order_acquire)) {
         if (const auto before = w.state.exchange(chosen, std::memory_order_acq_rel); before != chosen) {
             LARGE_INTEGER now{};
@@ -429,6 +438,8 @@ void watch_physics_state(std::uintptr_t client, std::uintptr_t entity) noexcept 
     w.causes.store(owner.causes, std::memory_order_release);
     w.until.store(GetTickCount64() + 500, std::memory_order_release);
 }
+void protect_pose(std::uint64_t milliseconds) noexcept { pose_protected_until().store(GetTickCount64() + milliseconds, std::memory_order_release); }
+void request_wipeout() noexcept { forced_wipeout_until().store(GetTickCount64() + 300, std::memory_order_release); }
 PhysicsStateWatch watched_physics_state() noexcept {
     auto& w = state_watch();
     PhysicsStateWatch result;

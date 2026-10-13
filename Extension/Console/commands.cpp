@@ -225,6 +225,7 @@ const Commands &game_commands() {
         register_perf_commands(*result);
         register_item_commands(*result);
         register_trainer_commands(*result);
+        register_tricks_commands(*result);
         register_hall_of_meat_commands(*result);
         register_road_rash_commands(*result);
         register_board_break_commands(*result);
