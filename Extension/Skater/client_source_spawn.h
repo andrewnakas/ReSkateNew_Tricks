@@ -42,6 +42,16 @@ void set_freestyle_slide_stable(bool stable) noexcept;
 // The last slide's rocking, and reset: the peak turn rate about the way it travels (rad/s) and the widest swing (degrees).
 void take_freestyle_slide_roll(float& peak_rate, float& swing) noexcept;
 void set_freestyle_slide_upright(float strength) noexcept;
+// The skater's root frame while a pose slides: 0 the game's, 1 watched, 2 held upright on the heading it stood with.
+void set_freestyle_root_upright(int mode) noexcept;
+// Called after the game's root update of a rig (any skater's): the local skater's root is set upright if asked.
+void freestyle_root_updated(std::uintptr_t rig) noexcept;
+// <dev> Samples of a held pose's first seconds on the ground: ms, root up row height, board height, board speed up,
+// root side and forward row heights.
+std::uint32_t take_freestyle_root_trace(std::array<std::array<float, 6>, 64>& samples) noexcept;
+// </dev>
+// Steps seen since the last call (and of them how many were set upright), and the range of the root's up row height.
+std::uint32_t take_freestyle_root_upright(float& low, float& high, std::uint32_t& fixed) noexcept;
 // Engine-thread-only interactive controls. Presentation callbacks only queue requests.
 overlay::DebugModel on_client_debug_tick(std::uintptr_t base, std::uintptr_t client,
     bool can_control, bool camera_phase_observed, const overlay::DebugRequest* request = nullptr,

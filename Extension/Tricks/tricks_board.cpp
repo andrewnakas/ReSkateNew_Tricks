@@ -1,5 +1,6 @@
 #include "tricks_board.h"
 #include "Engine/Core/Hooks/hooks.h"
+#include "Extension/Skater/client_source_spawn.h"
 #include <windows.h>
 #include <atomic>
 #include <cmath>
@@ -13,6 +14,15 @@ constexpr std::uintptr_t drive_target = 0x47c3320, board_frame = 0x178;
 constexpr unsigned char drive_target_bytes[]{0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83, 0xec, 0x60, 0x48, 0x8b, 0x81, 0x78, 0x01, 0x00, 0x00};
 using DriveTarget = void *(*)(std::uintptr_t board, float *out, std::uint8_t flag);
 std::atomic<DriveTarget> original{};
+// (rig, step length): builds the rig's root frame (rig + 0x4720) from the board. Called by the rig-follow functions.
+constexpr std::uintptr_t root_update = 0x47784b0;
+constexpr unsigned char root_update_bytes[]{0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x10, 0x57, 0x48, 0x81, 0xec, 0x40, 0x01, 0x00, 0x00};
+using RootUpdate = void (*)(std::uintptr_t rig, float step);
+std::atomic<RootUpdate> root_original{};
+void root_update_hook(std::uintptr_t rig, float step) {
+    if (const auto next = root_original.load(std::memory_order_acquire)) next(rig, step);
+    freestyle_root_updated(rig);
+}
 std::atomic<bool> attempted{}, ready{};
 std::atomic<std::uintptr_t> local_context{};
 std::atomic<std::uint32_t> seen_count{}, turned_count{};
@@ -198,6 +208,16 @@ bool start_board_hook(std::uintptr_t base) noexcept {
     original.store(reinterpret_cast<DriveTarget>(next), std::memory_order_release);
     if (hook_enable(target) != HookOk) return false;
     ready.store(true, std::memory_order_relaxed);
+    // The skater's root update (a held pose's body kept upright); the board works without it.
+    __try {
+        if (std::memcmp(reinterpret_cast<const void *>(base + root_update), root_update_bytes, sizeof(root_update_bytes)) != 0) return true;
+    } __except (1) { return true; }
+    auto *root_target = reinterpret_cast<void *>(base + root_update);
+    void *root_next{};
+    if (hook_prepare(root_target, reinterpret_cast<void *>(&root_update_hook), &root_next) == HookOk && root_next) {
+        root_original.store(reinterpret_cast<RootUpdate>(root_next), std::memory_order_release);
+        (void)hook_enable(root_target);
+    }
     return true;
 }
 void set_board_context(std::uintptr_t context) noexcept { local_context.store(context, std::memory_order_relaxed); }

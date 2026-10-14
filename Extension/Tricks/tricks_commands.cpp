@@ -25,6 +25,8 @@ void register_tricks_commands(Commands &registry) {
         {"keep", "Refuse the game's own dismount while a pose is held", "on|off"},
         {"soft", "Hold a landed pose's parts level for a moment from the touchdown", "<ms>"},
         {"rigid", "Hold a posed board to its pose with this drive strength (the game's own is 1)", "<0 to 1000>"},
+        {"balance", "The casper's balance blend", "<0 to 1> | stick | off"},
+        {"rootup", "Hold the skater upright in a held pose", "on|off|watch"},
         {"level2", "Keep a held pose level and on one heading", "on|off | delay <ms>"},
         {"norunout", "Stand the game's wipeout and run-out checks down while a pose is held", "on|off"},
         {"snap", "Start the casper and primo way-in clips part of the way in", "<casper tick> <primo tick>"},

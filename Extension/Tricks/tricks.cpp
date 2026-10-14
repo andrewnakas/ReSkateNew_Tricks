@@ -194,6 +194,8 @@ struct Runtime {
     // at 25 km/h the owner's poses rocked 60 to 90 degrees and the game ran the skater off a second in (2026-10-13).
     float rigid{30.0f};
     bool level{true};
+    float balance_fixed{-0.1f}; // <dev> the casper's Balance: 0 to 1 held there, -0.1 the stick's, -1 not written
+    int rootup{2}; // the skater's root in a held pose: 0 the game's, 1 watched, 2 held upright
     std::uint32_t level_delay{0};
     bool no_runout{true}, no_runout_on{};
     std::uintptr_t s_no_wipeouts{};
@@ -438,6 +440,20 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 if (take_board_lean(lean))
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: board target lean (height of right, up, forward rows): {:.2f}..{:.2f}, {:.2f}..{:.2f}, {:.2f}..{:.2f}.", lean[0], lean[1],
                                  lean[2], lean[3], lean[4], lean[5]);
+            }
+            {
+                float low{}, high{};
+                std::uint32_t fixed{};
+                if (last_state == 103 && r.rootup == 1) { // <dev> only while watched
+                    std::array<std::array<float, 6>, 64> samples{};
+                    const auto count = take_freestyle_root_trace(samples);
+                    std::string text;
+                    for (std::uint32_t i = 0; i < count && i < samples.size(); ++i)
+                        text += std::format(" {:.0f}:{:.2f}/{:.2f}/{:+.1f}/{:.2f}/{:.2f}", samples[i][0], samples[i][1], samples[i][2], samples[i][3], samples[i][4], samples[i][5]);
+                    if (count) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root trace (ms:root up row/clip board right row/clip board up row/root side row/clip board forward row):{}", text);
+                }
+                if (const auto calls = take_freestyle_root_upright(low, high, fixed))
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root seen for {} steps, its up row's height {:.2f}..{:.2f}; set upright {} times.", calls, low, high, fixed);
             }
             if (const auto levelled = take_board_level())
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: board target held level for {} steps.", levelled);
@@ -695,6 +711,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             {
                 const bool posed = r.by_hold && r.freestyle != Freestyle::off;
                 set_board_rigid(posed && physics.valid && physics.state == 103 ? r.rigid : 0.0f);
+                set_freestyle_root_upright(posed && physics.valid && physics.state == 103 ? r.rootup : 0);
                 // <dev> Watched once the pose has been in for a second (its way in turns the board on purpose).
                 set_board_lean_watch(posed && physics.valid && physics.state == 103 && r.landed_at && now - r.landed_at > 1000);
                 // </dev>
@@ -978,7 +995,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         std::int16_t ly{};
         std::memcpy(&ly, pad.data() + 6, 2);
         if (!r.s_balance) r.s_balance = find_state(base, "Animation/Dingo/Float.Intent.Balance");
-        (void)write_state_at(base, r.s_balance, 2, r.left_mask ? 0.5 : 0.5 + 0.5 * (ly / 32767.0));
+        if (r.balance_fixed >= -0.5f) (void)write_state_at(base, r.s_balance, 2, r.balance_fixed >= 0 ? r.balance_fixed : r.left_mask ? 0.5 : 0.5 + 0.5 * (ly / 32767.0));
     }
     // Ground shuvit: 7 held while the board turns, then let go; the turn is only dropped once the board has stopped
     // following a frame (out of 103), or it would be turned back.
@@ -1473,6 +1490,17 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         if (arguments.empty()) return std::format("The posed board's drive strength is {:.0f} (0: the game's own, 1).", r.rigid);
         r.rigid = std::clamp(static_cast<float>(std::atof(arguments[0].c_str())), 0.0f, 1000.0f);
         return std::format("A posed board is held to its pose with strength {:.0f}.", r.rigid);
+    }
+    if (verb == "balance") {
+        // <dev> tricks balance <0 to 1> | stick | off
+        if (arguments.empty()) return "usage: tricks balance <0 to 1> | stick | off";
+        r.balance_fixed = arguments[0] == "stick" ? -0.1f : arguments[0] == "off" ? -1.0f : std::clamp(static_cast<float>(std::atof(arguments[0].c_str())), 0.0f, 1.0f);
+        return std::format("The casper's balance: {}.", r.balance_fixed);
+    }
+    if (verb == "rootup") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off" && arguments[0] != "watch")) return "usage: tricks rootup on|off|watch";
+        r.rootup = arguments[0] == "on" ? 2 : arguments[0] == "watch" ? 1 : 0;
+        return r.rootup == 2 ? "The skater's root is held upright in a pose." : r.rootup == 1 ? "The skater's root is watched in a pose." : "The skater's root is the game's in a pose.";
     }
     if (verb == "level2") {
         // tricks level2 on|off | delay <ms>: the held pose's target kept level (the older `level` is the slide's pitch knob).

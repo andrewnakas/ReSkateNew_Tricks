@@ -362,11 +362,106 @@ struct FreestyleSlide {
     std::atomic<bool> hold{}, stable{true};
     // A pose landed from the air: for this long from the touchdown no part moves up or down, so the board is not
     // knocked out of the pose by its own landing (a primo's board lands on its edge).
-    std::atomic<std::uint32_t> soft_ms{};
+    // 300 ms by default: a casper lands deck first, 15 cm into the ground, and was thrown 1.7 m back up (measured
+    // 2026-10-13, the owner's "bounce on casper landings").
+    std::atomic<std::uint32_t> soft_ms{300};
     std::atomic<bool> mean{};
     bool was_hold{}; // how much of the parts' motion against each other is taken out each step // take the pitch out of the board's turning while it slides
 };
 FreestyleSlide& freestyle_slide() { static auto* value = new FreestyleSlide; return *value; }
+// ReSkate Tricks: the skater's root kept upright while a pose is held. The board's target is held level by the
+// board hook, but the root the body is drawn on still rolled over a quarter turn about the board's length at speed
+// (the owner: "bends at the ankles until his face or back hits the ground", 2026-10-13). The rig's root frame (rig
+// + 0x4720: rows side, up, forward, position) is built from the board each step by the rig's root update (0x47784b0,
+// called by the rig-follow of states 103, 200 and 202; hooked in tricks_board.cpp). Right after that update its up
+// row is set straight up; the heading is the one it had while it still stood. (Measured 2026-10-13: with the board
+// and the clip's board pose both still, the root rolled to 88 degrees in 0.6 s and came back in 1.3 s.)
+struct RootUpright {
+    std::atomic<int> mode{};            // 0 off, 1 watched only, 2 held upright
+    std::atomic<std::uintptr_t> rig{};  // the local skater's, from the slide
+    std::atomic<ULONGLONG> seen{};
+    std::atomic<float> low{2.0f}, high{-2.0f};
+    std::atomic<std::uint32_t> calls{}, fixed{};
+    // Motion hook only.
+    bool latched{};
+    float heading[3]{};
+};
+RootUpright& root_upright() { static auto* value = new RootUpright; return *value; }
+// <dev> The first three seconds of a held pose on the ground, a sample every 50 ms: ms, the height of the root's up
+// row, the board's height, the board's speed up, the height of the root's side and forward rows.
+struct RootTrace {
+    std::array<std::array<float, 6>, 64> samples{};
+    std::atomic<std::uint32_t> count{};
+    ULONGLONG started{}, last{};
+};
+std::atomic<std::uintptr_t> trace_part{};
+RootTrace& root_trace() { static auto* value = new RootTrace; return *value; }
+void trace_root(std::uintptr_t rig, float board_height, float board_up_speed) noexcept {
+    auto& t = root_trace();
+    const auto now = GetTickCount64();
+    if (now - t.last > 400) { t.started = now; t.count.store(0, std::memory_order_relaxed); }
+    const auto count = t.count.load(std::memory_order_relaxed);
+    if (count && now - t.last < 50 && count < t.samples.size()) return;
+    if (count >= t.samples.size()) { t.last = now; return; }
+    std::array<float, 12> frame{};
+    __try {
+        std::memcpy(frame.data(), reinterpret_cast<const void*>(rig + 0x4720), sizeof(frame));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    // The animated board matrix (rig + 0x49e0, model space): the heights of its right, up and forward rows.
+    std::array<float, 12> board{};
+    __try {
+        std::memcpy(board.data(), reinterpret_cast<const void*>(trace_part.load(std::memory_order_relaxed) + 0x20), sizeof(board)); // <dev> the board's first physics part: its own frame
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    (void)board_height; (void)board_up_speed;
+    t.samples[count] = {static_cast<float>(now - t.started), frame[5], board[1], board[5], frame[1], board[9]};
+    t.count.store(count + 1, std::memory_order_relaxed);
+    t.last = now;
+}
+// </dev>
+bool upright_root(std::uintptr_t rig) noexcept {
+    auto& u = root_upright();
+    const int mode = u.mode.load(std::memory_order_relaxed);
+    if (!mode) {
+        u.latched = false;
+        return false;
+    }
+    std::array<float, 12> target{};
+    __try {
+        std::memcpy(target.data(), reinterpret_cast<const void*>(rig + 0x4720), sizeof(target));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    float *side = target.data(), *up = target.data() + 4, *forward = target.data() + 8;
+    // Not the frame this code knows (three unit rows): left alone.
+    for (const float *row : {side, up, forward}) {
+        const float length = row[0] * row[0] + row[1] * row[1] + row[2] * row[2];
+        if (!(length > 0.9f && length < 1.1f)) return false;
+    }
+    u.calls.fetch_add(1, std::memory_order_relaxed);
+    if (up[1] < u.low.load(std::memory_order_relaxed)) u.low.store(up[1], std::memory_order_relaxed);
+    if (up[1] > u.high.load(std::memory_order_relaxed)) u.high.store(up[1], std::memory_order_relaxed);
+    if (mode < 2) return false;
+    // The heading: the forward row over the ground while the root stands (or the first one there is).
+    if (up[1] > 0.8f || !u.latched) {
+        const float *from = std::abs(forward[1]) < 0.8f ? forward : nullptr;
+        if (from) {
+            const float length = std::sqrt(from[0] * from[0] + from[2] * from[2]);
+            if (length > 0.3f) {
+                u.heading[0] = from[0] / length; u.heading[1] = 0.0f; u.heading[2] = from[2] / length;
+                u.latched = true;
+            }
+        }
+    }
+    if (!u.latched) return false;
+    const float cross[3]{up[1] * forward[2] - up[2] * forward[1], up[2] * forward[0] - up[0] * forward[2], up[0] * forward[1] - up[1] * forward[0]};
+    const float hand = cross[0] * side[0] + cross[1] * side[1] + cross[2] * side[2] < 0 ? -1.0f : 1.0f;
+    up[0] = 0.0f; up[1] = 1.0f; up[2] = 0.0f;
+    for (int i = 0; i < 3; ++i) forward[i] = u.heading[i];
+    side[0] = hand * (up[1] * forward[2] - up[2] * forward[1]);
+    side[1] = 0.0f;
+    side[2] = hand * (up[0] * forward[1] - up[1] * forward[0]);
+    if (!copy_to(rig + 0x4720, target.data(), sizeof(target))) return false;
+    u.fixed.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
 void tricks_freestyle_slide(std::uintptr_t core) noexcept {
     auto& f = freestyle_slide();
     const float deceleration = f.deceleration.load(std::memory_order_relaxed);
@@ -380,6 +475,11 @@ void tricks_freestyle_slide(std::uintptr_t core) noexcept {
     try {
         const auto bodies = debug_noclip_bodies(state.trial.base, f.client, f.entity);
         if (bodies.core != core || bodies.offboard || bodies.parts.empty() || !(bodies.seconds > 0 && bodies.seconds < 0.1f)) return;
+        trace_part.store(bodies.parts[0], std::memory_order_relaxed);
+        if (root_upright().mode.load(std::memory_order_relaxed))
+            trace_root(bodies.rig_wrapper, bodies.board_height, SourceReader{}.value<std::array<float, 3>>(bodies.parts[0], 0x70)[1]);
+        root_upright().rig.store(bodies.rig_wrapper, std::memory_order_relaxed);
+        root_upright().seen.store(GetTickCount64(), std::memory_order_relaxed);
         SourceReader reader;
         std::array<std::array<float, 3>, 32> velocities{};
         std::array<std::uint32_t, 32> flags{};
@@ -604,6 +704,24 @@ void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, 
     p.expires.store(GetTickCount64() + 500, std::memory_order_release);
 }
 void set_freestyle_slide_upright(float strength) noexcept { freestyle_slide().upright.store(strength, std::memory_order_relaxed); }
+std::uint32_t take_freestyle_root_trace(std::array<std::array<float, 6>, 64>& samples) noexcept {
+    auto& t = root_trace();
+    samples = t.samples;
+    return t.count.exchange(0, std::memory_order_relaxed);
+}
+void freestyle_root_updated(std::uintptr_t rig) noexcept {
+    auto& u = root_upright();
+    if (u.rig.load(std::memory_order_relaxed) != rig || GetTickCount64() - u.seen.load(std::memory_order_relaxed) > 200) return;
+    (void)upright_root(rig);
+}
+void set_freestyle_root_upright(int mode) noexcept { root_upright().mode.store(mode, std::memory_order_relaxed); }
+std::uint32_t take_freestyle_root_upright(float& low, float& high, std::uint32_t& fixed) noexcept {
+    auto& u = root_upright();
+    low = u.low.exchange(2.0f, std::memory_order_relaxed);
+    high = u.high.exchange(-2.0f, std::memory_order_relaxed);
+    fixed = u.fixed.exchange(0, std::memory_order_relaxed);
+    return u.calls.exchange(0, std::memory_order_relaxed);
+}
 void set_freestyle_slide_hold(bool held) noexcept { freestyle_slide().hold.store(held, std::memory_order_relaxed); }
 void set_freestyle_slide_stable(bool stable) noexcept { freestyle_slide().stable.store(stable, std::memory_order_relaxed); }
 void take_freestyle_slide_roll(float& peak_rate, float& swing) noexcept {

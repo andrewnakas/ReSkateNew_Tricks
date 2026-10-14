@@ -1,4 +1,4 @@
-# Runs one headless session of several passes. Each pass: teleport to the flat strip, mount, then the pass's commands.
+﻿# Runs one headless session of several passes. Each pass: teleport to the flat strip, mount, then the pass's commands.
 #   pass.ps1 -Tag e1 -Passes 'tricks airpose last off;KICKCASPER', 'KICKCASPER'
 # KICKCASPER / KICKPRIMO expand to a kickflip with the stick swept to the casper / primo place and held.
 # Prints the physics, node and catch lines of this run only (dev\last-run.log holds them all).
@@ -27,7 +27,7 @@ $out | Select-Object -Last 2
 $lines = Get-Content $log
 $start = ($lines | Select-String -SimpleMatch "pass-$Tag-0-begin" | Select-Object -Last 1).LineNumber
 if (-not $start) { 'No pass marker in the log.'; exit 1 }
-$mine = $lines[($start - 1)..($lines.Count - 1)] | Where-Object { $_ -match 'pass-|Tricks: (physics|nodes|caught|catch|slide rocking|pose in|ground|bounce|shuv|board|primo|let go|flicked|the )|TRICK|error:|Way-in|osition|speed' } |
+$mine = $lines[($start - 1)..($lines.Count - 1)] | Where-Object { $_ -match 'pass-|Tricks: (physics|nodes|caught|catch|slide rocking|pose in|ground|bounce|shuv|board|skater root|primo|let go|flicked|the )|TRICK|error:|Way-in|osition|speed' } |
     ForEach-Object { $_ -replace '^\[[^\]]+\] \[[^\]]+\] ', '' }
 $mine | Set-Content "$PSScriptRoot\last-run.log"
 $mine

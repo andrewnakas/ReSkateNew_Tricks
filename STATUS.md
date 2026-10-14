@@ -364,3 +364,11 @@ Plan: `C:\Users\andre\.claude\plans\peppy-stirring-moler.md`. Every number below
 **Test rig notes.** `dev\pass.ps1 -Tag x1 -Passes '<commands>',...` (macros KICKCASPER, KICKPRIMO, ...LONG). Stills taken with `echo shot-` land seconds late (the script polls the log): only a pose held for several seconds can be photographed.
 
 **The machine.** From 01:37 to 02:30 D: stalled (queue of 7, no throughput, a one-line write took 12 s) while memory was also full; my linker and the trainer session's both hung in I/O wait. Two links at once on D: seem to trigger it.
+
+## 2026-10-13 21:08 build: skater kept upright, casper landing bounce
+
+- Owner (playing the 09:50 build): catches look great, board mostly stable, but the skater bends at the ankles until face or back hits the ground on landing; later a ~30 degree whole-body rock and a bounce on casper landings.
+- Measured (dev trace, `tricks rootup watch`): board's physical frame and the clip's board pose both still, yet the rig's root frame (rig +0x4720) rolls to ~90 degrees in 0.6 s and back in 1.3 s. It is rebuilt each step by the root update 0x47784b0 (called from the rig-follow 0x4773e40 / 0x4774f50); a write after the physics step is overwritten and made it worse. Fix: hook 0x47784b0, set the root's up row straight up right after it (heading latched while upright). `tricks rootup on|off|watch` (default on). Stills dev\shots\u1 (fixed) vs k1 (game's) at +0.6 s.
+- Casper bounce: lands deck first 15 cm into the ground and was thrown 1.7 m back up (state stayed 103, so the state log never showed it). Slide `soft` (no vertical motion) now defaults to 300 ms: board settles in 63 ms.
+- Not the cause: Balance blend, rider part velocities (soft 3000 / upright 1 changed nothing), the clip's board pose.
+- Checked headlessly on San Vansterdam: casper, primo, casper and primo kickflip flip-outs all land riding. Owner playtest pending.
