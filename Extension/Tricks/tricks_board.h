@@ -35,6 +35,8 @@ std::uint32_t take_board_rigid(float &first_seen) noexcept;
 // Lifts the board up its own up axis, most at the middle of the running turn (0 at both ends).
 void set_board_hop(float metres) noexcept;
 bool board_spin_running() noexcept;
+// <dev> Calls of the second root update (0x4779330, any skater) since the last call.
+std::uint32_t take_root_update2_calls() noexcept;
 // How often the hook saw the local skater's frame since last asked, and how often it turned it.
 void board_hook_counts(std::uint32_t &seen, std::uint32_t &turned) noexcept;
 } // namespace dingosdk::tricks

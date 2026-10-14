@@ -24,6 +24,20 @@ void root_update_hook(std::uintptr_t rig, float step) {
     if (const auto next = root_original.load(std::memory_order_acquire)) next(rig, step);
     freestyle_root_updated(rig);
 }
+// The other root update (rig, pointer): writes the same root (rig + 0x4720) on another path. With only the first held
+// upright, steps built by this one used the tipped frame and the posed body rocked from one frame to the next (seen
+// in slow motion 2026-10-14; the owner's "bounces").
+constexpr std::uintptr_t root_update2 = 0x4779330;
+constexpr unsigned char root_update2_bytes[]{0x48, 0x8b, 0xc4, 0x48, 0x81, 0xec, 0x28, 0x01, 0x00, 0x00, 0x80, 0xb9, 0xa5, 0x59, 0x00, 0x00, 0x00};
+using RootUpdate2 = void (*)(std::uintptr_t rig, void *frame);
+std::atomic<RootUpdate2> root2_original{};
+std::atomic<std::uint32_t> root2_calls{};
+void root_update2_hook(std::uintptr_t rig, void *frame) {
+    root2_calls.fetch_add(1, std::memory_order_relaxed);
+    freestyle_root_updating(rig);
+    if (const auto next = root2_original.load(std::memory_order_acquire)) next(rig, frame);
+    freestyle_root_updated(rig);
+}
 std::atomic<bool> attempted{}, ready{};
 std::atomic<std::uintptr_t> local_context{};
 std::atomic<std::uint32_t> seen_count{}, turned_count{};
@@ -196,6 +210,11 @@ void *drive_target_hook(std::uintptr_t board, float *out, std::uint8_t flag) {
     const auto next = original.load(std::memory_order_acquire);
     return next ? next(board, out, flag) : out;
 }
+bool root_code_known(std::uintptr_t at, const unsigned char *bytes, std::size_t size) noexcept {
+    __try {
+        return std::memcmp(reinterpret_cast<const void *>(at), bytes, size) == 0;
+    } __except (1) { return false; }
+}
 bool code_known(std::uintptr_t at) noexcept {
     __try {
         return std::memcmp(reinterpret_cast<const void *>(at), drive_target_bytes, sizeof(drive_target_bytes)) == 0;
@@ -212,7 +231,15 @@ bool start_board_hook(std::uintptr_t base) noexcept {
     original.store(reinterpret_cast<DriveTarget>(next), std::memory_order_release);
     if (hook_enable(target) != HookOk) return false;
     ready.store(true, std::memory_order_relaxed);
-    // The skater's root update (a held pose's body kept upright); the board works without it.
+    // The skater's root updates (a held pose's body kept upright); the board works without them.
+    if (root_code_known(base + root_update2, root_update2_bytes, sizeof(root_update2_bytes))) {
+        auto *target2 = reinterpret_cast<void *>(base + root_update2);
+        void *next2{};
+        if (hook_prepare(target2, reinterpret_cast<void *>(&root_update2_hook), &next2) == HookOk && next2) {
+            root2_original.store(reinterpret_cast<RootUpdate2>(next2), std::memory_order_release);
+            (void)hook_enable(target2);
+        }
+    }
     __try {
         if (std::memcmp(reinterpret_cast<const void *>(base + root_update), root_update_bytes, sizeof(root_update_bytes)) != 0) return true;
     } __except (1) { return true; }
@@ -224,6 +251,7 @@ bool start_board_hook(std::uintptr_t base) noexcept {
     }
     return true;
 }
+std::uint32_t take_root_update2_calls() noexcept { return root2_calls.exchange(0, std::memory_order_relaxed); }
 void set_board_context(std::uintptr_t context) noexcept { local_context.store(context, std::memory_order_relaxed); }
 void start_board_spin(float roll, float yaw, float pitch, std::uint32_t milliseconds) noexcept {
     spin.on.store(false, std::memory_order_release);

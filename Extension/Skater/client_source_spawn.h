@@ -53,7 +53,12 @@ std::string take_freestyle_rider_drives(std::uint32_t& writes, std::uint32_t& re
 // Called before the game's root update of a rig (any skater's): the frame the local skater's root is built from is
 // set upright if asked. How many times it was, since the last call.
 void freestyle_root_updating(std::uintptr_t rig) noexcept;
-std::uint32_t take_freestyle_root_source() noexcept;
+// <dev> also: the lowest height its up row had before it was set, the mean of (1 - that height), and the calls seen.
+std::uint32_t take_freestyle_root_source(float& lowest, float& mean_tip, std::uint32_t& calls) noexcept;
+// The local skater's root turned half round about the vertical (the anti-casper, with the game's mirror); `rig` is the
+// local skater's. How many root builds it turned since the last call.
+void set_freestyle_root_turn(std::uintptr_t rig, bool on) noexcept;
+std::uint32_t take_freestyle_root_turned() noexcept;
 // Called after the game's root update of a rig (any skater's): the local skater's root is set upright if asked.
 void freestyle_root_updated(std::uintptr_t rig) noexcept;
 // <dev> Samples of a held pose's first seconds on the ground: ms, root up row height, board height, board speed up,

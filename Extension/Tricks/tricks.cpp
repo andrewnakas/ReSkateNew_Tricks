@@ -57,7 +57,7 @@ struct PadScript {
 // </dev>
 
 struct Runtime {
-    std::uintptr_t base{}, entity{};
+    std::uintptr_t base{}, entity{}, rig{};
     std::uint64_t next_skater{}, next_search{}, next_resolve{};
     int resolved_count{-9};
     bool hooks{};
@@ -181,6 +181,7 @@ struct Runtime {
     // goes on at the catch, before the way in starts, and stays on through the way out until it has been in the air
     // or the skater rides again (released earlier it snapped to the plain casper at both ends: owner, 2026-10-13).
     bool anti_on{true}, anti{}, zone_anti{}, mirror_on{};
+    bool anti_turn{true}; // the skater (root) turned half round while mirrored: `tricks anti turn on|off`
     std::uint32_t anti_steady_ms{150}; // the stick passes the top during a flick: it has to rest there this long
     std::uint64_t mirror_until{};
     std::uintptr_t s_mirrored{};
@@ -437,9 +438,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             (void)client_source::detail::debug_skater(base, client, skater);
             r.entity = skater.skater_position_valid ? skater.skater_identity : 0;
             // Where the rig writes the board's target frame: the procedural board turns that one only.
-            set_board_context(r.entity ? client_source::detail::debug_noclip_bodies(base, client, r.entity).context : 0);
+            const auto bodies = r.entity ? client_source::detail::debug_noclip_bodies(base, client, r.entity) : decltype(client_source::detail::debug_noclip_bodies(base, client, r.entity)){};
+            set_board_context(r.entity ? bodies.context : 0);
+            r.rig = r.entity ? bodies.rig_wrapper : 0;
         } catch (...) {
             r.entity = 0;
+            r.rig = 0;
             set_board_context(0);
         }
         r.next_skater = now + (r.entity ? 1000 : 250);
@@ -486,8 +490,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     if (!rows.empty() || writes)
                         logging::log(logging::Level::info, logging::Channel::skater, "Tricks: rider drives (mode {}, feet {}): {} row writes, {} set again by the game{}", r.riderframe, r.rider_feet, writes, regame, rows);
                 }
-                if (const auto sourced = take_freestyle_root_source())
-                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root's source frame set upright {} times.", sourced);
+                {
+                    float lowest{}, mean_tip{};
+                    std::uint32_t calls{};
+                    if (const auto sourced = take_freestyle_root_source(lowest, mean_tip, calls))
+                        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root's source frame set upright {} of {} times (its up row before: lowest {:.4f}, mean tip {:.5f}); second root update called {} times.", sourced, calls, lowest, mean_tip, take_root_update2_calls());
+                }
                 if (const auto calls = take_freestyle_root_upright(low, high, fixed))
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root seen for {} steps, its up row's height {:.2f}..{:.2f}; set upright {} times.", calls, low, high, fixed);
             }
@@ -1065,9 +1073,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 if (!r.s_mirrored) r.s_mirrored = find_state(base, "Animation/Dingo/Bool.Anim.Mirrored");
                 (void)write_state_at(base, r.s_mirrored, 0, want ? 1 : 0);
                 if (want != r.mirror_on)
-                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: anti-casper mirror {} (physics {}).", want ? "on" : "off", physics.valid ? static_cast<int>(physics.state) : -1);
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: anti-casper mirror {} (physics {}){}.", want ? "on" : "off", physics.valid ? static_cast<int>(physics.state) : -1,
+                                 want ? "" : std::format(", root turned half round in {} builds", take_freestyle_root_turned()));
                 r.mirror_on = want;
             }
+            // Turned half round with the mirror, at the same moments (the mirror alone is the casper seen from behind).
+            set_freestyle_root_turn(r.rig, r.mirror_on && r.anti_turn);
             if (!want && !posed_anti) r.anti = false;
         }
         // Keep the flick that ends a trick from reaching the game while the stick comes back.
@@ -1617,7 +1628,11 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             r.anti_steady_ms = ms;
             return std::format("The anti-casper is caught after the stick rests up for {} ms.", ms);
         }
-        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks anti on|off | steady <ms>";
+        if (arguments.size() == 2 && arguments[0] == "turn" && (arguments[1] == "on" || arguments[1] == "off")) {
+            r.anti_turn = arguments[1] == "on";
+            return r.anti_turn ? "The anti-casper turns the skater half round with the mirror." : "The anti-casper is the mirror alone.";
+        }
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks anti on|off | steady <ms> | turn on|off";
         r.anti_on = arguments[0] == "on";
         return r.anti_on ? "Anti-casper on: the stick resting up at the catch." : "Anti-casper off.";
     }
