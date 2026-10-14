@@ -387,6 +387,7 @@ struct RootUpright {
     std::atomic<std::uint32_t> calls{}, fixed{}, source_fixed{}, source_calls{};
     std::atomic<float> source_low{2.0f}, source_sum{};
     std::atomic<bool> turn{};               // the root's source turned half round (the anti-casper)
+    std::atomic<bool> hold{};               // held upright whatever the physics state (a pose's way out, in the air too)
     std::atomic<std::uintptr_t> turn_rig{}; // the local skater's rig, from the game thread
     std::atomic<std::uint32_t> turned{};
     // Motion hook only.
@@ -1048,12 +1049,14 @@ std::uint32_t take_freestyle_root_trace(std::array<std::array<float, 6>, 64>& sa
 }
 void freestyle_root_updated(std::uintptr_t rig) noexcept {
     auto& u = root_upright();
-    if (u.rig.load(std::memory_order_relaxed) != rig || GetTickCount64() - u.seen.load(std::memory_order_relaxed) > 200) return;
+    const bool held = u.hold.load(std::memory_order_relaxed) && rig && rig == u.turn_rig.load(std::memory_order_relaxed);
+    if (!held && (u.rig.load(std::memory_order_relaxed) != rig || GetTickCount64() - u.seen.load(std::memory_order_relaxed) > 200)) return;
     (void)upright_root(rig);
 }
 void freestyle_root_updating(std::uintptr_t rig) noexcept {
     auto& u = root_upright();
-    if (u.rig.load(std::memory_order_relaxed) == rig && GetTickCount64() - u.seen.load(std::memory_order_relaxed) <= 200) (void)upright_root_source(rig);
+    const bool held = u.hold.load(std::memory_order_relaxed) && rig && rig == u.turn_rig.load(std::memory_order_relaxed);
+    if (held || (u.rig.load(std::memory_order_relaxed) == rig && GetTickCount64() - u.seen.load(std::memory_order_relaxed) <= 200)) (void)upright_root_source(rig);
     // The anti-casper: the game's mirror turns the skater over to the board's other side (the casper as seen from
     // behind: owner, 2026-10-14); turned half round about the vertical as well, the skater faces its own side again
     // with the front foot on the end that is down.
@@ -1067,6 +1070,10 @@ void freestyle_root_updating(std::uintptr_t rig) noexcept {
         for (int i : {0, 1, 2, 8, 9, 10}) rows[i] = -rows[i]; // side and forward rows; up stays
         if (copy_to(source + 0x5b0, rows.data(), sizeof(rows))) u.turned.fetch_add(1, std::memory_order_relaxed);
     }
+}
+void set_freestyle_root_hold(std::uintptr_t rig, bool on) noexcept {
+    root_upright().turn_rig.store(rig, std::memory_order_relaxed);
+    root_upright().hold.store(on, std::memory_order_relaxed);
 }
 void set_freestyle_root_turn(std::uintptr_t rig, bool on) noexcept {
     root_upright().turn_rig.store(rig, std::memory_order_relaxed);

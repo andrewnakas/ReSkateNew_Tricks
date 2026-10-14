@@ -58,6 +58,8 @@ std::uint32_t take_freestyle_root_source(float& lowest, float& mean_tip, std::ui
 // The local skater's root turned half round about the vertical (the anti-casper, with the game's mirror); `rig` is the
 // local skater's. How many root builds it turned since the last call.
 void set_freestyle_root_turn(std::uintptr_t rig, bool on) noexcept;
+// The local skater's root held upright in any physics state (a pose's way out, through its air), with the mode set.
+void set_freestyle_root_hold(std::uintptr_t rig, bool on) noexcept;
 std::uint32_t take_freestyle_root_turned() noexcept;
 // Called after the game's root update of a rig (any skater's): the local skater's root is set upright if asked.
 void freestyle_root_updated(std::uintptr_t rig) noexcept;

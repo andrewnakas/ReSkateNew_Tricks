@@ -815,7 +815,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 const bool posed = r.by_hold && r.freestyle != Freestyle::off;
                 const bool held_103 = (posed || exit_guard) && physics.valid && physics.state == 103;
                 set_board_rigid(held_103 ? r.rigid : 0.0f);
-                set_freestyle_root_upright(held_103 ? r.rootup : 0);
+                // Through the way out's air too: there the game's own frame follows the board, still upside down when
+                // the flip out pops, and the skater swung over head first (owner, 2026-10-14).
+                set_freestyle_root_upright(held_103 || exit_guard ? r.rootup : 0);
+                set_freestyle_root_hold(r.rig, exit_guard && r.rootup == 2);
                 set_freestyle_rider_drives(posed && physics.valid && physics.state == 103 ? r.riderframe : 0, r.rider_feet);
                 // <dev> Watched once the pose has been in for a second (its way in turns the board on purpose).
                 set_board_lean_watch(posed && physics.valid && physics.state == 103 && r.landed_at && now - r.landed_at > 1000);
