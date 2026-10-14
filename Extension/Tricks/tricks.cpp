@@ -143,7 +143,8 @@ struct Runtime {
     std::uint64_t mod_since{}, landed_at{}, air_last{};
     bool catch_armed{true}, edge_brief{};
     std::uint64_t air_start{}, last_centre{1}, last_pop{};
-    bool edge_fall{true};   // a primo with the stick held at the outside is lost
+    // Off (owner, 2026-10-14: "if you touch the rim you instantly fall"): only the stick back at the middle drops a casper.
+    bool edge_fall{false};
     bool centre_fall{true}; // a casper with the stick back at the middle is lost
     bool fall_slam{};
     bool left_mask{true};
@@ -185,7 +186,9 @@ struct Runtime {
     bool height_on{true};
     float height_at_edge{0.0f}, height_at_middle{1.0f}, height_inner{0.45f}, height_now{0.5f};
     std::uint64_t height_last{};
-    bool anti_turn{true}; // the skater (root) turned half round while mirrored: `tricks anti turn on|off`
+    bool anti_turn{true};
+    std::uint64_t exit_guard_until{};
+    bool exit_guard_air{}; // the skater (root) turned half round while mirrored: `tricks anti turn on|off`
     std::uint32_t anti_steady_ms{150}; // the stick passes the top during a flick: it has to rest there this long
     std::uint64_t mirror_until{};
     std::uintptr_t s_mirrored{};
@@ -795,17 +798,29 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                                     : 0);
             }
             // No wipeout while a pose is being caught, landed or held: only the stick loses it.
-            if (r.protect && r.by_hold && r.freestyle != Freestyle::off) protect_pose(300);
+            // The way out of a pose (a flick or the click let go) is guarded until its flip has been in the air and is
+            // down again: at speed the game stepped the skater off as soon as the pose's own holds stopped (the owner's
+            // session 2026-10-14: 103 -> 504 on most exits at 6 to 7 m/s).
+            bool exit_guard = now < r.exit_guard_until;
+            if (exit_guard) {
+                if (in_air) r.exit_guard_air = true;
+                else if (r.exit_guard_air && on_ground) r.exit_guard_until = std::min(r.exit_guard_until, now + 300);
+                if (r.by_hold && r.freestyle != Freestyle::off) r.exit_guard_until = 0; // caught again: the pose's own holds
+                exit_guard = now < r.exit_guard_until;
+            }
+            if (r.protect && ((r.by_hold && r.freestyle != Freestyle::off) || exit_guard)) protect_pose(300);
             if (r.stomp && r.by_hold && r.freestyle != Freestyle::off) stomp_pose(300);
+            if (exit_guard) keep_pose_on_board(200);
             {
                 const bool posed = r.by_hold && r.freestyle != Freestyle::off;
-                set_board_rigid(posed && physics.valid && physics.state == 103 ? r.rigid : 0.0f);
-                set_freestyle_root_upright(posed && physics.valid && physics.state == 103 ? r.rootup : 0);
+                const bool held_103 = (posed || exit_guard) && physics.valid && physics.state == 103;
+                set_board_rigid(held_103 ? r.rigid : 0.0f);
+                set_freestyle_root_upright(held_103 ? r.rootup : 0);
                 set_freestyle_rider_drives(posed && physics.valid && physics.state == 103 ? r.riderframe : 0, r.rider_feet);
                 // <dev> Watched once the pose has been in for a second (its way in turns the board on purpose).
                 set_board_lean_watch(posed && physics.valid && physics.state == 103 && r.landed_at && now - r.landed_at > 1000);
                 // </dev>
-                const bool want = r.no_runout && posed;
+                const bool want = r.no_runout && (posed || exit_guard);
                 if (want || r.no_runout_on) {
                     if (!r.s_no_wipeouts) r.s_no_wipeouts = find_state(base, "Animation/Dingo/Bool.Anim.ForceDisableAllWipeouts");
                     (void)write_state_at(base, r.s_no_wipeouts, 0, want ? 1 : 0);
@@ -908,10 +923,13 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     r.leaving_until = now + ms;
                     r.by_hold = false;
                     r.primo_out_at = 0;
+                    r.exit_guard_until = now + 2000;
+                    r.exit_guard_air = false;
                 };
                 const auto fall = [&](const char *why) {
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: the {} was lost ({}).", freestyle_name(r.freestyle), why);
                     leave(0, 0);
+                    r.exit_guard_until = 0;
                     protect_pose(0); // the protection would keep the skater on the board through the hop
                     // The owner's pick: the skater hops off and stands (2026-10-12). The other way is a real slam.
                     if (r.fall_slam) request_wipeout();
@@ -923,7 +941,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 const bool settled = now - r.landed_at > 600; // the landing's first moment is forgiven
                 // The stick in its upper half at the edge: a flick if it is brief, a fall if it stays (the owner holds his
                 // poses with the stick right at the lower edge, so the edge itself is no fall).
-                const bool upper = held > 0.8f && hy > 0.3f;
+                // A quick swipe to the left or right rim from a casper's place is a flick too (a pop shuvit out); resting
+                // there is still the change over to the primo.
+                const bool side = casper && held > 0.8f && std::abs(hy) <= 0.3f && now - r.low_last < 160;
+                const bool upper = (held > 0.8f && hy > 0.3f) || side;
                 if (held > 0.4f && hy < 0.1f) r.low_last = now;
                 if (r.primo_out_at) {
                     if (now >= r.primo_out_at) {
@@ -953,7 +974,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         const float flick = std::atan2(r.edge_y, r.edge_x) * 180.0f / 3.14159265f;
                         r.out_roll = r.out_yaw = 0;
                         const char *turn = "Tre Flip";
-                        if (flick >= 100.0f) { r.out_roll = 360; turn = "Kickflip"; }
+                        if (flick >= 150.0f || flick <= -150.0f) { r.out_yaw = 180; turn = "Pop Shuvit"; }
+                        else if (flick <= 30.0f) { r.out_yaw = -180; turn = "FS Pop Shuvit"; }
+                        else if (flick >= 100.0f) { r.out_roll = 360; turn = "Kickflip"; }
                         else if (flick < 80.0f) { r.out_roll = -360; turn = "Heelflip"; }
                         else { r.out_roll = 360; r.out_yaw = 360; }
                         logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flicked out of the {} ({}).", freestyle_name(r.freestyle), turn);
@@ -1106,7 +1129,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         r.after_primo = Freestyle::off;
     }
     r.shown = r.freestyle;
-    if (r.freestyle != Freestyle::off && r.entity) set_freestyle_slide(client, r.entity, r.slide);
+    if ((r.freestyle != Freestyle::off || now < r.exit_guard_until) && r.entity) set_freestyle_slide(client, r.entity, r.slide);
     set_freestyle_slide_upright(r.upright);
     // The casper's loop is a blend of three clips (low, medium, high) on Float.Intent.Balance, 0 to 1: the left
     // stick's up and down leans the casper while it is held.
