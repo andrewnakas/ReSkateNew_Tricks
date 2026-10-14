@@ -227,6 +227,10 @@ struct Runtime {
     // within 10 degrees of the pose from tick 34 of 70; primo_into is on its edge from tick 38 of 95).
     float snap_casper{22.0f}, snap_primo{38.0f};
     bool snap_dirty{}, snap_applied{};
+    // A pose from a manual starts its way in at the beginning: the board turns over on the ground from where the
+    // manual has it (snapped part of the way in, the nose-manual anti-casper bounced and flipped round: owner,
+    // 2026-10-13). An air catch puts the snap back.
+    bool snap_from_start{};
     std::uint64_t next_snap{};
     bool stomp{true}; // a caught pose's board touching down goes straight to the ground animation state (no bounce)
     std::uint64_t low_last{};
@@ -561,7 +565,11 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
     // </dev>
     // The states the game itself uses, as soon as its EnableCaspers write has shown where they live.
     // The way-in clips' start ticks, written into the two transitions once per level (their objects come with it).
-    if (!playing) r.snap_applied = false;
+    if (!playing && r.snap_applied) {
+        r.snap_applied = false;
+        r.snap_from_start = false;
+        forget_transitions();
+    }
     if (playing && skater_key_known() && state_objects_known() && !r.snap_applied && now >= r.next_snap) {
         r.next_snap = now + 2000;
         const int casper = set_transition_start(base, "animation/dingo/transition_onboard.freestyle.conduit_to_onboard.freestyle.casper.into", r.snap_casper);
@@ -692,6 +700,11 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 if (r.freestyle == Freestyle::off && !r.nc_trick && !r.leaving && modifier && steady && state_objects_known()) {
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: caught in {}{} (stick at {:.0f}){}.", zone_anti ? "anti-" : "", freestyle_name(zone), angle, from_manual && !in_air ? " from a manual" : "");
                     announce(pose_name(zone, zone_anti));
+                    if (const bool start = from_manual && !in_air; start != r.snap_from_start && r.snap_applied) {
+                        (void)set_transition_start(base, "animation/dingo/transition_onboard.freestyle.conduit_to_onboard.freestyle.casper.into", start ? 0.0f : r.snap_casper);
+                        (void)set_transition_start(base, "animation/dingo/transition_onboard.freestyle.conduit_to_onboard.freestyle.primo.into", start ? 0.0f : r.snap_primo);
+                        r.snap_from_start = start;
+                    }
                     r.freestyle = zone;
                     r.anti = zone_anti;
                     r.by_hold = true;
@@ -1645,6 +1658,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         if (casper == -1) casper = set_transition_start(r.base, "Animation/Dingo/Transition_onboard.freestyle.conduit_to_onboard.freestyle.casper.into", r.snap_casper, &was_casper);
         if (primo == -1) primo = set_transition_start(r.base, "Animation/Dingo/Transition_onboard.freestyle.conduit_to_onboard.freestyle.primo.into", r.snap_primo, &was_primo);
         r.snap_dirty = casper < 0 || primo < 0;
+        r.snap_from_start = false;
         r.snap_applied = !r.snap_dirty;
         return std::format("Way-in clips: casper from tick {:.0f} (was mode {}, tick {:.0f}), primo from tick {:.0f} (was mode {}, tick {:.0f}). Below 0: -1 not found, -2 unexpected layout, -3 write failed.",
                            r.snap_casper, casper, was_casper, r.snap_primo, primo, was_primo);

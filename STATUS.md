@@ -400,3 +400,9 @@ NEXT: ground entries from manuals (tail manual fully down + L3 + stick -> casper
 - Rule (`manual_entry`, on): the brake of a tail manual seen in the last 0.4 s + L3 + the stick resting in a pose's place (casper or primo) starts that pose on the ground, the same way the air catch does; a nose manual's brake allows the anti-casper (stick up).
 - Verified headlessly (dev\rfd.txt): tail manual brake + L3 + down -> casper "from a manual", 103 held 3.3 s, body 1.2 m, L3 exit to riding; the same then stick to the side -> primo (via the casper; the script pressed L3 with the stick still down), put down to riding; nose manual brake + L3 + up -> anti-casper, mirror on before the pose, off in the exit's air, riding.
 - Dev log line `Tricks: manual tail/nose/brake ...` on every change.
+
+## 2026-10-14 00:03 build: manual entries start their way in from tick 0
+
+- Owner on the 23:58 run: "the nose manual to anti casper bounces and flips around".
+- Change: a pose started from a manual sets the casper/primo way-in transitions to start at tick 0 (the board turns over from where the manual has it); an air catch puts the snap ticks (22 / 38) back. `set_transition_start` now keeps the two transition assets (cleared on leaving a level), so a catch costs two writes.
+- Headless (dev\rfe.txt): nose manual -> anti-casper still shows a lift in the rider parts (1.55 -> 1.77 m at 0.27 s, then 1.32 steady); air-caught casper unchanged (0.83 -> 1.16, no flop). Owner's eye pending on whether the flip-round is gone. If not: the mirror switching on at once on the ground (no air to hide it) is the next suspect; and the lift may be the into clip's own pop.

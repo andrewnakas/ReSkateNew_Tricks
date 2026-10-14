@@ -7,6 +7,8 @@
 #include <atomic>
 #include <cstring>
 #include <string_view>
+#include <array>
+#include <string>
 
 namespace dingosdk::tricks {
 namespace {
@@ -381,9 +383,30 @@ std::uintptr_t find_anywhere(std::uintptr_t base, const char *name) noexcept {
     } __except (1) {}
     return 0;
 }
+struct FoundTransition { std::string name; std::uintptr_t base{}, asset{}; };
+std::array<FoundTransition, 8> &transition_cache() {
+    static auto *value = new std::array<FoundTransition, 8>{};
+    return *value;
+}
+void forget_transitions() noexcept {
+    for (auto &f : transition_cache()) f.asset = 0;
+}
+// The assets found are kept (by the name's text) for as long as the level is the same: a catch sets these again.
+std::uintptr_t transition_asset(std::uintptr_t base, const char *name) noexcept {
+    try {
+        auto &found = transition_cache();
+        for (const auto &f : found)
+            if (f.asset && f.base == base && f.name == name) return f.asset;
+        std::uintptr_t asset = find_state(base, name);
+        if (!asset) asset = find_anywhere(base, name);
+        if (!asset) return 0;
+        for (auto &f : found)
+            if (!f.asset || f.name == name) { f = {name, base, asset}; break; }
+        return asset;
+    } catch (...) { return 0; }
+}
 int set_transition_start(std::uintptr_t base, const char *name, float tick, float *before) noexcept {
-    auto asset = find_state(base, name);
-    if (!asset) asset = find_anywhere(base, name);
+    const std::uintptr_t asset = transition_asset(base, name);
     if (!asset) return -1;
     std::int16_t mode{};
     float offset{}, phase{};

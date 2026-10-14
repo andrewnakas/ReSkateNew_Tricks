@@ -71,6 +71,8 @@ bool state_objects_resolved() noexcept;
 // A state-flow transition, by its asset name, made to start its destination clip `tick` ticks in (0: as shipped).
 // Returns the phase mode that was there (0 or 7; `before`: the tick offset), or below 0 when nothing was written.
 int set_transition_start(std::uintptr_t base, const char *name, float tick, float *before = nullptr) noexcept;
+// The transition assets set_transition_start keeps (a new level has new ones).
+void forget_transitions() noexcept;
 bool skater_key_known() noexcept;
 std::uint64_t skater_key() noexcept;
 // Forget the key (the skater is gone).
