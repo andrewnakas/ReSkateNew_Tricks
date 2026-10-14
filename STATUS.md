@@ -372,3 +372,10 @@ Plan: `C:\Users\andre\.claude\plans\peppy-stirring-moler.md`. Every number below
 - Casper bounce: lands deck first 15 cm into the ground and was thrown 1.7 m back up (state stayed 103, so the state log never showed it). Slide `soft` (no vertical motion) now defaults to 300 ms: board settles in 63 ms.
 - Not the cause: Balance blend, rider part velocities (soft 3000 / upright 1 changed nothing), the clip's board pose.
 - Checked headlessly on San Vansterdam: casper, primo, casper and primo kickflip flip-outs all land riding. Owner playtest pending.
+
+## 2026-10-13 21:55: casper body sink is physical (open)
+
+- Owner on the 21:08 build: casper still flops (butt on the ground), primo bends a little at the ankles, legs looked twisted. The upright root (hook 0x47784b0) did not change the drawn body; now off by default (`tricks rootup on` to compare; the root's inverse at rig +0x4760 is kept in step with it).
+- New dev trace (rootup watch): the rider's 25 physics parts' height over the board. Primo: highest 1.32 m, steady. Casper: 0.86 at touchdown, sinks to 0.2-0.4 m by 0.6-1.2 s, stands back up to 1.2 m by 1.7 s. So the body is the ragdoll being pulled down, not the root frame.
+- No effect: snap 50 / 64 (not the way-in clip), soft 3000, upright 1, Balance 0 / 1, held states bool.physics.muscles.followanimation 1, bool.anim.twoboneanimfeet.enabled 0, bool.slopeadjust.leftfootenabled 0, bool.anim.forcedisableragdollcollision 1 (all found and written).
+- Lead: the five rider-to-deck drives (world-step.md 1351: pelvis anchor 0.905 m "up" in the deck's frame, feet 0.04-0.11 m, stiffness 1e4). With the deck upside down that anchor is under the ground; on edge it is sideways (primo's small ankle bend). Their per-step update is not in private/decomp; next = find and decompile it (ghidra project in private/ghidra), then flip the anchors' up while a casper is held.
