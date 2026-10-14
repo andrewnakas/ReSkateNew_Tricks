@@ -195,7 +195,9 @@ struct Runtime {
     float rigid{30.0f};
     bool level{true};
     float balance_fixed{-0.1f}; // <dev> the casper's Balance: 0 to 1 held there, -0.1 the stick's, -1 not written
-    int rootup{2}; // the skater's root in a held pose: 0 the game's, 1 watched, 2 held upright
+    // The skater's root in a held pose: 0 the game's, 1 watched, 2 held upright. Off by default: the drawn body is the
+    // rider's physics parts, which sink on their own (owner 2026-10-13: still flops, and the legs twisted with it on).
+    int rootup{0};
     std::uint32_t level_delay{0};
     bool no_runout{true}, no_runout_on{};
     std::uintptr_t s_no_wipeouts{};
@@ -450,7 +452,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     std::string text;
                     for (std::uint32_t i = 0; i < count && i < samples.size(); ++i)
                         text += std::format(" {:.0f}:{:.2f}/{:.2f}/{:+.1f}/{:.2f}/{:.2f}", samples[i][0], samples[i][1], samples[i][2], samples[i][3], samples[i][4], samples[i][5]);
-                    if (count) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root trace (ms:root up row/clip board right row/clip board up row/root side row/clip board forward row):{}", text);
+                    if (count) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root trace (ms:root up row/rider parts highest/lowest/mean over the board/board up row):{}", text);
                 }
                 if (const auto calls = take_freestyle_root_upright(low, high, fixed))
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root seen for {} steps, its up row's height {:.2f}..{:.2f}; set upright {} times.", calls, low, high, fixed);
@@ -1171,6 +1173,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
     for (auto &extra : r.extras) {
         if (extra.freestyle_only && r.freestyle == Freestyle::off) continue;
         if (!extra.at) extra.at = find_state(base, extra.name.c_str());
+        if (!extra.at) extra.at = find_anywhere(base, extra.name.c_str());
         if (extra.at && write_state_at(base, extra.at, extra.kind, extra.value)) ++extra.writes;
     }
     // </dev>

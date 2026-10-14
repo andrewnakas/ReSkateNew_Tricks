@@ -396,7 +396,7 @@ struct RootTrace {
 };
 std::atomic<std::uintptr_t> trace_part{};
 RootTrace& root_trace() { static auto* value = new RootTrace; return *value; }
-void trace_root(std::uintptr_t rig, float board_height, float board_up_speed) noexcept {
+void trace_root(std::uintptr_t rig, float high, float low, float mean) noexcept {
     auto& t = root_trace();
     const auto now = GetTickCount64();
     if (now - t.last > 400) { t.started = now; t.count.store(0, std::memory_order_relaxed); }
@@ -412,8 +412,7 @@ void trace_root(std::uintptr_t rig, float board_height, float board_up_speed) no
     __try {
         std::memcpy(board.data(), reinterpret_cast<const void*>(trace_part.load(std::memory_order_relaxed) + 0x20), sizeof(board)); // <dev> the board's first physics part: its own frame
     } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
-    (void)board_height; (void)board_up_speed;
-    t.samples[count] = {static_cast<float>(now - t.started), frame[5], board[1], board[5], frame[1], board[9]};
+    t.samples[count] = {static_cast<float>(now - t.started), frame[5], high, low, mean, board[5]};
     t.count.store(count + 1, std::memory_order_relaxed);
     t.last = now;
 }
@@ -459,6 +458,25 @@ bool upright_root(std::uintptr_t rig) noexcept {
     side[1] = 0.0f;
     side[2] = hand * (up[0] * forward[1] - up[1] * forward[0]);
     if (!copy_to(rig + 0x4720, target.data(), sizeof(target))) return false;
+    // The same update ends by storing the root's inverse (rig + 0x4760: three transposed rows, + 0x4790: the position
+    // taken back through them). Left as the game had it, everything placed from the inverse (the feet on the board)
+    // was placed from the rolled root: the legs bent backwards and twisted under an upright body (owner, 2026-10-13).
+    std::array<float, 4> position{};
+    __try {
+        std::memcpy(position.data(), reinterpret_cast<const void*>(rig + 0x4750), sizeof(position));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return true; }
+    std::array<float, 16> inverse{};
+    __try {
+        std::memcpy(inverse.data(), reinterpret_cast<const void*>(rig + 0x4760), sizeof(inverse));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return true; }
+    for (int i = 0; i < 3; ++i) {
+        inverse[i * 4 + 0] = side[i];
+        inverse[i * 4 + 1] = up[i];
+        inverse[i * 4 + 2] = forward[i];
+    }
+    for (int j = 0; j < 3; ++j)
+        inverse[12 + j] = -(position[0] * inverse[j] + position[1] * inverse[4 + j] + position[2] * inverse[8 + j]);
+    (void)copy_to(rig + 0x4760, inverse.data(), sizeof(inverse));
     u.fixed.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -477,7 +495,16 @@ void tricks_freestyle_slide(std::uintptr_t core) noexcept {
         if (bodies.core != core || bodies.offboard || bodies.parts.empty() || !(bodies.seconds > 0 && bodies.seconds < 0.1f)) return;
         trace_part.store(bodies.parts[0], std::memory_order_relaxed);
         if (root_upright().mode.load(std::memory_order_relaxed))
-            trace_root(bodies.rig_wrapper, bodies.board_height, SourceReader{}.value<std::array<float, 3>>(bodies.parts[0], 0x70)[1]);
+        {
+            // <dev> the rider's physics parts: highest, lowest and mean height over the board's
+            SourceReader parts;
+            float high = -100.0f, low = 100.0f, sum = 0.0f;
+            for (std::size_t i = 9; i < bodies.parts.size(); ++i) {
+                const float h = parts.value<float>(bodies.parts[i], 0x54) - bodies.board_height;
+                high = std::max(high, h); low = std::min(low, h); sum += h;
+            }
+            trace_root(bodies.rig_wrapper, high, low, bodies.parts.size() > 9 ? sum / static_cast<float>(bodies.parts.size() - 9) : 0.0f);
+        }
         root_upright().rig.store(bodies.rig_wrapper, std::memory_order_relaxed);
         root_upright().seen.store(GetTickCount64(), std::memory_order_relaxed);
         SourceReader reader;

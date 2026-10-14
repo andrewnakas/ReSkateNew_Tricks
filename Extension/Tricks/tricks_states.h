@@ -62,6 +62,8 @@ int resolve_state_objects(std::uintptr_t base) noexcept;
 // Any game state by its asset name ("Animation/Dingo/Bool.Anim.ForceAnimSkateboard"), from the same asset domains;
 // 0 when it is not loaded there. Game thread, key known.
 std::uintptr_t find_state(std::uintptr_t base, const char *name) noexcept;
+// The same, searched in every loaded asset domain (state-flow assets and states outside the game states' domains).
+std::uintptr_t find_anywhere(std::uintptr_t base, const char *name) noexcept;
 // Through the game's setters / getters, for a state found with find_state. `kind`: 0 bool, 1 int / enum, 2 float.
 bool write_state_at(std::uintptr_t base, std::uintptr_t state, int kind, double value) noexcept;
 bool read_state_at(std::uintptr_t base, std::uintptr_t state, int kind, double &value) noexcept;
