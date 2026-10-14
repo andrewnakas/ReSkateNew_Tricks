@@ -52,8 +52,12 @@ struct Hook {
     std::atomic<ModelWrite> original{};
     void* target{};
     bool ready{};  // prepared
+    bool attempted{};
     std::atomic<bool> hooked{}; // and enabled (hook_hud)
     std::array<Taken, score_switches.size()> fields;
+    // The hook is shared: on while Hall of Meat or ReSkate Tricks (its score line) wants it.
+    bool hall_wants{}, filter_wants{};
+    std::atomic<ModelWriteFilter> filter{};
 };
 Hook& hook() {
     static auto* value = new Hook;
@@ -74,11 +78,14 @@ std::uint64_t model_write(Address manager, std::uint64_t handle, Address type, c
             break;
         }
     }
+    if (handle && value)
+        if (const auto filter = h.filter.load(std::memory_order_acquire)) value = filter(handle, type, value);
     return h.original.load(std::memory_order_acquire)(manager, handle, type, value, flag);
 }
 
 bool start_model_write_hook(Address base) noexcept {
     auto& h = hook();
+    if (std::exchange(h.attempted, true)) return h.ready;
     const auto& contract = addr::ui_model::model_write;
     std::array<unsigned char, 32> code{};
     auto status = HookNotFound;
@@ -273,8 +280,23 @@ void start_hud(std::uintptr_t base) noexcept {
     (void)start_model_write_hook(base); // without it the d-pad still hides
 }
 
+bool apply_hook() noexcept;
 bool hook_hud(bool on) noexcept {
+    hook().hall_wants = on;
+    return apply_hook();
+}
+bool use_model_write_filter(std::uintptr_t base, ModelWriteFilter filter) noexcept {
     auto& h = hook();
+    if (filter) (void)start_model_write_hook(base);
+    h.filter.store(filter, std::memory_order_release);
+    h.filter_wants = filter != nullptr;
+    const bool applied = apply_hook();
+    logging::log(logging::Level::info, logging::Channel::ui, "UI model write filter {}: hook ready {}, on {}.", filter ? "set" : "cleared", h.ready, h.hooked.load(std::memory_order_acquire));
+    return applied && (!filter || h.hooked.load(std::memory_order_acquire));
+}
+bool apply_hook() noexcept {
+    auto& h = hook();
+    const bool on = h.hall_wants || h.filter_wants;
     if (!h.ready) return !on; // nothing to hook
     if (h.hooked.load(std::memory_order_acquire) == on) return true;
     const auto status = on ? hook_enable(h.target) : hook_disable(h.target);

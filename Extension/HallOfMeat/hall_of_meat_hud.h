@@ -21,4 +21,9 @@ bool hook_hud(bool on) noexcept;
 // Client thread, every tick: hides the corner while `hidden`, and gives the game's own back after.
 // True once nothing of ours is left in it.
 bool hide_hud(bool hidden) noexcept;
+// Shared with ReSkate Tricks (its score line): every UI model write passes through `filter` (game threads), which
+// returns the value to write instead (or `value`). nullptr stops it. The hook is prepared on first use and is on
+// while Hall of Meat or a filter wants it. False when it could not be hooked.
+using ModelWriteFilter = const void* (*)(std::uint64_t handle, std::uintptr_t type, const void* value) noexcept;
+bool use_model_write_filter(std::uintptr_t base, ModelWriteFilter filter) noexcept;
 }

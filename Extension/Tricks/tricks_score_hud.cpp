@@ -6,6 +6,7 @@
 #include "Engine/Game/Build/20260929/engine.h"
 #include "Engine/Game/Build/20260929/hud_corner.h"
 #include "Extension/UI/NativeMenu/native_menu_data.h"
+#include "Extension/HallOfMeat/hall_of_meat_hud.h"
 #include <windows.h>
 #include <algorithm>
 #include <array>
@@ -56,10 +57,10 @@ struct State {
     std::uint32_t added{}, dropped{}, failures{};
     // The points the mod's tricks added to the current line (times the line's multiplier when they were done), and
     // the game's own numbers they are added to (as the game last wrote them).
-    float sequence_bonus{}, line_bonus{}, finished_bonus{}, pending_points{};
-    float game_line{-1}, shown_line{-1};
-    std::array<std::int32_t, 2> game_line_total{-1, -1}, shown_line_total{-1, -1};
-    ULONGLONG inactive_since{};
+    float pending_points{};
+    bool filter_on{}, filter_warned{};
+
+
     int game_sequence{-1};
     std::string shown_sequence;
     std::string last_error;
@@ -86,100 +87,148 @@ std::uint32_t key_of(const std::vector<std::byte> &items, unsigned index, unsign
 }
 bool ours(std::uint32_t key) { return (key & 0xffff0000u) == key_base; }
 
-// Our points on top of the game's own numbers (2026-10-14, read from live dumps): the big number is the sequence in
-// progress (label 0x7d1e237c); "LINE:" is the line's banked total, the integer LineScore in the scoring data model the
-// HUD refers to (ScoringHUDViewModel 0xcdffb552 -> model 0xa8b7e62f, its current line 0xf99b169c, LineScore
-// 0x40bff667); the HUD's own line floats (0x40bff667 / 0x9a6daa54) follow it. A mod trick's points (times the
-// multiplier) join the sequence; when the game banks the sequence (its LineScore goes up) they move to the line.
-// Whenever the game writes one of these, ours is added before it shows.
+// Our points on top of the game's own numbers. The big number (label 0x7d1e237c) is the sequence in progress: it is
+// written here, whenever the game writes it. "LINE:" and the end banner are drawn when the game writes its line
+// totals, so ours are added inside those very writes (Hall of Meat's model write hook, shared): the ActiveScoringData
+// model (ScoringHUDViewModel 0xcdffb552 -> 0xa8b7e62f) holds the line in progress (0x210) and the line just
+// finished (0x450), each with an integer LineScore (0x40bff667); the HUD's line floats (0x40bff667 / 0x9a6daa54)
+// follow. When the game's line total goes up a sequence has banked (ours go with it); when it drops the line has
+// ended, and what we added goes to the finished line. (Written a tick later, as before, nothing showed: measured.)
 constexpr std::uint32_t scoring_data = 0xcdffb552, line_total = 0x40bff667;
-// ActiveScoringData holds two line structures with a LineScore each (0x210 and 0x450); which one "LINE:" shows is not
-// known yet, so both carry our banked points, each followed on its own.
 constexpr std::uint32_t line_structs[2]{0xf99b169c, 0x2da1d43e};
-std::atomic<bool> write_line_totals{false}; // <dev> `tricks score lines on`
+struct LineFilter {
+    std::array<std::atomic<std::uint64_t>, 4> handles{}; // line in progress, line finished (ints), the HUD's two floats
+    // The game writes each line structure whole (measured: its handle carries the 40 bytes, LineScore first), so the
+    // structures' own handles are matched too, with their size and LineScore's offset in them.
+    std::array<std::atomic<std::uint64_t>, 2> structs{};
+    std::array<std::atomic<std::uint32_t>, 2> struct_size{}, total_at{};
+    std::atomic<std::int32_t> last_line{-1}, last_finished{-1};
+    std::atomic<float> sequence{}, line{}, finished{};
+    std::atomic<std::int32_t> game_sequence{-1}; // the sequence's own score as the game last wrote it (the big number)
+    std::atomic<std::uint32_t> carried{}; // <dev> banks whose increase already held our points
+    std::atomic<std::uint32_t> hits{}, calls{}, float_hits{};
+    // <dev> the last writes to our fields: which (0..3), the game's value, ours, the line in progress then
+    struct Write { std::atomic<std::uint32_t> which{}; std::atomic<float> in{}, out{}; std::atomic<std::int32_t> line{}; };
+    std::array<Write, 24> writes{};
+    std::atomic<std::uint32_t> write_count{};
+    void note(std::uint32_t which, float in, float out) noexcept {
+        auto &w = writes[write_count.fetch_add(1, std::memory_order_relaxed) % writes.size()];
+        w.which.store(which); w.in.store(in); w.out.store(out); w.line.store(last_line.load());
+    }
+    std::atomic<std::uint64_t> seen[8]{}; // <dev> the last handles written, to compare with ours
+    std::atomic<std::uint64_t> data_model{}; // <dev> ActiveScoringData's handle: writes inside it are logged
+    std::atomic<std::uint64_t> data_seen[16]{};
+    std::atomic<std::uint32_t> data_calls{};
+};
+LineFilter &filter() {
+    static auto *value = new LineFilter;
+    return *value;
+}
+// The line totals as written ([0] in progress, [1] finished): our points added; the bookkeeping on [0]'s changes.
+std::int32_t filtered_total(LineFilter &f, int k, std::int32_t v) noexcept {
+    if (k == 0) {
+        const auto last = f.last_line.exchange(v, std::memory_order_relaxed);
+        if (last >= 0 && v > last) { // a sequence banked: ours go with it
+            f.line.store(f.line.load() + f.sequence.exchange(0.0f));
+        } else if (last > 0 && v < last) { // the line ended: what we added goes to the finished line
+            if (f.finished.load() <= 0) f.finished.store(f.line.load() + f.sequence.load());
+            f.line.store(0.0f);
+            f.sequence.store(0.0f);
+        } else if (last == 0 && v > 0) f.finished.store(0.0f); // a new line
+        f.hits.fetch_add(1, std::memory_order_relaxed);
+        return v + static_cast<std::int32_t>(std::lround(f.line.load()));
+    }
+    if (v != f.last_finished.exchange(v, std::memory_order_relaxed) && f.finished.load() <= 0) f.finished.store(f.line.load() + f.sequence.load());
+    f.hits.fetch_add(1, std::memory_order_relaxed);
+    return v + static_cast<std::int32_t>(std::lround(f.finished.load()));
+}
+const void *line_filter(std::uint64_t handle, std::uintptr_t, const void *value) noexcept {
+    auto &f = filter();
+    const auto n = f.calls.fetch_add(1, std::memory_order_relaxed);
+    f.seen[n % 8].store(handle, std::memory_order_relaxed);
+    thread_local float out_float;
+    thread_local std::array<std::byte, 512> out_struct;
+    for (int k = 0; k < 2; ++k) {
+        if (handle == f.handles[k].load(std::memory_order_relaxed)) {
+            std::int32_t v;
+            std::memcpy(&v, value, 4);
+            (void)filtered_total(f, k, v); // followed only: the game's own value is written
+            f.note(static_cast<std::uint32_t>(k), static_cast<float>(v), static_cast<float>(v));
+            return value;
+        }
+        if (handle == f.structs[k].load(std::memory_order_relaxed)) {
+            const auto size = f.struct_size[k].load(std::memory_order_relaxed), at = f.total_at[k].load(std::memory_order_relaxed);
+            if (!size || size > out_struct.size() || at + 4 > size) return value;
+            // Followed only, the game's own value written: the HUD's line float is filled from this struct, so ours added
+            // here came back in the float a second time (measured 2026-10-14: 433 + 975 shown as 2,383).
+            std::int32_t v;
+            std::memcpy(&v, static_cast<const std::byte *>(value) + at, 4);
+            (void)filtered_total(f, k, v);
+            if (v != f.writes[(f.write_count.load() + f.writes.size() - 1) % f.writes.size()].in.load() || k == 1) f.note(10 + static_cast<std::uint32_t>(k), static_cast<float>(v), static_cast<float>(v));
+            return value;
+        }
+    }
+    if (handle == f.handles[2].load(std::memory_order_relaxed) || handle == f.handles[3].load(std::memory_order_relaxed)) {
+        float v;
+        std::memcpy(&v, value, 4);
+        // At a line's end the game writes the finished total (its struct), resets the line in progress and this float to
+        // 0, then copies the float into its twin, which the end banner shows (measured 2026-10-14). So: the line float
+        // carries the banked points during the line and passes the reset through; the twin, once the line has ended,
+        // is the game's finished total with everything we added to the line.
+        const bool twin = handle == f.handles[3].load(std::memory_order_relaxed);
+        const bool ended = f.last_line.load() == 0 && f.finished.load() > 0;
+        // (The end banner reads the line float as the game resets it: with the reset turned into our points alone it said
+        // 975, with the 0 passed through it fell back to the game's 112. So the reset becomes the full total.)
+        if (ended) out_float = static_cast<float>(std::max(f.last_finished.load(), 0)) + f.finished.load();
+        else out_float = v + f.line.load();
+        f.note(twin ? 3 : 2, v, out_float);
+        f.float_hits.fetch_add(1, std::memory_order_relaxed);
+        return &out_float;
+    }
+    return value;
+}
 void add_bonus(State &s, const menu_data::Context &context, const menu_data::Value &model) {
-    const bool active = menu_data::read<std::uint8_t>(context.address(context.field(model, corner::hud_widget_active))) != 0;
+    auto &f = filter();
     if (s.pending_points > 0) {
         const float mult = menu_data::read<float>(context.address(context.field(model, multiplier)));
-        s.sequence_bonus += s.pending_points * (mult >= 1.0f && mult < 100.0f ? mult : 1.0f);
+        f.sequence.store(f.sequence.load() + s.pending_points * (mult >= 1.0f && mult < 100.0f ? mult : 1.0f));
         s.pending_points = 0;
         s.shown_sequence.clear(); // write it now
     }
-    // The line ends with the HUD hiding, and its last sequence banks as it does (the end-of-line "LINE:" banner): our
-    // points are kept through that, and given up only once the HUD has been off for 5 s (or a new line starts).
-    const auto now = GetTickCount64();
-    if (active) s.inactive_since = 0;
-    else if (!s.inactive_since) s.inactive_since = now;
-    if (!active && now - s.inactive_since > 5000) {
-        s.sequence_bonus = s.line_bonus = s.finished_bonus = 0;
-        s.game_line = -1;
-        s.game_line_total = {-1, -1};
-        s.game_sequence = -1;
-        return;
-    }
-    // The line's banked total, as the game keeps it (an integer in the scoring data model).
+    // The fields the filter looks for (their handles change with the model registry).
     const auto data_ref = menu_data::read<menu_data::Ref>(context.address(context.field(model, scoring_data)));
-    const menu_data::Value data{data_ref.handle, data_ref.handle ? context.type_of(data_ref.handle) : 0};
-    // [0] is the line in progress, [1] the line just finished: when a line ends the game moves its total from [0] (back
-    // to 0) to [1], and the end banner ("LINE: n") shows [1] (measured 2026-10-14).
-    bool banked = false, finished = false, started = false;
-    std::array<std::int32_t, 2> totals{};
-    if (data.type)
+    if (data_ref.handle && context.type_of(data_ref.handle)) {
+        const menu_data::Value data{data_ref.handle, context.type_of(data_ref.handle)};
         for (int k = 0; k < 2; ++k) {
-            totals[k] = menu_data::read<std::int32_t>(context.address(context.path(data, {line_structs[k], line_total})));
-            if (totals[k] != s.shown_line_total[k]) { // the game wrote it
-                if (k == 0 && s.game_line_total[0] >= 0 && totals[0] > s.game_line_total[0]) banked = true;
-                if (k == 0 && s.game_line_total[0] > 0 && totals[0] < s.game_line_total[0]) finished = true;
-                if (k == 0 && s.game_line_total[0] == 0 && totals[0] > 0) started = true;
-                s.game_line_total[k] = totals[k];
-            }
+            f.handles[k].store(context.path(data, {line_structs[k], line_total}).handle, std::memory_order_relaxed);
+            const auto line_struct = context.field(data, line_structs[k]);
+            f.struct_size[k].store(menu_data::size(line_struct.type), std::memory_order_relaxed);
+            f.total_at[k].store(context.member(line_struct.type, line_total).offset, std::memory_order_relaxed);
+            f.structs[k].store(line_struct.handle, std::memory_order_relaxed);
         }
-    if (finished || banked || started) // <dev>
-        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: score line {} (game line {} / {}, our sequence {:.0f}, our line {:.0f}, our finished {:.0f}).",
-                     finished ? "finished" : banked ? "banked" : "started", totals[0], totals[1], s.sequence_bonus, s.line_bonus, s.finished_bonus);
-    if (started) s.finished_bonus = 0; // a new line: the last one's banner is gone
-    if (finished) { // everything ours goes to the finished line
-        s.finished_bonus = s.sequence_bonus + s.line_bonus;
-        s.sequence_bonus = s.line_bonus = 0;
-        s.shown_sequence.clear();
-    } else if (banked) { // a sequence banked: ours go with it
-        s.line_bonus += s.sequence_bonus;
-        s.sequence_bonus = 0;
-        s.shown_sequence.clear();
+        f.data_model.store(data.handle, std::memory_order_relaxed);
     }
-    if (data.type)
-        for (int k = 0; k < 2; ++k) {
-            const float bonus = k == 0 ? s.line_bonus : s.finished_bonus;
-            const auto want = s.game_line_total[k] + static_cast<std::int32_t>(std::lround(bonus));
-            // Not written: "LINE:" and the end banner kept the game's own total with these written (2026-10-14: the
-            // finished line set to 1087, the banner still said 112), and what else reads ActiveScoringData is not known.
-            if (write_line_totals && bonus > 0 && totals[k] != want) {
-                const auto field = context.path(data, {line_structs[k], line_total});
-                context.publish(field, &want);
-                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: line total {} set to {} (the game's {}).", k, want, s.game_line_total[k]); // <dev>
-            }
-            s.shown_line_total[k] = bonus > 0 ? want : totals[k];
-        }
+    f.handles[2].store(context.field(model, line_score).handle, std::memory_order_relaxed);
+    f.handles[3].store(context.field(model, line_score_twin).handle, std::memory_order_relaxed);
+    if (!s.filter_on) {
+        s.filter_on = hall_of_meat::use_model_write_filter(context.base, &line_filter);
+        if (!s.filter_on && !std::exchange(s.filter_warned, true))
+            logging::log(logging::Level::warning, logging::Channel::skater, "Tricks: the score line cannot carry the mod's points (the UI model write could not be hooked).");
+    }
+    // The sequence in progress (the big number): ours added whenever the game writes it.
+    const bool active = menu_data::read<std::uint8_t>(context.address(context.field(model, corner::hud_widget_active))) != 0;
     if (!active) return;
-    // The HUD's own line floats follow the banked total.
-    const float line = menu_data::read<float>(context.address(context.field(model, line_score)));
-    if (line != s.shown_line) s.game_line = line;
-    const float want_line = s.game_line + s.line_bonus;
-    if (write_line_totals && s.line_bonus > 0 && line != want_line) {
-        context.publish(context.field(model, line_score), &want_line);
-        context.publish(context.field(model, line_score_twin), &want_line);
-    }
-    s.shown_line = s.line_bonus > 0 ? want_line : line;
-    // The sequence in progress (the big number).
     const auto sequence_text = context.path(model, {sequence_label, label_text});
     const auto text = context.text(sequence_text);
     if (text != s.shown_sequence) {
         int value{};
         try { value = text.empty() ? 0 : std::stoi(text); } catch (...) { value = -1; }
         s.game_sequence = value;
+        f.game_sequence.store(value, std::memory_order_relaxed);
     }
-    if (s.sequence_bonus > 0 && s.game_sequence >= 0) {
-        const auto shown = std::to_string(s.game_sequence + static_cast<int>(std::lround(s.sequence_bonus)));
+    const float sequence = f.sequence.load();
+    if (sequence > 0 && s.game_sequence >= 0) {
+        const auto shown = std::to_string(s.game_sequence + static_cast<int>(std::lround(sequence)));
         if (text != shown) context.text(sequence_text, shown);
         s.shown_sequence = shown;
     } else s.shown_sequence = text;
@@ -273,12 +322,12 @@ void queue_trick_entry(const std::string &name, int points) noexcept {
 }
 void update_trick_entries(std::uintptr_t base) noexcept {
     auto &s = state();
-    if (s.pending.empty() && s.owned.empty() && s.sequence_bonus <= 0 && s.line_bonus <= 0 && s.finished_bonus <= 0 && s.pending_points <= 0) return;
+    if (s.pending.empty() && s.owned.empty() && filter().sequence.load() <= 0 && s.pending_points <= 0 && !s.filter_on) return;
     // Every tick while an entry waits or our points are on the line (the game may write its numbers any frame);
     // otherwise only to see the game drop our entries, ten times a second.
     static ULONGLONG next{};
     const auto now = GetTickCount64();
-    if (s.pending.empty() && s.sequence_bonus <= 0 && s.line_bonus <= 0 && s.finished_bonus <= 0 && s.pending_points <= 0 && now < next) return;
+    if (s.pending.empty() && filter().sequence.load() <= 0 && s.pending_points <= 0 && now < next) return;
     next = now + 100;
     try {
         with_ui_models(base, [&](const menu_data::Context &context) { run(context); });
@@ -303,7 +352,7 @@ bool read_hud_line_score(std::uintptr_t base, float &value) noexcept {
     } catch (...) { return false; }
     return found;
 }
-void set_line_total_writes(bool on) noexcept { write_line_totals.store(on); }
+void set_line_total_writes(bool) noexcept {}
 std::string trick_entries_status() {
     const auto &s = state();
     return std::format("trick list: {} added, {} dropped by the game, {} failed, {} live", s.added, s.dropped, s.failures, s.owned.size());
