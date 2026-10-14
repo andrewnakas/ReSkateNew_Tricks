@@ -2,6 +2,7 @@
 #include "tricks_states.h"
 #include "tricks_board.h"
 #include "tricks_view.h"
+#include "tricks_score_hud.h"
 #include "Engine/Core/Json/json.h"
 #include <shlobj.h>
 #include "Extension/Trainer/trainer.h"
@@ -561,6 +562,7 @@ void score_trick(std::string_view id, std::string_view name) {
     const int i = trick_index(id);
     const int points = i >= 0 ? trick_catalog[i].points : 0;
     announce(points > 0 && runtime().score_feed ? std::format("{}  +{}", name, points) : std::string(name));
+    if (runtime().score_feed) queue_trick_entry(std::string(name), points);
     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: scored {} ({}, {} points).", name, id, points);
 }
 std::string_view flip_name(std::uint32_t trick) {
@@ -678,6 +680,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         r.view_due = true;
     }
     if (r.view_due) publish_view(r);
+    update_trick_entries(base);
     if (r.save_due && now >= r.next_save) {
         r.next_save = now + 500;
         save_store(r);

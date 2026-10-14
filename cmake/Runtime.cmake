@@ -150,6 +150,7 @@ add_library(dingosdk_runtime SHARED
     Extension/Tricks/tricks_states.cpp
     Extension/Tricks/tricks_board.cpp
     Extension/Tricks/tricks_commands.cpp
+    Extension/Tricks/tricks_score_hud.cpp
     Extension/Skater/offboard_flight.cpp
     Extension/Skater/camera_observer.cpp
     Extension/Boot/offline_boot.cpp
