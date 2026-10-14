@@ -418,3 +418,9 @@ NEXT: ground entries from manuals (tail manual fully down + L3 + stick -> casper
 - The casper loop is `blendspace_onboard_freestyle_casper_loop` (SignalDrivenBlendSpace, SignalY = Float.Intent.Balance 0..1 over the low / med / high loop clips; tools/re/stateflow.py).
 - `tricks height` (on): Balance from how far the right stick is out in the pose's place: at the edge (where the owner holds it) 0 (low), 0.45 out 1 (high), smoothed over 150 ms. Works for the anti-casper too (stick up). `tricks height <edge> <middle> [inner]` retunes or flips it.
 - The level hold forced the casper board's tilt to 0.30, which erased the clips' difference (their board stands 0.15 .. 0.37 up). It now follows the clip's own tilt (clamped 0.05..0.6, smoothed); `tricks level2 tilt <x>` (x > 0) brings the fixed tilt back. Rocking 0.4..0.9 degrees with it. Stills (dev\shots\sheet_rfo.png) show only a small change: the clips differ mostly in the board's angle. Owner feel check pending (and which way round).
+
+## 2026-10-14 01:00 headless re-check (dev\rfp.txt), handed to the owner
+- Ground shuv (L3, stick down, roll to the lower diagonal, release): fires, the board's frame turned 21 of 21 steps, back to riding.
+- Primo kickflip flick-out: pops, lands riding. Primo put down (stick to the middle): rides away.
+- Anti-casper heelflip flick-out (swipe down-right from the held up position): pops, mirror and turn off in the air, lands riding.
+- Owner to test on the controller: casper flop gone, anti-casper facing (mirror + half turn), nose/tail manual entries, right-stick height (which way round), primo smoothness.
