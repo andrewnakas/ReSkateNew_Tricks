@@ -424,3 +424,11 @@ NEXT: ground entries from manuals (tail manual fully down + L3 + stick -> casper
 - Primo kickflip flick-out: pops, lands riding. Primo put down (stick to the middle): rides away.
 - Anti-casper heelflip flick-out (swipe down-right from the held up position): pops, mirror and turn off in the air, lands riding.
 - Owner to test on the controller: casper flop gone, anti-casper facing (mirror + half turn), nose/tail manual entries, right-stick height (which way round), primo smoothness.
+
+## 2026-10-14 10:15 build: Tricks menu page, no comply flips from the pop, ground shuv fix, flick-it flips
+
+- Insert menu: TRICKS page (tabs TRICKS / CONTROLS & ANIMATION / HOW TO), every family and trick collapsible and switchable, settings kept in %LOCALAPPDATA%\ReSkate\tricks\tricks.json (`tricks enable|family|set|score`). HOW TO draws a pad diagram (L3 hold/tap, right-stick path, the place that counts) and steps for every trick and variation. Catalog: Extension/Tricks/tricks_view.h.
+- Scoring: every mod trick has points; shown as "Name +points" notices and logged. NOT yet in the game's own score line: the game has no casper/primo scorable, string id or observer state; route A (push a TrickHistoryItem into ScoringHUDViewModel's TrickHistory, like Hall of Meat's stack item) is next; dev\..\logs\ui-dump-0x9b74fc7c-*.txt holds a dump taken after a heelflip.
+- Owner: no comply flips and the ground shuv did not work. Ground shuv: the casper-from-a-manual took the same stick (manual brake + L3); a pose from a manual now needs the click pressed 150 ms after the brake began. Headless: ground shuv fires again. No comply: the flick that pops it now picks the flip (read from the right stick's last 0.9 s, through the first 0.35 s of air since this game's no comply leaves the ground on the flick's down): kickflip / heelflip / shuvit / FS shuvit. Seen: "No Comply Kickflip", "No Comply Heelflip" read and landed.
+- New family Flick-it flips: Dolphin (down, up, straight back down: pitch 360), Dragon (ending on a lower diagonal: + yaw 360), Big Spin (the game's pop shuvit with the left stick held sideways: + yaw 180). Headless: dolphin and FS big spin read from the pop and scored.
+- D: dropped out mid-build (10:0x) and came back; nothing lost.

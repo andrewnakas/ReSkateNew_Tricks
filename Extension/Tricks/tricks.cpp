@@ -206,6 +206,7 @@ struct Runtime {
     bool click_was{};
     // Flick-it extras read from the pop (dolphin, dragon, big spin), once per air.
     bool pop_checked{}, pop_spinning{};
+    std::uint64_t nc_takeoff_at{};
     std::uint64_t takeoff_at{};
     std::uint32_t flickit_spin_ms{450};
     std::uint32_t out_spin_ms{320}; // a flick-out's flip
@@ -1497,6 +1498,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         std::memcpy(&ry, pad.data() + 10, 2);
         const float x = rx / 32767.0f, y = ry / 32767.0f, length = std::sqrt(x * x + y * y);
         if (nocomply) {
+            if (now - r.nc_seen_at > 1000) // <dev>
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: no comply started (physics {}, plant {}).", physics.valid ? static_cast<int>(physics.state) : -1, planting);
             if (now - r.nc_seen_at > 1000) { // a new no comply: its own stick (down) is not a pick
                 r.nc_armed = false;
                 if (r.nc_next) {
@@ -1514,7 +1517,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         // (The earlier pick, a second flick once the no comply had started, also took the popping flick's down for a
         // hardflip whenever A came before the flick.)
         (void)x; (void)y; (void)length;
+        // The no comply leaves the ground on the flick's "down" (this game's no comply is a push, then the stick down),
+        // so the flick's direction comes in its first moments of air: read until it shows, for 0.35 s.
         if (air && !r.nc_trick && !r.nc_air && now - r.nc_seen_at < 1000 && r.controls) {
+            if (!r.nc_takeoff_at) r.nc_takeoff_at = now;
             const int trick = popped_flip(r, now, 900);
             const char *id = trick == 2 ? "nc_kickflip" : trick == 3 ? "nc_heelflip" : trick == 4 ? "nc_shuvit" : trick == 7 ? "nc_fsshuvit" : nullptr;
             if (id && trick_enabled(r, id)) {
@@ -1522,9 +1528,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 r.nc_until = now + 2000;
                 r.nc_air = false;
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: no comply flip {} read from the pop's flick.", trick);
-            } else r.nc_air = true; // this air is the game's own (plain, or the flip switched off)
+            } else if (id || now - r.nc_takeoff_at > 350) r.nc_air = true; // this air is the game's own (plain, or the flip switched off)
         }
-        if (!air && !r.nc_trick) r.nc_air = false;
+        if (!air && !r.nc_trick) {
+            r.nc_air = false;
+            r.nc_takeoff_at = 0;
+        }
         if (r.nc_trick) {
             // The no comply's own clip plays to its end whatever the scripts ask for (its node only leaves at the
             // clip's end), so the flip is the mod's: the board is turned under the clip once it is in the air.
@@ -1598,7 +1607,15 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 r.pop_spinning = true;
                 score_trick(id, name);
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flick-it {} read from the pop.", name);
-            } else if (now - r.takeoff_at > 350) r.pop_checked = true; // too late in the air for a pop's flick
+            } else if (now - r.takeoff_at > 350) {
+                r.pop_checked = true; // too late in the air for a pop's flick
+                // <dev> what the pop was, for the flick-it reading
+                double current{};
+                if (r.s_current_flip) (void)read_state_at(base, r.s_current_flip, 1, current);
+                bool spun = false;
+                for (const auto &sample : recent_sticks(r, now, 1000)) spun = spun || std::abs(sample.lx) > 0.6f;
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pop read: flip {}, forward stroke {}, left stick spun {}.", static_cast<int>(current), forward, spun);
+            }
         }
     }
     // In-air extras: a tap of the left stick's click in the air turns the board once more under whatever trick is
