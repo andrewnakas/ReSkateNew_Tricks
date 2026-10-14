@@ -1793,7 +1793,11 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return std::format("(line score {}) ", value) + scan_command(next ? "next" : "new", value);
     }
     if (verb == "score") {
-        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks score on|off";
+        if (arguments.size() == 2 && arguments[0] == "lines") { // <dev>
+            set_line_total_writes(arguments[1] == "on");
+            return std::format("Line total writes {}.", arguments[1] == "on" ? "on" : "off");
+        }
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks score on|off | lines on|off";
         r.score_feed = arguments[0] == "on";
         return r.score_feed ? "Mod tricks are added to the score line." : "Mod tricks are not scored.";
     }

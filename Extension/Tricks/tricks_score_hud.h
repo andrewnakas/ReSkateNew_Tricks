@@ -17,6 +17,8 @@ void queue_trick_entry(const std::string &name, int points) noexcept;
 void update_trick_entries(std::uintptr_t base) noexcept;
 // <dev> The line score the score HUD shows (ScoringHUDViewModel 0x40bff667, a float). Game (client) thread.
 bool read_hud_line_score(std::uintptr_t base, float &value) noexcept;
+// <dev> Also write our points into the game's line totals (ActiveScoringData): off, it changed nothing on screen.
+void set_line_total_writes(bool on) noexcept;
 // <dev> What happened, for the logs.
 std::string trick_entries_status();
 } // namespace dingosdk::tricks
