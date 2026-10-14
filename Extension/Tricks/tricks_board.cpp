@@ -2,6 +2,7 @@
 #include "Engine/Core/Hooks/hooks.h"
 #include "Extension/Skater/client_source_spawn.h"
 #include <windows.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -76,7 +77,8 @@ void track(std::atomic<float> &low, std::atomic<float> &high, float value) noexc
 std::atomic<float> level_tilt{0.30f};
 std::atomic<int> level_mode{}; // 0 off, 1 casper (up row down), 2 primo (right row on end)
 int level_axis{-1};            // hook thread only: the latched row
-float level_sign{}, level_rise_sign{1.0f}, level_heading[3]{};
+float level_sign{}, level_rise_sign{1.0f}, level_heading[3]{}, level_rise_now{};
+std::atomic<bool> level_follow{true};
 std::atomic<std::uint32_t> level_steps{};
 void level_frame(float *frame) noexcept {
     const int mode = level_mode.load(std::memory_order_relaxed);
@@ -94,6 +96,7 @@ void level_frame(float *frame) noexcept {
         const float length = std::sqrt(next[0] * next[0] + next[2] * next[2]);
         if (!(length > 0.2f)) return;
         level_axis = axis;
+        level_rise_now = 0.0f;
         level_sign = height < 0 ? -1.0f : 1.0f;
         // Which end of a casper's board is down, as the clip has it (the mirrored one, the anti-casper, has the other).
         level_rise_sign = rows[2][1] < 0 ? -1.0f : 1.0f;
@@ -109,7 +112,16 @@ void level_frame(float *frame) noexcept {
         // A casper does not have its board flat: it stands on one end of it, the forward row 0.30 up (17 degrees;
         // measured on held caspers 2026-10-13). Laid flat, the feet no longer fit and the skater falls onto its back.
         // The pose's own tilt is kept: the forward row at that height along the heading, the right row level.
-        const float rise = level_tilt.load(std::memory_order_relaxed) * level_rise_sign, run = std::sqrt(1.0f - rise * rise);
+        // The tilt follows the clip's own (the casper's height on the right stick blends clips whose board stands 0.15
+        // to 0.36 up: measured 2026-10-14); with the skater's root held upright the clip's board no longer tumbles.
+        // `set_board_level_tilt` with a tilt above 0 holds that fixed tilt instead (the old way); 0 follows the clip.
+        float rise = level_tilt.load(std::memory_order_relaxed) * level_rise_sign;
+        if (level_follow.load(std::memory_order_relaxed)) {
+            const float clip = std::clamp(b[1] * level_rise_sign, 0.05f, 0.6f) * level_rise_sign;
+            level_rise_now = level_rise_now == 0.0f ? clip : level_rise_now + (clip - level_rise_now) * 0.2f;
+            rise = level_rise_now;
+        }
+        const float run = std::sqrt(1.0f - rise * rise);
         float *up = a, *forward = b, *right = c;
         forward[0] = level_heading[0] * run; forward[1] = rise; forward[2] = level_heading[2] * run;
         right[0] = level_heading[2]; right[1] = 0.0f; right[2] = -level_heading[0];
@@ -273,7 +285,10 @@ std::uint32_t take_board_rigid(float &first_seen) noexcept {
     first_seen = rigid_seen.exchange(-1.0f, std::memory_order_relaxed);
     return rigid_writes.exchange(0, std::memory_order_relaxed);
 }
-void set_board_level_tilt(float rise) noexcept { level_tilt.store(rise > -0.9f && rise < 0.9f ? rise : 0.0f, std::memory_order_relaxed); }
+void set_board_level_tilt(float rise) noexcept {
+    level_follow.store(!(rise > 0.0f), std::memory_order_relaxed);
+    if (rise > 0.0f && rise < 0.9f) level_tilt.store(rise, std::memory_order_relaxed);
+}
 void set_board_level(int mode) noexcept { level_mode.store(mode, std::memory_order_relaxed); }
 std::uint32_t take_board_level() noexcept { return level_steps.exchange(0, std::memory_order_relaxed); }
 void set_board_lean_watch(bool on) noexcept { lean_on.store(on, std::memory_order_relaxed); }

@@ -181,6 +181,10 @@ struct Runtime {
     // goes on at the catch, before the way in starts, and stays on through the way out until it has been in the air
     // or the skater rides again (released earlier it snapped to the plain casper at both ends: owner, 2026-10-13).
     bool anti_on{true}, anti{}, zone_anti{}, mirror_on{};
+    // The casper's height (Float.Intent.Balance: its loop's low / medium / high clips, 0 to 1) on the right stick.
+    bool height_on{true};
+    float height_at_edge{0.0f}, height_at_middle{1.0f}, height_inner{0.45f}, height_now{0.5f};
+    std::uint64_t height_last{};
     bool anti_turn{true}; // the skater (root) turned half round while mirrored: `tricks anti turn on|off`
     std::uint32_t anti_steady_ms{150}; // the stick passes the top during a flick: it has to rest there this long
     std::uint64_t mirror_until{};
@@ -1112,7 +1116,25 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         std::int16_t ly{};
         std::memcpy(&ly, pad.data() + 6, 2);
         if (!r.s_balance) r.s_balance = find_state(base, "Animation/Dingo/Float.Intent.Balance");
-        if (r.balance_fixed >= -0.5f) (void)write_state_at(base, r.s_balance, 2, r.balance_fixed >= 0 ? r.balance_fixed : r.left_mask ? 0.5 : 0.5 + 0.5 * (ly / 32767.0));
+        if (r.height_on && r.by_hold && r.balance_fixed < 0) {
+            // The board's height on the right stick, as a manual's (the owner, 2026-10-13): how far the stick is out in
+            // the pose's place. At the edge (where the owner holds it) the low clip, eased back toward the middle the
+            // high one, smoothed so the thumb's own shake does not show. Above the middle's fall (0.2) all the way.
+            std::int16_t hx{}, hy{};
+            std::memcpy(&hx, pad.data() + 8, 2);
+            std::memcpy(&hy, pad.data() + 10, 2);
+            const float out = std::sqrt(static_cast<float>(hx) * hx + static_cast<float>(hy) * hy) / 32767.0f;
+            const float t = std::clamp((out - r.height_inner) / (1.0f - r.height_inner), 0.0f, 1.0f);
+            const float target = r.height_at_middle + (r.height_at_edge - r.height_at_middle) * t;
+            const float step = r.height_last ? std::min(1.0f, static_cast<float>(now - r.height_last) / 150.0f) : 1.0f;
+            r.height_now += (target - r.height_now) * step;
+            r.height_last = now;
+            (void)write_state_at(base, r.s_balance, 2, r.height_now);
+        } else if (r.balance_fixed >= -0.5f) {
+            r.height_last = 0;
+            r.height_now = 0.5f;
+            (void)write_state_at(base, r.s_balance, 2, r.balance_fixed >= 0 ? r.balance_fixed : r.left_mask ? 0.5 : 0.5 + 0.5 * (ly / 32767.0));
+        }
     }
     // Ground shuvit: 7 held while the board turns, then let go; the turn is only dropped once the board has stopped
     // following a frame (out of 103), or it would be turned back.
@@ -1620,6 +1642,19 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         r.rootup = arguments[0] == "on" ? 2 : arguments[0] == "watch" ? 1 : 0;
         return r.rootup == 2 ? "The skater's root is held upright in a pose." : r.rootup == 1 ? "The skater's root is watched in a pose." : "The skater's root is the game's in a pose.";
     }
+    if (verb == "height") {
+        // tricks height on|off | <balance at the edge> <balance near the middle> [inner stick length]
+        if (arguments.size() == 1 && (arguments[0] == "on" || arguments[0] == "off")) {
+            r.height_on = arguments[0] == "on";
+            return r.height_on ? "The casper's height follows how far the right stick is out." : "The casper's height is fixed.";
+        }
+        if (arguments.size() < 2) return std::format("Casper height {}: {:.2f} at the edge, {:.2f} at {:.2f} out. usage: tricks height on|off | <edge> <middle> [inner]", r.height_on ? "on" : "off",
+                                                     r.height_at_edge, r.height_at_middle, r.height_inner);
+        r.height_at_edge = std::clamp(static_cast<float>(std::atof(arguments[0].c_str())), 0.0f, 1.0f);
+        r.height_at_middle = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 1.0f);
+        if (arguments.size() > 2) r.height_inner = std::clamp(static_cast<float>(std::atof(arguments[2].c_str())), 0.25f, 0.9f);
+        return std::format("Casper height: {:.2f} at the edge, {:.2f} at {:.2f} out.", r.height_at_edge, r.height_at_middle, r.height_inner);
+    }
     if (verb == "anti") {
         // tricks anti on|off | steady <ms>
         if (arguments.size() == 2 && arguments[0] == "steady") {
@@ -1649,8 +1684,9 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
     if (verb == "level2") {
         // tricks level2 on|off | delay <ms>: the held pose's target kept level (the older `level` is the slide's pitch knob).
         if (arguments.size() == 2 && arguments[0] == "tilt") {
+            // tricks level2 tilt <rise>: above 0 a fixed tilt (the old hold); 0 follows the clip's (the height on the stick).
             set_board_level_tilt(static_cast<float>(std::atof(arguments[1].c_str())));
-            return "The held casper's tilt is set.";
+            return std::atof(arguments[1].c_str()) > 0 ? "The held casper's board keeps that fixed tilt." : "The held casper's board follows the clip's tilt.";
         }
         if (arguments.size() == 2 && arguments[0] == "delay" && number(arguments[1], r.level_delay)) return std::format("A held pose is levelled {} ms after it takes the board.", r.level_delay);
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks level2 on|off | delay <ms>";
