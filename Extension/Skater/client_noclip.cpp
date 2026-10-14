@@ -408,6 +408,7 @@ struct RootTrace {
     ULONGLONG started{}, last{};
 };
 std::atomic<std::uintptr_t> trace_part{};
+std::atomic<bool> parts_log_wanted{}; // <dev> `tricks parts`: every physics part's place in the skater's root frame, once
 std::atomic<float> target_up{}, target_right{};
 RootTrace& root_trace() { static auto* value = new RootTrace; return *value; }
 void trace_root(std::uintptr_t rig, float high, float low, float mean) noexcept {
@@ -827,6 +828,20 @@ void tricks_freestyle_slide(std::uintptr_t core) noexcept {
                     if (dd < nearest) { nearest = dd; low = static_cast<float>(i) + std::min(std::sqrt(dd), 0.99f); }
                 }
             trace_root(bodies.rig_wrapper, high, low, bodies.parts.size() > 9 ? sum / static_cast<float>(bodies.parts.size() - 9) : 0.0f);
+            if (parts_log_wanted.exchange(false)) { // <dev> which part is which (a hand for the grabs): their places in the root frame
+                std::array<float, 16> root{};
+                if (memory::peek(bodies.rig_wrapper + 0x4720, root)) {
+                    std::string text;
+                    for (std::size_t i = 0; i < bodies.parts.size(); ++i) {
+                        const auto p = parts.value<std::array<float, 3>>(bodies.parts[i], 0x50);
+                        const float d[3]{p[0] - root[12], p[1] - root[13], p[2] - root[14]};
+                        // side, up, forward: the root's rows
+                        const float x = d[0] * root[0] + d[1] * root[1] + d[2] * root[2], y = d[0] * root[4] + d[1] * root[5] + d[2] * root[6], z = d[0] * root[8] + d[1] * root[9] + d[2] * root[10];
+                        text += std::format(" {}:({:.2f},{:.2f},{:.2f})", i, x, y, z);
+                    }
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: physics parts in the root frame (index:(side,up,forward)):{}", text);
+                }
+            }
         }
         root_upright().rig.store(bodies.rig_wrapper, std::memory_order_relaxed);
         root_upright().seen.store(GetTickCount64(), std::memory_order_relaxed);
@@ -1084,6 +1099,7 @@ void freestyle_root_updating(std::uintptr_t rig) noexcept {
         if (copy_to(source + 0x5b0, rows.data(), sizeof(rows))) u.turned.fetch_add(1, std::memory_order_relaxed);
     }
 }
+void request_parts_log() noexcept { parts_log_wanted.store(true); }
 void set_freestyle_root_hold(std::uintptr_t rig, bool on) noexcept {
     root_upright().turn_rig.store(rig, std::memory_order_relaxed);
     root_upright().hold.store(on, std::memory_order_relaxed);

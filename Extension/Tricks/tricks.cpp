@@ -2258,6 +2258,10 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         if (arguments.size() > 2) r.height_inner = std::clamp(static_cast<float>(std::atof(arguments[2].c_str())), 0.25f, 0.9f);
         return std::format("Casper height: {:.2f} at the edge, {:.2f} at {:.2f} out.", r.height_at_edge, r.height_at_middle, r.height_inner);
     }
+    if (verb == "parts") { // <dev>
+        request_parts_log();
+        return "The physics parts' places are logged at the next held-pose step.";
+    }
     if (verb == "flipgrab") {
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks flipgrab on|off";
         r.flip_grab = arguments[0] == "on";

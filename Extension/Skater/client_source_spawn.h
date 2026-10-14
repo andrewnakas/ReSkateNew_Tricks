@@ -60,6 +60,8 @@ std::uint32_t take_freestyle_root_source(float& lowest, float& mean_tip, std::ui
 void set_freestyle_root_turn(std::uintptr_t rig, bool on) noexcept;
 // The local skater's root held upright in any physics state (a pose's way out, through its air), with the mode set.
 void set_freestyle_root_hold(std::uintptr_t rig, bool on) noexcept;
+// <dev> Logs every physics part's place in the skater's root frame at the next held-pose step.
+void request_parts_log() noexcept;
 // The local skater's heading held as it was when the lock began, while the mod spins the board under the feet.
 void set_freestyle_root_heading_lock(std::uintptr_t rig, bool on) noexcept;
 std::uint32_t take_freestyle_root_turned() noexcept;
