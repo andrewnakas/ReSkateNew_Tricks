@@ -129,7 +129,19 @@ struct Runtime {
     std::uint64_t gs_until{};
     std::uint32_t gs_ms{380};
     float gs_hop{0.05f}; // metres the board comes off the ground at the middle of the turn
-    bool gs_scoop{true};  // the legs' scoop (the game's trick-setup crouch) while it turns
+    bool gs_scoop{true};
+    bool nc_hide{true}; // the right stick hidden from the game through a no comply (its flick is the mod's)
+    // <dev> Grabs while grinding (experiment, off): the game has no grab in its grind node, but its grab clips reach the
+    // hands to the board through reach IK states (ReachLockIKTag: floatchooser / boolchooser mirrored wrist states).
+    // Those held while grinding with a trigger: does a hand go to the board?
+    bool grind_grab{};
+    std::array<std::uintptr_t, 4> s_reach{};
+    bool grind_grab_on{};
+    // <dev> A grab during a flip trick (experiment, off): the flip clips tag Bool.Anim.CannotGrab; held false when a
+    // trigger is pressed in a flip's air, to see what the game's own grab does from there.
+    bool flip_grab{}, flip_grab_on{};
+    std::uintptr_t s_cannot_grab{};
+    std::uint64_t flip_grab_until{};  // the legs' scoop (the game's trick-setup crouch) while it turns
     // The owner's control scheme (2026-10-12): poses are landed into and held on the right stick.
     //   Land a flip trick with the right stick held part of the way left / right: primo / primo2.
     //   Land it with the left stick clicked and the right stick held part of the way out: casper.
@@ -1443,6 +1455,37 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 r.leaving_until = std::min(r.leaving_until, now);
             }
         }
+        // <dev> Grab during a flip (experiment).
+        if (r.flip_grab || r.flip_grab_on) {
+            const bool trigger = pad[2] > 100 || pad[3] > 100;
+            if (r.flip_grab && in_air && trigger) {
+                if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
+                double flip{};
+                if (read_state_at(base, r.s_current_flip, 1, flip) && flip != 0) r.flip_grab_until = now + 400;
+            }
+            const bool want = r.flip_grab && in_air && now < r.flip_grab_until;
+            if (!r.s_cannot_grab) r.s_cannot_grab = find_state(base, "Animation/Dingo/Bool.Anim.CannotGrab");
+            if (want) (void)write_state_at(base, r.s_cannot_grab, 0, 0);
+            if (want != r.flip_grab_on) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab {} (state found {}).", want ? "on" : "off", r.s_cannot_grab != 0);
+            r.flip_grab_on = want;
+        }
+        // <dev> Grab while grinding (experiment).
+        if (r.grind_grab || r.grind_grab_on) {
+            const bool grinding = physics.valid && physics.state >= 400 && physics.state <= 406;
+            const bool left = pad[2] > 100, right = pad[3] > 100; // LT, RT
+            const bool want = r.grind_grab && grinding && (left || right);
+            static const char *const names[4]{"Animation/Dingo/FloatChooser.Mirrored.Left.Wrist.Reach", "Animation/Dingo/BoolChooser.Mirrored.Left.Wrist.Locked",
+                                              "Animation/Dingo/FloatChooser.Mirrored.Right.Wrist.Reach", "Animation/Dingo/BoolChooser.Mirrored.Right.Wrist.Locked"};
+            for (int i = 0; i < 4; ++i)
+                if (!r.s_reach[i]) r.s_reach[i] = find_state(base, names[i]);
+            if (want != r.grind_grab_on)
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: grind grab {} (reach states found: {} {} {} {}).", want ? "on" : "off", r.s_reach[0] != 0, r.s_reach[1] != 0, r.s_reach[2] != 0, r.s_reach[3] != 0);
+            (void)write_state_at(base, r.s_reach[0], 2, want && left ? 1.0 : 0.0);
+            (void)write_state_at(base, r.s_reach[1], 0, want && left ? 1 : 0);
+            (void)write_state_at(base, r.s_reach[2], 2, want && right ? 1.0 : 0.0);
+            (void)write_state_at(base, r.s_reach[3], 0, want && right ? 1 : 0);
+            r.grind_grab_on = want;
+        }
         // The anti-casper's mirror: on from the catch; after the pose, kept until the way out is in the air (the flip
         // out, or the casper's own exit flip, hides the change), the skater is off the board, or rides again.
         {
@@ -1620,6 +1663,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             r.nc_air = false;
             r.nc_takeoff_at = 0;
         }
+        // Once the no comply has started, the rest of the flick is the mod's pick only: the game read it as a spin and
+        // turned the body 180 (the owner, 2026-10-14: "only if you spin your left stick").
+        if (r.nc_hide && now - r.nc_seen_at < 900 && r.controls) DingoSDKOverlayTricksMask();
         if (r.nc_trick) {
             // The no comply's own clip plays to its end whatever the scripts ask for (its node only leaves at the
             // clip's end), so the flip is the mod's: the board is turned under the clip once it is in the air.
@@ -1667,10 +1713,24 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             r.takeoff_at = 0;
         } else if (air && !r.takeoff_at) r.takeoff_at = now;
         if (air && !r.pop_checked && r.takeoff_at && r.freestyle == Freestyle::off && !r.by_hold && !r.nc_trick && !r.leaving && !r.out_spinning) {
+            // The dolphin's second stroke (the stick back down after the pop) is not the game's: it read it as a flip
+            // and played a 360 flip first (the owner, 2026-10-14). Hidden from the game while it could still come.
+            {
+                bool up_seen = false;
+                for (const auto &sample : recent_sticks(r, now, 500)) up_seen = up_seen || sample.ry > 0.6f;
+                if (up_seen && (trick_enabled(r, "dolphin") || trick_enabled(r, "dragon"))) DingoSDKOverlayTricksMask();
+            }
             int side = 0;
             const int forward = forward_flick(r, now, 700, side);
             const char *id = nullptr;
             std::string name;
+            const auto plain_ollie = [&] { // the game's own flip trick set back to none: the board's turn is the mod's
+                if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
+                (void)write_state_at(base, r.s_current_flip, 1, 0);
+                if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
+                (void)write_state_at(base, r.s_flip_intent, 1, 0);
+            };
+            if ((forward == 1 && trick_enabled(r, "dolphin")) || (forward == 2 && trick_enabled(r, "dragon"))) plain_ollie();
             if (forward == 1 && trick_enabled(r, "dolphin")) {
                 start_board_spin(0, 0, 360, r.flickit_spin_ms);
                 id = "dolphin";
@@ -2193,6 +2253,16 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         r.height_at_middle = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 1.0f);
         if (arguments.size() > 2) r.height_inner = std::clamp(static_cast<float>(std::atof(arguments[2].c_str())), 0.25f, 0.9f);
         return std::format("Casper height: {:.2f} at the edge, {:.2f} at {:.2f} out.", r.height_at_edge, r.height_at_middle, r.height_inner);
+    }
+    if (verb == "flipgrab") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks flipgrab on|off";
+        r.flip_grab = arguments[0] == "on";
+        return r.flip_grab ? "Flip grab experiment on: press a trigger during a flip." : "Flip grab experiment off.";
+    }
+    if (verb == "grindgrab") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks grindgrab on|off";
+        r.grind_grab = arguments[0] == "on";
+        return r.grind_grab ? "Grind grab experiment on: hold a trigger while grinding." : "Grind grab experiment off.";
     }
     if (verb == "antistyle") {
         // tricks antistyle nose|mirror | pitch <degrees>
