@@ -130,7 +130,8 @@ struct Runtime {
     std::uint32_t gs_ms{380};
     float gs_hop{0.05f}; // metres the board comes off the ground at the middle of the turn
     bool gs_scoop{true};
-    bool nc_hide{true}; // the right stick hidden from the game through a no comply (its flick is the mod's)
+    bool nc_hide{true};
+    bool big_spin{}; // out for now (the owner, 2026-10-14: it turned pop shuvits 180 on landing) // the right stick hidden from the game through a no comply (its flick is the mod's)
     // <dev> Grabs while grinding (experiment, off): the game has no grab in its grind node, but its grab clips reach the
     // hands to the board through reach IK states (ReachLockIKTag: floatchooser / boolchooser mirrored wrist states).
     // Those held while grinding with a trigger: does a hand go to the board?
@@ -1731,15 +1732,18 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 (void)write_state_at(base, r.s_flip_intent, 1, 0);
             };
             if ((forward == 1 && trick_enabled(r, "dolphin")) || (forward == 2 && trick_enabled(r, "dragon"))) plain_ollie();
+            // The owner's turns (2026-10-14): the dolphin is a forward varial (one front flip and a half turn of the board),
+            // the dragon a forward 360 (one front flip and a full turn of the board: the nose goes all the way round in
+            // both).
             if (forward == 1 && trick_enabled(r, "dolphin")) {
-                start_board_spin(0, 0, 360, r.flickit_spin_ms);
+                start_board_spin(0, side > 0 ? -180.0f : 180.0f, 360, r.flickit_spin_ms);
                 id = "dolphin";
                 name = "Dolphin Flip";
             } else if (forward == 2 && trick_enabled(r, "dragon")) {
                 start_board_spin(0, side > 0 ? -360.0f : 360.0f, 360, r.flickit_spin_ms);
                 id = "dragon";
                 name = "Dragon Flip";
-            } else if (trick_enabled(r, "bigspin")) {
+            } else if (r.big_spin && trick_enabled(r, "bigspin")) {
                 if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
                 double current{};
                 (void)read_state_at(base, r.s_current_flip, 1, current);

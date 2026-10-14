@@ -51,9 +51,8 @@ inline constexpr TrickInfo trick_catalog[]{
     {"nc_fsshuvit", Family::nocomply, "No Comply FS Shuvit", "Tap A, pop it with the FS pop shuvit flick (down, rolled to the right rim)", 250},
     {"air_extraflip", Family::air, "Extra flip", "Tap L3 in the air, stick at rest: double flip, nightmare, daydream", 300},
     {"air_lateshuv", Family::air, "Late Shuvit", "Tap L3 in the air with the stick left or right", 250},
-    {"dolphin", Family::flickit, "Dolphin Flip", "Flick down, up and straight back down: the board flips end over end", 500},
-    {"dragon", Family::flickit, "Dragon Flip", "Flick down, up and back down to a lower diagonal: a dolphin flip with a 360 shuvit", 650},
-    {"bigspin", Family::flickit, "Big Spin", "The pop shuvit flick while spinning 180 with the left stick: the board turns 360", 450},
+    {"dolphin", Family::flickit, "Dolphin Flip", "Flick down, up and straight back down: a forward varial (one front flip, half a turn)", 500},
+    {"dragon", Family::flickit, "Dragon Flip", "Flick down, up and back down to a lower diagonal: a forward 360 (one front flip, a full turn)", 650},
 };
 inline constexpr std::size_t trick_count = std::size(trick_catalog);
 constexpr int trick_index(std::string_view id) {

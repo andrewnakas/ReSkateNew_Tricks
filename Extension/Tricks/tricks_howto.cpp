@@ -127,14 +127,11 @@ const std::vector<Guide> &guides(tricks::Family family) {
     static const std::vector<Guide> flickit{
         {"dolphin", "Dolphin Flip (forward flip)",
          "Riding, flick the right stick down, then up (the pop), then straight back down through the middle to the bottom rim, all in one quick stroke. "
-         "The board flips end over end forward once, nose first.",
+         "The board does a forward varial: one front flip, nose first, while it turns half way round.",
          {{"Down", Click::none, {centre, at(270)}, false}, {"Up (pop)", Click::none, {at(270), at(90)}, false}, {"Straight back down", Click::none, {at(90), at(270)}, false}}},
         {"dragon", "Dragon Flip",
-         "The dolphin's stroke, but the last part goes to a lower diagonal (lower left or lower right): the end-over-end flip with a 360 shuvit, turning toward that side.",
+         "The dolphin's stroke, but the last part goes to a lower diagonal (lower left or lower right): a forward 360, one front flip while the board turns all the way round toward that side.",
          {{"Down", Click::none, {centre, at(270)}, false}, {"Up (pop)", Click::none, {at(270), at(90)}, false}, {"Down to a lower diagonal", Click::none, {at(90), at(230)}, false}}},
-        {"bigspin", "Big Spin",
-         "Do the game's pop shuvit flick (down, rolled to the left or right rim) while holding the left stick to the side so the skater spins 180. The board turns 360 under the 180 body.",
-         {{"Pop shuvit flick + left stick to the side", Click::none, {at(270), at(235), at(200)}, false, 0, 0, {centre, at(180)}}}},
     };
     static const std::vector<Guide> air{
         {"air_extraflip", "Extra flip (double flip, nightmare, daydream)",
