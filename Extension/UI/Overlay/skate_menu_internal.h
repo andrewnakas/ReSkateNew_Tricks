@@ -62,4 +62,6 @@ void developer_page(SkateMenu&, const Model&, const CallbacksV3&);
 // Extension/Trainer/trainer_page.cpp
 void trainer_page(SkateMenu&, const Model&, const CallbacksV3&);
 bool trainer_page_wanted();
+// Extension/Tricks/tricks_page.cpp
+void tricks_page(SkateMenu&, const Model&, const CallbacksV3&);
 }

@@ -1,6 +1,9 @@
 #include "tricks.h"
 #include "tricks_states.h"
 #include "tricks_board.h"
+#include "tricks_view.h"
+#include "Engine/Core/Json/json.h"
+#include <shlobj.h>
 #include "Extension/Trainer/trainer.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Skater/client_source_spawn.h"
@@ -188,7 +191,30 @@ struct Runtime {
     std::uint64_t height_last{};
     bool anti_turn{true};
     std::uint64_t exit_guard_until{};
-    bool exit_guard_air{}; // the skater (root) turned half round while mirrored: `tricks anti turn on|off`
+    bool exit_guard_air{};
+    std::uint32_t exit_guard_ms{2000};
+    // The sticks over the last half second (a sample a tick): the flick that pops a trick is read back from it.
+    struct StickSample {
+        std::uint64_t at{};
+        float rx{}, ry{}, lx{};
+    };
+    std::array<StickSample, 48> sticks{};
+    std::size_t stick_next{};
+    // A manual's brake and the click: a pose from a manual wants the click pressed after the brake has held a moment
+    // (the ground shuvit holds the click first, then pushes the stick down: the same stick as a manual brake).
+    std::uint64_t brake_since{}, click_down_at{};
+    bool click_was{};
+    // Flick-it extras read from the pop (dolphin, dragon, big spin), once per air.
+    bool pop_checked{}, pop_spinning{};
+    std::uint64_t takeoff_at{};
+    std::uint32_t flickit_spin_ms{450};
+    std::uint32_t out_spin_ms{320}; // a flick-out's flip
+    // The Tricks page (Insert menu): each trick and each family switched on or off, kept in tricks.json.
+    std::array<bool, trick_count> trick_on = [] { std::array<bool, trick_count> a{}; a.fill(true); return a; }();
+    std::array<bool, family_count> family_on = [] { std::array<bool, family_count> a{}; a.fill(true); return a; }();
+    bool score_feed{true};
+    bool store_loaded{}, view_due{true}, save_due{};
+    std::uint64_t next_save{}; // the skater (root) turned half round while mirrored: `tricks anti turn on|off`
     std::uint32_t anti_steady_ms{150}; // the stick passes the top during a flick: it has to rest there this long
     std::uint64_t mirror_until{};
     std::uintptr_t s_mirrored{};
@@ -200,6 +226,7 @@ struct Runtime {
     std::uint64_t tail_down_at{}, nose_down_at{};
     int manual_seen{-1}; // <dev> the manual states as last logged
     int manual_kind{};   // 1 tail, 2 nose: the manual being ridden (kept through its brake)
+    bool manual_seen_brake{};
     std::uint64_t zone_since{}, shuv_down_at{}, shuv_side_at{};
     int shuv_side{};
     bool trace{true};
@@ -266,6 +293,220 @@ Runtime &runtime() {
     static Runtime r;
     return r;
 }
+
+// ---- the Tricks page: switches, settings, tricks.json --------------------------------------------------------
+// A trick is on when it and its family are both on.
+bool trick_enabled(const Runtime &r, std::string_view id) {
+    const int i = trick_index(id);
+    return i < 0 || (r.trick_on[i] && r.family_on[static_cast<std::size_t>(trick_catalog[i].family)]);
+}
+// ---- the sticks' recent past: what a pop's flick asked for ------------------------------------------------------
+void record_sticks(Runtime &r, std::uint64_t now, float rx, float ry, float lx) {
+    r.sticks[r.stick_next] = {now, rx, ry, lx};
+    r.stick_next = (r.stick_next + 1) % r.sticks.size();
+}
+std::vector<Runtime::StickSample> recent_sticks(const Runtime &r, std::uint64_t now, std::uint64_t window) {
+    std::vector<Runtime::StickSample> out;
+    for (std::size_t i = 0; i < r.sticks.size(); ++i) {
+        const auto &s = r.sticks[(r.stick_next + i) % r.sticks.size()]; // oldest first
+        if (s.at && s.at + window >= now) out.push_back(s);
+    }
+    return out;
+}
+float stick_angle(float x, float y) {
+    float a = std::atan2(y, x) * 180.0f / 3.14159265f;
+    return a < 0 ? a + 360.0f : a;
+}
+// The flip a flick-it asked for, read from the right stick's way over `window` ms: the stick pulled down, then where it
+// went from there. The game's flip ids: 2 kickflip (up-left), 3 heelflip (up-right), 4 pop shuvit (rolled to the left
+// rim), 7 FS pop shuvit (to the right rim); 0 a plain pop (straight up); -1 no flick.
+int popped_flip(const Runtime &r, std::uint64_t now, std::uint64_t window) {
+    const auto v = recent_sticks(r, now, window);
+    std::size_t down = v.size();
+    for (std::size_t i = 0; i < v.size(); ++i)
+        if (v[i].ry < -0.6f) { down = i; break; }
+    if (down == v.size()) return -1;
+    for (std::size_t i = down + 1; i < v.size(); ++i) {
+        const float len = std::sqrt(v[i].rx * v[i].rx + v[i].ry * v[i].ry);
+        if (len < 0.75f) continue;
+        const float a = stick_angle(v[i].rx, v[i].ry);
+        if (a >= 240.0f && a <= 300.0f) continue; // still down
+        if (a >= 100.0f && a <= 165.0f) return 2;
+        if (a >= 15.0f && a < 80.0f) return 3;
+        if (a >= 80.0f && a < 100.0f) return 0;
+        if (a > 165.0f && a < 240.0f) return 4;
+        return 7; // 300..360, 0..15
+    }
+    return -1;
+}
+// The dolphin's stroke (stick down, up, and straight back down): 1; ending on a lower diagonal (the dragon): 2, with the
+// side it ended on in `side` (-1 left, 1 right). 0: none.
+int forward_flick(const Runtime &r, std::uint64_t now, std::uint64_t window, int &side) {
+    const auto v = recent_sticks(r, now, window);
+    int stage = 0; // 0 looking for down, 1 for up, 2 for the second down
+    for (const auto &s : v) {
+        if (stage == 0 && s.ry < -0.6f) stage = 1;
+        else if (stage == 1 && s.ry > 0.6f) stage = 2;
+        else if (stage == 2 && s.ry < -0.5f && std::sqrt(s.rx * s.rx + s.ry * s.ry) > 0.75f) {
+            side = s.rx < 0 ? -1 : 1;
+            return std::abs(s.rx) > 0.45f ? 2 : 1;
+        }
+    }
+    return 0;
+}
+int setting_index(std::string_view key) {
+    for (std::size_t i = 0; i < setting_count; ++i)
+        if (key == setting_catalog[i].key) return static_cast<int>(i);
+    return -1;
+}
+double setting_value(const Runtime &r, std::string_view key) {
+    if (key == "zone_left") return r.zone_left;
+    if (key == "zone_right") return r.zone_right;
+    if (key == "anti_steady") return r.anti_steady_ms;
+    if (key == "height_edge") return r.height_at_edge;
+    if (key == "height_middle") return r.height_at_middle;
+    if (key == "snap_casper") return r.snap_casper;
+    if (key == "snap_primo") return r.snap_primo;
+    if (key == "slide") return r.slide;
+    if (key == "rigid") return r.rigid;
+    if (key == "out_spin_ms") return r.out_spin_ms;
+    if (key == "exit_guard_ms") return r.exit_guard_ms;
+    if (key == "groundshuv_ms") return r.gs_ms;
+    if (key == "groundshuv_hop") return r.gs_hop;
+    if (key == "nc_spin_ms") return r.nc_spin_ms;
+    if (key == "air_spin_ms") return r.air_spin_ms;
+    if (key == "flickit_spin_ms") return r.flickit_spin_ms;
+    return 0;
+}
+// Clamped to the setting's range; false for a key that is not a setting.
+bool set_setting(Runtime &r, std::string_view key, double value) {
+    const int i = setting_index(key);
+    if (i < 0 || !std::isfinite(value)) return false;
+    const auto &info = setting_catalog[i];
+    const float v = std::clamp(static_cast<float>(value), info.low, info.high);
+    const auto ms = static_cast<std::uint32_t>(std::lround(v));
+    if (key == "zone_left") r.zone_left = v;
+    else if (key == "zone_right") r.zone_right = v;
+    else if (key == "anti_steady") r.anti_steady_ms = ms;
+    else if (key == "height_edge") r.height_at_edge = v;
+    else if (key == "height_middle") r.height_at_middle = v;
+    else if (key == "snap_casper" || key == "snap_primo") {
+        (key == "snap_casper" ? r.snap_casper : r.snap_primo) = v;
+        r.snap_applied = false; // written into the transitions again on the next tick
+        r.snap_from_start = false;
+    } else if (key == "slide") r.slide = v;
+    else if (key == "rigid") r.rigid = v;
+    else if (key == "out_spin_ms") r.out_spin_ms = ms;
+    else if (key == "exit_guard_ms") r.exit_guard_ms = ms;
+    else if (key == "groundshuv_ms") r.gs_ms = ms;
+    else if (key == "groundshuv_hop") r.gs_hop = v;
+    else if (key == "nc_spin_ms") r.nc_spin_ms = ms;
+    else if (key == "air_spin_ms") r.air_spin_ms = ms;
+    else if (key == "flickit_spin_ms") r.flickit_spin_ms = ms;
+    else return false;
+    return true;
+}
+std::filesystem::path store_path() {
+    PWSTR raw{};
+    std::filesystem::path result;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &raw)) && raw) result = std::filesystem::path(raw) / L"ReSkate" / L"tricks";
+    if (raw) CoTaskMemFree(raw);
+    return result;
+}
+void changed(Runtime &r, bool save = true) {
+    r.view_due = true;
+    if (save) r.save_due = true;
+}
+// The name of a mod trick, shown as a ReSkate notice (`tricks names`).
+bool announce_tricks = true;
+void load_store(Runtime &r) {
+    r.store_loaded = true;
+    try {
+        const auto directory = store_path();
+        if (directory.empty()) return;
+        std::ifstream file(directory / L"tricks.json", std::ios::binary);
+        if (!file) return;
+        const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        if (text.empty() || text.size() > 256 * 1024) return;
+        const auto json = Json::parse(text);
+        if (!json.is_object()) return;
+        if (json.contains("tricks") && json.at("tricks").is_object())
+            for (std::size_t i = 0; i < trick_count; ++i) r.trick_on[i] = json.at("tricks").value(trick_catalog[i].id, true);
+        if (json.contains("families") && json.at("families").is_object())
+            for (std::size_t i = 0; i < family_count; ++i) r.family_on[i] = json.at("families").value(family_catalog[i].id, true);
+        if (json.contains("settings") && json.at("settings").is_object())
+            for (std::size_t i = 0; i < setting_count; ++i) {
+                const auto &settings = json.at("settings");
+                if (settings.contains(setting_catalog[i].key) && settings.at(setting_catalog[i].key).is_number())
+                    (void)set_setting(r, setting_catalog[i].key, settings.at(setting_catalog[i].key).get<double>());
+            }
+        if (json.contains("options") && json.at("options").is_object()) {
+            const auto &o = json.at("options");
+            announce_tricks = o.value("names", announce_tricks);
+            r.score_feed = o.value("score", r.score_feed);
+            r.height_on = o.value("height", r.height_on);
+            r.anti_turn = o.value("anti_turn", r.anti_turn);
+            r.two_primos = o.value("two_primos", r.two_primos);
+        }
+        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: settings loaded from tricks.json.");
+    } catch (...) {
+        logging::log(logging::Level::warning, logging::Channel::skater, "Tricks: tricks.json could not be read; defaults kept.");
+    }
+}
+void save_store(Runtime &r) {
+    r.save_due = false;
+    try {
+        Json json = Json::object();
+        json["schema"] = 1;
+        Json tricks = Json::object();
+        for (std::size_t i = 0; i < trick_count; ++i) tricks[trick_catalog[i].id] = r.trick_on[i];
+        json["tricks"] = std::move(tricks);
+        Json families = Json::object();
+        for (std::size_t i = 0; i < family_count; ++i) families[family_catalog[i].id] = r.family_on[i];
+        json["families"] = std::move(families);
+        Json settings = Json::object();
+        for (std::size_t i = 0; i < setting_count; ++i) settings[setting_catalog[i].key] = setting_value(r, setting_catalog[i].key);
+        json["settings"] = std::move(settings);
+        Json options = Json::object();
+        options["names"] = announce_tricks;
+        options["score"] = r.score_feed;
+        options["height"] = r.height_on;
+        options["anti_turn"] = r.anti_turn;
+        options["two_primos"] = r.two_primos;
+        json["options"] = std::move(options);
+        const auto directory = store_path();
+        if (directory.empty()) return;
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        const auto target = directory / L"tricks.json", temporary = directory / L"tricks.json.tmp";
+        {
+            std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+            file << json.dump(2);
+            if (!file) return;
+        }
+        std::filesystem::rename(temporary, target, error);
+        if (error) {
+            std::filesystem::remove(target, error);
+            std::filesystem::rename(temporary, target, error);
+        }
+    } catch (...) {
+        logging::log(logging::Level::warning, logging::Channel::skater, "Tricks: could not save tricks.json.");
+    }
+}
+void publish_view(Runtime &r) {
+    r.view_due = false;
+    auto next = std::make_shared<View>();
+    next->ready = true;
+    next->trick = r.trick_on;
+    next->family = r.family_on;
+    for (std::size_t i = 0; i < setting_count; ++i) next->setting[i] = static_cast<float>(setting_value(r, setting_catalog[i].key));
+    next->names = announce_tricks;
+    next->score = r.score_feed;
+    next->height = r.height_on;
+    next->anti_turn = r.anti_turn;
+    next->two_primos = r.two_primos;
+    publish(std::move(next));
+}
 // The pose in the air: the graph's copy of the physics state family, written in place every physics step (the game
 // writes it back each step; the animation reads it after).
 struct AirPoke {
@@ -285,6 +526,7 @@ void air_poke_step() noexcept {
     if (const auto last = air_poke.last.load(std::memory_order_relaxed)) (void)poke_state_value(air_poke.base.load(std::memory_order_relaxed), air_poke.entity.load(std::memory_order_relaxed), last, 2, nullptr);
 }
 void announce(std::string_view name);
+void score_trick(std::string_view id, std::string_view name);
 void start_ground_shuv(Runtime &r, std::uint64_t now, bool frontside) {
     std::uint32_t seen{}, turned{};
     board_hook_counts(seen, turned); // counted afresh over the turn
@@ -292,7 +534,7 @@ void start_ground_shuv(Runtime &r, std::uint64_t now, bool frontside) {
     set_board_hop(r.gs_hop);
     r.gs_phase = 1;
     r.gs_until = now + r.gs_ms + 60;
-    announce(frontside ? "FS Shuvit" : "Shuvit");
+    score_trick("groundshuv", frontside ? "FS Ground Shuvit" : "Ground Shuvit");
     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: ground {} shuvit.", frontside ? "frontside" : "backside");
 }
 std::atomic<bool> searching{};
@@ -310,9 +552,15 @@ void release_all() noexcept {
 bool any_hold(const Runtime &r, std::uint64_t now) noexcept { return r.freestyle != Freestyle::off || now < r.leaving_until; }
 
 // The name of a mod trick, shown as a ReSkate notice (the game's own trick line does not know these tricks).
-bool announce_tricks = true;
 void announce(std::string_view name) {
     if (announce_tricks && !name.empty()) overlay::notify(overlay::NoticeLevel::info, "TRICK", std::string(name));
+}
+// A mod trick done: its name and points (tricks_view.h) shown, and added to the game's score line when it can be.
+void score_trick(std::string_view id, std::string_view name) {
+    const int i = trick_index(id);
+    const int points = i >= 0 ? trick_catalog[i].points : 0;
+    announce(points > 0 && runtime().score_feed ? std::format("{}  +{}", name, points) : std::string(name));
+    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: scored {} ({}, {} points).", name, id, points);
 }
 std::string_view flip_name(std::uint32_t trick) {
     switch (trick) {
@@ -424,6 +672,15 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
     auto &r = runtime();
     r.base = base;
     const auto now = GetTickCount64();
+    if (!r.store_loaded) {
+        load_store(r);
+        r.view_due = true;
+    }
+    if (r.view_due) publish_view(r);
+    if (r.save_due && now >= r.next_save) {
+        r.next_save = now + 500;
+        save_store(r);
+    }
     run_pad(r.pad, now);
     // Before the first mount: the skater's key is taken from the game's own write at the mount.
     if (!r.setters) r.setters = start_setter_watch(base);
@@ -622,7 +879,14 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         const bool click_pressed = click && !r.ground_click;
         r.ground_click = click;
         const float held_x = rx / 32767.0f, held_y = ry / 32767.0f;
-        if (r.ground_shuvs && !r.hold_scheme && click_pressed && physics.valid && physics.state == 100 && r.freestyle == Freestyle::off && !r.gs_phase && !r.nc_trick &&
+        {
+            std::int16_t lx{};
+            std::memcpy(&lx, pad.data() + 4, 2);
+            record_sticks(r, now, held_x, held_y, lx / 32767.0f);
+            if (click && !r.click_was) r.click_down_at = now;
+            r.click_was = click;
+        }
+        if (r.ground_shuvs && trick_enabled(r, "groundshuv") && !r.hold_scheme && click_pressed && physics.valid && physics.state == 100 && r.freestyle == Freestyle::off && !r.gs_phase && !r.nc_trick &&
             state_objects_known() && std::abs(held_x) > 0.6f && std::abs(held_x) >= std::abs(held_y)) {
             r.stick_armed = false; // the same stick is not also a primo pick
             start_ground_shuv(r, now, held_x > 0);
@@ -676,6 +940,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             // One primo for both sides: a flick out of primo2 never popped in the runs (its way over to the casper is
             // 50 ticks against the primo's 30), the primo's does.
             if (!r.two_primos && zone == Freestyle::primo2) zone = Freestyle::primo;
+            // A pose switched off on the Tricks page has no place on the stick.
+            if (zone == Freestyle::casper && !trick_enabled(r, zone_anti ? "anticasper" : "casper")) zone = Freestyle::off, zone_anti = false;
+            if ((zone == Freestyle::primo || zone == Freestyle::primo2) && !trick_enabled(r, "primo")) zone = Freestyle::off;
             if (zone != r.zone || zone_anti != r.zone_anti) {
                 r.zone = zone;
                 r.zone_anti = zone_anti;
@@ -686,7 +953,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             // From a manual pushed all the way down: the last 0.4 s of it still counts (the click takes the stick from
             // the game, and the manual lets go).
             bool from_manual = false;
-            if (r.manual_entry && on_ground && state_objects_known() && r.freestyle == Freestyle::off && !r.leaving) {
+            if (r.manual_entry && trick_enabled(r, "manual_entry") && on_ground && state_objects_known() && r.freestyle == Freestyle::off && !r.leaving) {
                 if (!r.s_tail_manual) r.s_tail_manual = find_state(base, "Animation/Dingo/Bool.Anim.InTailManual");
                 if (!r.s_nose_manual) r.s_nose_manual = find_state(base, "Animation/Dingo/Bool.Anim.InNoseManual");
                 if (!r.s_manual_brake) r.s_manual_brake = find_state(base, "Animation/Dingo/Bool.Anim.ManualBrake");
@@ -706,15 +973,20 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 else if (brake == 0) r.manual_kind = 0;
                 if (brake != 0 && r.manual_kind == 1) r.tail_down_at = now;
                 if (brake != 0 && r.manual_kind == 2) r.nose_down_at = now;
+                if (brake != 0 && !(r.manual_seen_brake)) r.brake_since = now; // a new brake
+                r.manual_seen_brake = brake != 0;
                 const bool tail_ready = r.tail_down_at && now - r.tail_down_at < 400, nose_ready = r.nose_down_at && now - r.nose_down_at < 400;
-                from_manual = zone != Freestyle::off && (zone_anti ? nose_ready : tail_ready);
+                // The click pressed after the brake has held a moment: a click held first, then the stick down, is the
+                // ground shuvit (the owner could not get it: the casper from a manual took it, 2026-10-14).
+                const bool clicked_after = r.brake_since && r.click_down_at >= r.brake_since + 150;
+                from_manual = zone != Freestyle::off && clicked_after && (zone_anti ? nose_ready : tail_ready);
             }
             const bool catching = in_air || (on_ground && now - r.air_last < 350) || from_manual; // the landing's first moment still counts
             if (catching) {
                 if (modifier && held > 0.3f) DingoSDKOverlayTricksMask(); // not a grab, a manual or another flip
                 if (r.freestyle == Freestyle::off && !r.nc_trick && !r.leaving && modifier && steady && state_objects_known()) {
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: caught in {}{} (stick at {:.0f}){}.", zone_anti ? "anti-" : "", freestyle_name(zone), angle, from_manual && !in_air ? " from a manual" : "");
-                    announce(pose_name(zone, zone_anti));
+                    score_trick(zone_anti ? "anticasper" : zone == Freestyle::casper ? "casper" : "primo", pose_name(zone, zone_anti));
                     if (const bool start = from_manual && !in_air; start != r.snap_from_start && r.snap_applied) {
                         (void)set_transition_start(base, "animation/dingo/transition_onboard.freestyle.conduit_to_onboard.freestyle.casper.into", start ? 0.0f : r.snap_casper);
                         (void)set_transition_start(base, "animation/dingo/transition_onboard.freestyle.conduit_to_onboard.freestyle.primo.into", start ? 0.0f : r.snap_primo);
@@ -747,7 +1019,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             }
             // The ground shuvit, as the owner plays it: the click held, the stick held down at its edge, rolled to a
             // lower diagonal and let go. (Rolled on to the side, it is the game's pop shuvit: not this one.)
-            if (r.ground_shuvs && physics.valid && physics.state == 100 && r.freestyle == Freestyle::off && !r.leaving && !r.gs_phase && now - r.air_last > 500) {
+            if (r.ground_shuvs && trick_enabled(r, "groundshuv") && physics.valid && physics.state == 100 && r.freestyle == Freestyle::off && !r.leaving && !r.gs_phase && now - r.air_last > 500) {
                 if (held > 0.8f && angle >= 250.0f && angle <= 292.0f) {
                     r.shuv_down_at = now;
                 } else if (held > 0.8f && modifier && ((angle > 296.0f && angle <= 338.0f) || (angle >= 205.0f && angle < 246.0f))) {
@@ -926,7 +1198,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     r.leaving_until = now + ms;
                     r.by_hold = false;
                     r.primo_out_at = 0;
-                    r.exit_guard_until = now + 2000;
+                    r.exit_guard_until = now + r.exit_guard_ms;
                     r.exit_guard_air = false;
                 };
                 const auto fall = [&](const char *why) {
@@ -977,14 +1249,19 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         const float flick = std::atan2(r.edge_y, r.edge_x) * 180.0f / 3.14159265f;
                         r.out_roll = r.out_yaw = 0;
                         const char *turn = "Tre Flip";
-                        if (flick >= 150.0f || flick <= -150.0f) { r.out_yaw = 180; turn = "Pop Shuvit"; }
-                        else if (flick <= 30.0f) { r.out_yaw = -180; turn = "FS Pop Shuvit"; }
-                        else if (flick >= 100.0f) { r.out_roll = 360; turn = "Kickflip"; }
-                        else if (flick < 80.0f) { r.out_roll = -360; turn = "Heelflip"; }
+                        const char *id = "flick_treflip";
+                        if (flick >= 150.0f || flick <= -150.0f) { r.out_yaw = 180; turn = "Pop Shuvit"; id = "flick_shuvit"; }
+                        else if (flick <= 30.0f) { r.out_yaw = -180; turn = "FS Pop Shuvit"; id = "flick_fsshuvit"; }
+                        else if (flick >= 100.0f) { r.out_roll = 360; turn = "Kickflip"; id = "flick_kickflip"; }
+                        else if (flick < 80.0f) { r.out_roll = -360; turn = "Heelflip"; id = "flick_heelflip"; }
                         else { r.out_roll = 360; r.out_yaw = 360; }
-                        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flicked out of the {} ({}).", freestyle_name(r.freestyle), turn);
-                        announce(std::format("{} {}", r.anti ? "Anti Casper" : casper ? "Casper" : "Primo", turn));
                         r.edge_brief = false;
+                        // A flick-out switched off on the Tricks page: the swipe does nothing and the pose stays.
+                        if (!trick_enabled(r, id)) {
+                            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: {} out is switched off.", turn);
+                        } else {
+                        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flicked out of the {} ({}).", freestyle_name(r.freestyle), turn);
+                        score_trick(id, std::format("{} {}", r.anti ? "Anti Casper" : casper ? "Casper" : "Primo", turn));
                         if (casper) {
                             r.out_until = now + 1500;
                             leave(9, 2500);
@@ -994,11 +1271,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                             r.after_primo = Freestyle::off;
                             r.primo_out_at = now + r.primo_out_ms;
                         }
+                        }
                     } else if (!modifier) {
                         if (!r.centre_since) r.centre_since = now;
                         if (now - r.centre_since >= 250) {
                             logging::log(logging::Level::info, logging::Channel::skater, "Tricks: let go of the {}.", freestyle_name(r.freestyle));
-                            if (casper) { announce("Casper Flip"); leave(9, 2500); }
+                            if (casper) { score_trick("casperflip", r.anti ? "Anti Casper Flip" : "Casper Flip"); leave(9, 2500); }
                             else leave(0, 1500);
                         }
                     } else if (held < 0.2f) {
@@ -1007,7 +1285,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                             if (casper && r.centre_fall) fall("stick back at the middle");
                             else {
                                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: the {} was put down.", freestyle_name(r.freestyle));
-                                if (casper) { announce("Casper Flip"); leave(9, 2500); }
+                                if (casper) { score_trick("casperflip", r.anti ? "Anti Casper Flip" : "Casper Flip"); leave(9, 2500); }
                                 else leave(0, 1500);
                             }
                         }
@@ -1017,7 +1295,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         const Freestyle current = r.after_primo != Freestyle::off ? r.after_primo : r.freestyle;
                         if (settled && zone != Freestyle::off && (zone != current || zone_anti != r.anti) && now - r.zone_since >= 250) {
                             logging::log(logging::Level::info, logging::Channel::skater, "Tricks: {}{} to {}{}.", r.anti ? "anti-" : "", freestyle_name(current), zone_anti ? "anti-" : "", freestyle_name(zone));
-                            announce(pose_name(zone, zone_anti));
+                            score_trick(zone_anti ? "anticasper" : zone == Freestyle::casper ? "casper" : "primo", pose_name(zone, zone_anti));
                             r.freestyle = zone;
                             r.anti = zone_anti;
                             r.after_primo = Freestyle::off;
@@ -1029,7 +1307,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             // The flick's turn, once the casper's flip out is in the air; dropped again on the ground.
             if (r.out_until && in_air) {
                 if (r.out_roll != 0 || r.out_yaw != 0) {
-                    start_board_spin(r.out_roll, r.out_yaw, 0, r.air_spin_ms);
+                    start_board_spin(r.out_roll, r.out_yaw, 0, r.out_spin_ms);
                     r.out_spinning = true;
                 }
                 r.out_until = 0;
@@ -1191,7 +1469,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         }
     }
     // No comply flips.
-    if (r.nc_flips && skater_key_known()) {
+    if (r.nc_flips && r.family_on[static_cast<std::size_t>(Family::nocomply)] && skater_key_known()) {
         const auto named = [&](std::uintptr_t &at, const char *name) {
             if (!at) at = find_state(base, name);
             return at;
@@ -1230,27 +1508,23 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             }
             r.nc_seen_at = now;
         }
-        const bool window = now - r.nc_seen_at < 700;
-        const bool pose_held = (pad[0] & 0x40) != 0 || pad[2] > 128; // the left stick's click, the left trigger
-        if (window && !r.nc_trick && r.controls && !(r.hold_scheme && pose_held)) {
-            if (length < 0.35f) r.nc_armed = true;
-            else if (r.nc_armed && length > 0.75f) {
-                const float angle = std::atan2(y, x) * 180.0f / 3.14159265f; // 0 right, 90 up
-                // CurrentFlipTrick values (the game's): kickflip 2, heelflip 3, pop shuvit 4, FS pop shuvit 7, 360 flip 11, hardflip 9.
-                std::uint32_t trick = 9; // down
-                if (angle >= 112.5f && angle < 157.5f) trick = 2;       // up-left
-                else if (angle >= 22.5f && angle < 67.5f) trick = 3;    // up-right
-                else if (angle >= 67.5f && angle < 112.5f) trick = 11;  // up
-                else if (angle >= 157.5f || angle < -135.0f) trick = 4; // left
-                else if (angle >= -45.0f && angle < 22.5f) trick = 7;   // right
-                r.nc_trick = trick;
+        // The flip is the one the flick that popped the no comply asked for (the owner: "press A fast and then do
+        // kickflip or shuv version instead of ollie", 2026-10-14): read back from the right stick's way over the half
+        // second before the no comply leaves the ground. A plain flick (straight up) is the game's own no comply.
+        // (The earlier pick, a second flick once the no comply had started, also took the popping flick's down for a
+        // hardflip whenever A came before the flick.)
+        (void)x; (void)y; (void)length;
+        if (air && !r.nc_trick && !r.nc_air && now - r.nc_seen_at < 1000 && r.controls) {
+            const int trick = popped_flip(r, now, 900);
+            const char *id = trick == 2 ? "nc_kickflip" : trick == 3 ? "nc_heelflip" : trick == 4 ? "nc_shuvit" : trick == 7 ? "nc_fsshuvit" : nullptr;
+            if (id && trick_enabled(r, id)) {
+                r.nc_trick = static_cast<std::uint32_t>(trick);
                 r.nc_until = now + 2000;
                 r.nc_air = false;
-                r.nc_armed = false;
-                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: no comply flip {} picked.", trick);
-            }
-            if (r.nc_armed || r.nc_trick) DingoSDKOverlayTricksMask();
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: no comply flip {} read from the pop's flick.", trick);
+            } else r.nc_air = true; // this air is the game's own (plain, or the flip switched off)
         }
+        if (!air && !r.nc_trick) r.nc_air = false;
         if (r.nc_trick) {
             // The no comply's own clip plays to its end whatever the scripts ask for (its node only leaves at the
             // clip's end), so the flip is the mod's: the board is turned under the clip once it is in the air.
@@ -1269,13 +1543,62 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 default: roll = 360; break;
                 }
                 start_board_spin(roll, yaw, 0, r.nc_spin_ms);
-                announce(std::format("{} {}", r.plant_flip ? "Boneless" : "No Comply", flip_name(r.nc_trick)));
+                const char *nc_id = r.nc_trick == 2 ? "nc_kickflip" : r.nc_trick == 3 ? "nc_heelflip" : r.nc_trick == 4 ? "nc_shuvit" : r.nc_trick == 7 ? "nc_fsshuvit" : "nc_kickflip";
+                score_trick(nc_id, std::format("{} {}", r.plant_flip ? "Boneless" : "No Comply", flip_name(r.nc_trick)));
             }
             if (now >= r.nc_until || (r.nc_air && ground)) {
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: no comply flip {} ended ({}).", r.nc_trick, r.nc_air ? "landed" : "timed out");
                 stop_board_spin();
                 r.nc_trick = 0;
             }
+        }
+    }
+    // Flick-it flips (the owner, 2026-10-14): read from the flick that popped the skater, in the first moments of its
+    // air, and turned on top of the game's own trick: the dolphin flip (stick down, up and straight back down: the
+    // board flips end over end forward), the dragon flip (the same ending on a lower diagonal: with a 360 shuvit) and
+    // the big spin (the game's pop shuvit while the left stick spins the skater 180: the board turns 360).
+    if (r.controls && r.family_on[static_cast<std::size_t>(Family::flickit)] && skater_key_known()) {
+        const auto physics = watched_physics_state();
+        const bool air = physics.valid && physics.state >= 200 && physics.state < 300;
+        const bool ground = physics.valid && physics.state >= 100 && physics.state <= 105;
+        if (ground) {
+            if (r.pop_spinning) stop_board_spin();
+            r.pop_spinning = false;
+            r.pop_checked = false;
+            r.takeoff_at = 0;
+        } else if (air && !r.takeoff_at) r.takeoff_at = now;
+        if (air && !r.pop_checked && r.takeoff_at && r.freestyle == Freestyle::off && !r.by_hold && !r.nc_trick && !r.leaving && !r.out_spinning) {
+            int side = 0;
+            const int forward = forward_flick(r, now, 700, side);
+            const char *id = nullptr;
+            std::string name;
+            if (forward == 1 && trick_enabled(r, "dolphin")) {
+                start_board_spin(0, 0, 360, r.flickit_spin_ms);
+                id = "dolphin";
+                name = "Dolphin Flip";
+            } else if (forward == 2 && trick_enabled(r, "dragon")) {
+                start_board_spin(0, side > 0 ? -360.0f : 360.0f, 360, r.flickit_spin_ms);
+                id = "dragon";
+                name = "Dragon Flip";
+            } else if (trick_enabled(r, "bigspin")) {
+                if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
+                double current{};
+                (void)read_state_at(base, r.s_current_flip, 1, current);
+                const int flip = static_cast<int>(current);
+                bool spun = false;
+                for (const auto &sample : recent_sticks(r, now, 700)) spun = spun || std::abs(sample.lx) > 0.6f;
+                if ((flip == 4 || flip == 7) && spun) {
+                    start_board_spin(0, flip == 4 ? 180.0f : -180.0f, 0, r.flickit_spin_ms);
+                    id = "bigspin";
+                    name = flip == 4 ? "Big Spin" : "FS Big Spin";
+                }
+            }
+            if (id) {
+                r.pop_checked = true;
+                r.pop_spinning = true;
+                score_trick(id, name);
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flick-it {} read from the pop.", name);
+            } else if (now - r.takeoff_at > 350) r.pop_checked = true; // too late in the air for a pop's flick
         }
     }
     // In-air extras: a tap of the left stick's click in the air turns the board once more under whatever trick is
@@ -1326,10 +1649,13 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             else if (std::abs(x) > 0.6f && std::abs(x) >= std::abs(y)) { yaw = x > 0 ? -180.0f : 180.0f; what = "late shuvit"; }
             else if (std::abs(y) > 0.6f) { pitch = y > 0 ? 180.0f : -180.0f; roll = 180.0f; what = "dolphin turn"; }
             else roll = 360.0f * way;
-            start_board_spin(roll, yaw, pitch, r.air_spin_ms);
-            ++r.air_used;
-            announce(yaw != 0 && pitch != 0 ? std::string_view("Dragon Flip") : yaw != 0 ? std::string_view("Late Shuvit") : pitch != 0 ? std::string_view("Dolphin Flip") : extra_flip_name(trick));
-            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: in-air {} on flip trick {} (roll {}, yaw {}, pitch {}).", what, trick, roll, yaw, pitch);
+            const char *id = yaw != 0 && pitch != 0 ? "air_dragon" : yaw != 0 ? "air_lateshuv" : pitch != 0 ? "air_dolphin" : "air_extraflip";
+            if (trick_enabled(r, id)) {
+                start_board_spin(roll, yaw, pitch, r.air_spin_ms);
+                ++r.air_used;
+                score_trick(id, yaw != 0 && pitch != 0 ? std::string_view("Dragon Flip") : yaw != 0 ? std::string_view("Late Shuvit") : pitch != 0 ? std::string_view("Dolphin Flip") : extra_flip_name(trick));
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: in-air {} on flip trick {} (roll {}, yaw {}, pitch {}).", what, trick, roll, yaw, pitch);
+            }
         }
     }
     // <dev>
@@ -1380,6 +1706,35 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
 std::string command(std::string_view verb, const std::vector<std::string> &arguments) {
     auto &r = runtime();
     const auto now = GetTickCount64();
+    changed(r); // any command may have changed a kept setting: the page's view and tricks.json follow
+    if (verb == "enable" || verb == "family") {
+        // tricks enable <trick> on|off | tricks family <family> on|off (the Tricks page's switches)
+        if (arguments.size() != 2 || (arguments[1] != "on" && arguments[1] != "off")) return std::format("usage: tricks {} <id> on|off", verb);
+        const bool on = arguments[1] == "on";
+        if (verb == "enable") {
+            const int i = trick_index(arguments[0]);
+            if (i < 0) return "error: no trick " + arguments[0] + ".";
+            r.trick_on[i] = on;
+            return std::format("{} {}.", trick_catalog[i].name, on ? "on" : "off");
+        }
+        for (std::size_t i = 0; i < family_count; ++i)
+            if (arguments[0] == family_catalog[i].id) {
+                r.family_on[i] = on;
+                return std::format("{} {}.", family_catalog[i].name, on ? "on" : "off");
+            }
+        return "error: no family " + arguments[0] + ".";
+    }
+    if (verb == "set") {
+        // tricks set <setting> <value> (the Tricks page's sliders; tricks_view.h lists them)
+        if (arguments.size() != 2) return "usage: tricks set <setting> <value>";
+        if (!set_setting(r, arguments[0], std::atof(arguments[1].c_str()))) return "error: no setting " + arguments[0] + ".";
+        return std::format("{} = {:.2f}.", arguments[0], setting_value(r, arguments[0]));
+    }
+    if (verb == "score") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks score on|off";
+        r.score_feed = arguments[0] == "on";
+        return r.score_feed ? "Mod tricks are added to the score line." : "Mod tricks are not scored.";
+    }
     if (verb == "status") {
         std::string live;
         for (std::size_t i = 0; i < state_count; ++i) {
