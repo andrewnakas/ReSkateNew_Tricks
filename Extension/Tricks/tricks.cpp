@@ -184,6 +184,14 @@ struct Runtime {
     std::uint32_t anti_steady_ms{150}; // the stick passes the top during a flick: it has to rest there this long
     std::uint64_t mirror_until{};
     std::uintptr_t s_mirrored{};
+    // Poses from a manual (the owner, 2026-10-13): the manual pushed all the way down (the game's manual brake, the
+    // tail or nose on the ground), then the click and the stick to a pose's place: from a tail manual the casper or
+    // the primo, from a nose manual the anti-casper.
+    bool manual_entry{true};
+    std::uintptr_t s_tail_manual{}, s_nose_manual{}, s_manual_brake{};
+    std::uint64_t tail_down_at{}, nose_down_at{};
+    int manual_seen{-1}; // <dev> the manual states as last logged
+    int manual_kind{};   // 1 tail, 2 nose: the manual being ridden (kept through its brake)
     std::uint64_t zone_since{}, shuv_down_at{}, shuv_side_at{};
     int shuv_side{};
     bool trace{true};
@@ -652,11 +660,37 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             }
             const bool steady = zone != Freestyle::off && now - r.zone_since >= (zone_anti ? r.anti_steady_ms : 60) && (!zone_anti || now - r.air_start >= 120);
             const auto pose_name = [](Freestyle f, bool anti) { return anti ? "Anti Casper" : f == Freestyle::casper ? "Casper" : f == Freestyle::primo ? "Primo" : "Primo 2"; };
-            const bool catching = in_air || (on_ground && now - r.air_last < 350); // the landing's first moment still counts
+            // From a manual pushed all the way down: the last 0.4 s of it still counts (the click takes the stick from
+            // the game, and the manual lets go).
+            bool from_manual = false;
+            if (r.manual_entry && on_ground && state_objects_known() && r.freestyle == Freestyle::off && !r.leaving) {
+                if (!r.s_tail_manual) r.s_tail_manual = find_state(base, "Animation/Dingo/Bool.Anim.InTailManual");
+                if (!r.s_nose_manual) r.s_nose_manual = find_state(base, "Animation/Dingo/Bool.Anim.InNoseManual");
+                if (!r.s_manual_brake) r.s_manual_brake = find_state(base, "Animation/Dingo/Bool.Anim.ManualBrake");
+                double tail{}, nose{}, brake{};
+                (void)read_state_at(base, r.s_tail_manual, 0, tail);
+                (void)read_state_at(base, r.s_nose_manual, 0, nose);
+                (void)read_state_at(base, r.s_manual_brake, 0, brake);
+                const int seen = (tail != 0) | (nose != 0) << 1 | (brake != 0) << 2;
+                if (seen != r.manual_seen) {
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: manual tail {} nose {} brake {} (stick {:.2f},{:.2f}) at {} ms.", tail != 0, nose != 0, brake != 0, held_x, held_y, now % 100000);
+                    r.manual_seen = seen;
+                }
+                // The brake is a node of its own: the manual's tail / nose state is off while it plays (measured
+                // 2026-10-13), so the brake belongs to the manual seen before it.
+                if (tail != 0) r.manual_kind = 1;
+                else if (nose != 0) r.manual_kind = 2;
+                else if (brake == 0) r.manual_kind = 0;
+                if (brake != 0 && r.manual_kind == 1) r.tail_down_at = now;
+                if (brake != 0 && r.manual_kind == 2) r.nose_down_at = now;
+                const bool tail_ready = r.tail_down_at && now - r.tail_down_at < 400, nose_ready = r.nose_down_at && now - r.nose_down_at < 400;
+                from_manual = zone != Freestyle::off && (zone_anti ? nose_ready : tail_ready);
+            }
+            const bool catching = in_air || (on_ground && now - r.air_last < 350) || from_manual; // the landing's first moment still counts
             if (catching) {
                 if (modifier && held > 0.3f) DingoSDKOverlayTricksMask(); // not a grab, a manual or another flip
                 if (r.freestyle == Freestyle::off && !r.nc_trick && !r.leaving && modifier && steady && state_objects_known()) {
-                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: caught in {}{} (stick at {:.0f}).", zone_anti ? "anti-" : "", freestyle_name(zone), angle);
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: caught in {}{} (stick at {:.0f}){}.", zone_anti ? "anti-" : "", freestyle_name(zone), angle, from_manual && !in_air ? " from a manual" : "");
                     announce(pose_name(zone, zone_anti));
                     r.freestyle = zone;
                     r.anti = zone_anti;
