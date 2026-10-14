@@ -27,6 +27,8 @@ void register_tricks_commands(Commands &registry) {
         {"rigid", "Hold a posed board to its pose with this drive strength (the game's own is 1)", "<0 to 1000>"},
         {"balance", "The casper's balance blend", "<0 to 1> | stick | off"},
         {"rootup", "Hold the skater upright in a held pose", "on|off|watch"},
+        {"anti", "The anti-casper (the casper mirrored), caught with the right stick resting up", "on|off | steady <ms>"},
+        {"riderframe", "Give the rider's drives to the deck an upright deck in a held pose", "on|off|watch | feet game|turn|all"},
         {"level2", "Keep a held pose level and on one heading", "on|off | delay <ms>"},
         {"norunout", "Stand the game's wipeout and run-out checks down while a pose is held", "on|off"},
         {"snap", "Start the casper and primo way-in clips part of the way in", "<casper tick> <primo tick>"},

@@ -20,6 +20,7 @@ constexpr unsigned char root_update_bytes[]{0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 
 using RootUpdate = void (*)(std::uintptr_t rig, float step);
 std::atomic<RootUpdate> root_original{};
 void root_update_hook(std::uintptr_t rig, float step) {
+    freestyle_root_updating(rig);
     if (const auto next = root_original.load(std::memory_order_acquire)) next(rig, step);
     freestyle_root_updated(rig);
 }
@@ -61,7 +62,7 @@ void track(std::atomic<float> &low, std::atomic<float> &high, float value) noexc
 std::atomic<float> level_tilt{0.30f};
 std::atomic<int> level_mode{}; // 0 off, 1 casper (up row down), 2 primo (right row on end)
 int level_axis{-1};            // hook thread only: the latched row
-float level_sign{}, level_heading[3]{};
+float level_sign{}, level_rise_sign{1.0f}, level_heading[3]{};
 std::atomic<std::uint32_t> level_steps{};
 void level_frame(float *frame) noexcept {
     const int mode = level_mode.load(std::memory_order_relaxed);
@@ -80,6 +81,8 @@ void level_frame(float *frame) noexcept {
         if (!(length > 0.2f)) return;
         level_axis = axis;
         level_sign = height < 0 ? -1.0f : 1.0f;
+        // Which end of a casper's board is down, as the clip has it (the mirrored one, the anti-casper, has the other).
+        level_rise_sign = rows[2][1] < 0 ? -1.0f : 1.0f;
         level_heading[0] = next[0] / length;
         level_heading[1] = 0.0f;
         level_heading[2] = next[2] / length;
@@ -92,7 +95,7 @@ void level_frame(float *frame) noexcept {
         // A casper does not have its board flat: it stands on one end of it, the forward row 0.30 up (17 degrees;
         // measured on held caspers 2026-10-13). Laid flat, the feet no longer fit and the skater falls onto its back.
         // The pose's own tilt is kept: the forward row at that height along the heading, the right row level.
-        const float rise = level_tilt.load(std::memory_order_relaxed), run = std::sqrt(1.0f - rise * rise);
+        const float rise = level_tilt.load(std::memory_order_relaxed) * level_rise_sign, run = std::sqrt(1.0f - rise * rise);
         float *up = a, *forward = b, *right = c;
         forward[0] = level_heading[0] * run; forward[1] = rise; forward[2] = level_heading[2] * run;
         right[0] = level_heading[2]; right[1] = 0.0f; right[2] = -level_heading[0];
@@ -159,6 +162,7 @@ bool turn_frame(std::uintptr_t board) noexcept {
         seen_count.fetch_add(1, std::memory_order_relaxed);
         hold_rigid(board);
         // (Watched as the game gives it, before it is levelled: this is what the skater's root is doing.)
+        set_freestyle_target_heights(frame[5], frame[1]); // <dev> the root trace's
         if (lean_on.load(std::memory_order_relaxed)) {
             track(lean_right_min, lean_right_max, frame[1]);
             track(lean_up_min, lean_up_max, frame[5]);

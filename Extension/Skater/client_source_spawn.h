@@ -44,11 +44,23 @@ void take_freestyle_slide_roll(float& peak_rate, float& swing) noexcept;
 void set_freestyle_slide_upright(float strength) noexcept;
 // The skater's root frame while a pose slides: 0 the game's, 1 watched, 2 held upright on the heading it stood with.
 void set_freestyle_root_upright(int mode) noexcept;
+// The rider's five drives to the deck while a pose is held: mode 0 the game's, 1 watched, 2 given an upright deck (the
+// deck's own place and heading, standing up). `feet`: 0 the feet's rows left alone, 1 their orientation turned too,
+// 2 their points as well.
+void set_freestyle_rider_drives(int mode, int feet) noexcept;
+// <dev> The rows as sampled over the last poses, and how many rows were written / found set again by the game.
+std::string take_freestyle_rider_drives(std::uint32_t& writes, std::uint32_t& regame) noexcept;
+// Called before the game's root update of a rig (any skater's): the frame the local skater's root is built from is
+// set upright if asked. How many times it was, since the last call.
+void freestyle_root_updating(std::uintptr_t rig) noexcept;
+std::uint32_t take_freestyle_root_source() noexcept;
 // Called after the game's root update of a rig (any skater's): the local skater's root is set upright if asked.
 void freestyle_root_updated(std::uintptr_t rig) noexcept;
 // <dev> Samples of a held pose's first seconds on the ground: ms, root up row height, board height, board speed up,
 // root side and forward row heights.
 std::uint32_t take_freestyle_root_trace(std::array<std::array<float, 6>, 64>& samples) noexcept;
+// The board's target frame as the game gave it (before the mod turned it): the height of its up and right rows.
+void set_freestyle_target_heights(float up, float right) noexcept;
 // </dev>
 // Steps seen since the last call (and of them how many were set upright), and the range of the root's up row height.
 std::uint32_t take_freestyle_root_upright(float& low, float& high, std::uint32_t& fixed) noexcept;

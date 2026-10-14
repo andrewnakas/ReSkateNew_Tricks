@@ -175,6 +175,15 @@ struct Runtime {
     // his caspers rest at 270 to 304, his primos at 210 to 221 and 311 to 6.
     float zone_left{245.0f}, zone_right{307.0f};
     Freestyle zone{Freestyle::off};
+    // The anti-casper (the nose-side casper; the owner, 2026-10-13): the game has no clips for it, so it is the casper
+    // played mirrored (Animation/Dingo/Bool.Anim.Mirrored held true: the front foot on top at the nose end, the back
+    // foot hooked under the raised tail). Caught with the stick resting up (between the primos' places). The mirror
+    // goes on at the catch, before the way in starts, and stays on through the way out until it has been in the air
+    // or the skater rides again (released earlier it snapped to the plain casper at both ends: owner, 2026-10-13).
+    bool anti_on{true}, anti{}, zone_anti{}, mirror_on{};
+    std::uint32_t anti_steady_ms{150}; // the stick passes the top during a flick: it has to rest there this long
+    std::uint64_t mirror_until{};
+    std::uintptr_t s_mirrored{};
     std::uint64_t zone_since{}, shuv_down_at{}, shuv_side_at{};
     int shuv_side{};
     bool trace{true};
@@ -195,9 +204,14 @@ struct Runtime {
     float rigid{30.0f};
     bool level{true};
     float balance_fixed{-0.1f}; // <dev> the casper's Balance: 0 to 1 held there, -0.1 the stick's, -1 not written
-    // The skater's root in a held pose: 0 the game's, 1 watched, 2 held upright. Off by default: the drawn body is the
-    // rider's physics parts, which sink on their own (owner 2026-10-13: still flops, and the legs twisted with it on).
-    int rootup{0};
+    // The skater's root in a held pose: 0 the game's, 1 watched, 2 held upright. Held upright both before the root
+    // update (the frame it is built from, [rig + 0x59b0] + 0x5b0, which rolled 90 degrees and back in a casper) and
+    // after it. The casper flop (butt on the ground 0.6 s in) is gone with it: rider parts 0.88 -> 1.17 m, never
+    // below (measured 2026-10-13 23:14; owner: "that looked good"). Upright after the update alone did nothing.
+    int rootup{2};
+    // <dev> The rider's drives to the deck (pelvis and feet) given an upright deck in a held pose: 0 the game's, 1
+    // watched, 2 upright. Not the flop's cause (no change with it on, 2026-10-13): off.
+    int riderframe{0}, rider_feet{1};
     std::uint32_t level_delay{0};
     bool no_runout{true}, no_runout_on{};
     std::uintptr_t s_no_wipeouts{};
@@ -446,14 +460,22 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             {
                 float low{}, high{};
                 std::uint32_t fixed{};
-                if (last_state == 103 && r.rootup == 1) { // <dev> only while watched
+                if (last_state == 103 && r.rootup >= 1) { // <dev> only while watched or held
                     std::array<std::array<float, 6>, 64> samples{};
                     const auto count = take_freestyle_root_trace(samples);
                     std::string text;
                     for (std::uint32_t i = 0; i < count && i < samples.size(); ++i)
                         text += std::format(" {:.0f}:{:.2f}/{:.2f}/{:+.1f}/{:.2f}/{:.2f}", samples[i][0], samples[i][1], samples[i][2], samples[i][3], samples[i][4], samples[i][5]);
-                    if (count) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root trace (ms:root up row/rider parts highest/lowest/mean over the board/board up row):{}", text);
+                    if (count) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root trace (ms:root up row/rider parts' highest over the board/board part nearest the root's position/the root's source frame up row/its side row):{}", text);
                 }
+                if (last_state == 103 && r.riderframe) { // <dev>
+                    std::uint32_t writes{}, regame{};
+                    const auto rows = take_freestyle_rider_drives(writes, regame);
+                    if (!rows.empty() || writes)
+                        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: rider drives (mode {}, feet {}): {} row writes, {} set again by the game{}", r.riderframe, r.rider_feet, writes, regame, rows);
+                }
+                if (const auto sourced = take_freestyle_root_source())
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root's source frame set upright {} times.", sourced);
                 if (const auto calls = take_freestyle_root_upright(low, high, fixed))
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: skater root seen for {} steps, its up row's height {:.2f}..{:.2f}; set upright {} times.", calls, low, high, fixed);
             }
@@ -613,26 +635,31 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             float angle = std::atan2(held_y, held_x) * 180.0f / 3.14159265f;
             if (angle < 0) angle += 360.0f;
             Freestyle zone = Freestyle::off;
+            bool zone_anti = false;
             if (held > 0.3f) {
                 if (angle > r.zone_left && angle < r.zone_right) zone = Freestyle::casper;
                 else if (angle >= 150.0f && angle <= r.zone_left) zone = Freestyle::primo;
                 else if (angle >= r.zone_right || angle <= 40.0f) zone = Freestyle::primo2;
+                else if (r.anti_on) { zone = Freestyle::casper; zone_anti = true; }
             }
             // One primo for both sides: a flick out of primo2 never popped in the runs (its way over to the casper is
             // 50 ticks against the primo's 30), the primo's does.
             if (!r.two_primos && zone == Freestyle::primo2) zone = Freestyle::primo;
-            if (zone != r.zone) {
+            if (zone != r.zone || zone_anti != r.zone_anti) {
                 r.zone = zone;
+                r.zone_anti = zone_anti;
                 r.zone_since = now;
             }
-            const bool steady = zone != Freestyle::off && now - r.zone_since >= 60;
+            const bool steady = zone != Freestyle::off && now - r.zone_since >= (zone_anti ? r.anti_steady_ms : 60) && (!zone_anti || now - r.air_start >= 120);
+            const auto pose_name = [](Freestyle f, bool anti) { return anti ? "Anti Casper" : f == Freestyle::casper ? "Casper" : f == Freestyle::primo ? "Primo" : "Primo 2"; };
             const bool catching = in_air || (on_ground && now - r.air_last < 350); // the landing's first moment still counts
             if (catching) {
                 if (modifier && held > 0.3f) DingoSDKOverlayTricksMask(); // not a grab, a manual or another flip
                 if (r.freestyle == Freestyle::off && !r.nc_trick && !r.leaving && modifier && steady && state_objects_known()) {
-                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: caught in {} (stick at {:.0f}).", freestyle_name(zone), angle);
-                    announce(zone == Freestyle::casper ? "Casper" : zone == Freestyle::primo ? "Primo" : "Primo 2");
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: caught in {}{} (stick at {:.0f}).", zone_anti ? "anti-" : "", freestyle_name(zone), angle);
+                    announce(pose_name(zone, zone_anti));
                     r.freestyle = zone;
+                    r.anti = zone_anti;
                     r.by_hold = true;
                     r.landed_at = r.centre_since = r.edge_since = r.edge_last = 0;
                     r.edge_brief = false;
@@ -645,10 +672,11 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         r.by_hold = false;
                         r.exit_flip = 0;
                         r.leaving_until = now;
-                    } else if (steady && zone != wanted) {
+                    } else if (steady && (zone != wanted || zone_anti != r.anti)) {
                         // The stick moved on: what it rests on at the landing is the pose.
-                        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: catch changed to {} (stick at {:.0f}).", freestyle_name(zone), angle);
+                        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: catch changed to {}{} (stick at {:.0f}).", zone_anti ? "anti-" : "", freestyle_name(zone), angle);
                         r.freestyle = zone;
+                        r.anti = zone_anti;
                         r.after_primo = Freestyle::off;
                         r.shown = Freestyle::off;
                     }
@@ -714,6 +742,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 const bool posed = r.by_hold && r.freestyle != Freestyle::off;
                 set_board_rigid(posed && physics.valid && physics.state == 103 ? r.rigid : 0.0f);
                 set_freestyle_root_upright(posed && physics.valid && physics.state == 103 ? r.rootup : 0);
+                set_freestyle_rider_drives(posed && physics.valid && physics.state == 103 ? r.riderframe : 0, r.rider_feet);
                 // <dev> Watched once the pose has been in for a second (its way in turns the board on purpose).
                 set_board_lean_watch(posed && physics.valid && physics.state == 103 && r.landed_at && now - r.landed_at > 1000);
                 // </dev>
@@ -829,11 +858,14 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     if (r.fall_slam) request_wipeout();
                     else r.fall_until = now + 400;
                 };
+                // An anti-casper is held with the stick up: its rules are the casper's turned upside down (a swipe down
+                // from where it is held flicks out, held at the lower edge it is lost).
+                const float hy = r.anti ? -held_y : held_y;
                 const bool settled = now - r.landed_at > 600; // the landing's first moment is forgiven
                 // The stick in its upper half at the edge: a flick if it is brief, a fall if it stays (the owner holds his
                 // poses with the stick right at the lower edge, so the edge itself is no fall).
-                const bool upper = held > 0.8f && held_y > 0.3f;
-                if (held > 0.4f && held_y < 0.1f) r.low_last = now;
+                const bool upper = held > 0.8f && hy > 0.3f;
+                if (held > 0.4f && hy < 0.1f) r.low_last = now;
                 if (r.primo_out_at) {
                     if (now >= r.primo_out_at) {
                         r.out_until = now + 1500;
@@ -842,7 +874,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 } else if (upper && !r.swiped && !r.edge_since && settled && now - r.low_last < 160) {
                     // Swiped up from where the pose is held: a flick, taken the moment the stick is up.
                     r.edge_x = held_x;
-                    r.edge_y = held_y;
+                    r.edge_y = hy;
                     r.edge_last = now;
                     r.edge_brief = true;
                     r.swiped = true;
@@ -850,7 +882,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     if (!r.edge_since) r.edge_since = now;
                     r.edge_last = now;
                     r.edge_x = held_x;
-                    r.edge_y = held_y;
+                    r.edge_y = hy;
                     r.centre_since = 0;
                     if (r.edge_fall && settled && now - r.edge_since >= 450) fall("stick held up");
                 } else {
@@ -866,7 +898,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         else if (flick < 80.0f) { r.out_roll = -360; turn = "Heelflip"; }
                         else { r.out_roll = 360; r.out_yaw = 360; }
                         logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flicked out of the {} ({}).", freestyle_name(r.freestyle), turn);
-                        announce(std::format("{} {}", casper ? "Casper" : "Primo", turn));
+                        announce(std::format("{} {}", r.anti ? "Anti Casper" : casper ? "Casper" : "Primo", turn));
                         r.edge_brief = false;
                         if (casper) {
                             r.out_until = now + 1500;
@@ -898,10 +930,11 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         r.centre_since = 0;
                         // The stick moved to another pose's place and rests there: over to that pose.
                         const Freestyle current = r.after_primo != Freestyle::off ? r.after_primo : r.freestyle;
-                        if (settled && zone != Freestyle::off && zone != current && now - r.zone_since >= 250) {
-                            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: {} to {}.", freestyle_name(current), freestyle_name(zone));
-                            announce(zone == Freestyle::casper ? "Casper" : zone == Freestyle::primo ? "Primo" : "Primo 2");
+                        if (settled && zone != Freestyle::off && (zone != current || zone_anti != r.anti) && now - r.zone_since >= 250) {
+                            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: {}{} to {}{}.", r.anti ? "anti-" : "", freestyle_name(current), zone_anti ? "anti-" : "", freestyle_name(zone));
+                            announce(pose_name(zone, zone_anti));
                             r.freestyle = zone;
+                            r.anti = zone_anti;
                             r.after_primo = Freestyle::off;
                             r.unhold_until = now + 900;
                         }
@@ -965,6 +998,30 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 r.leaving_until = now + 1500;
             }
             r.by_pad = false;
+        }
+        // The anti-casper's mirror: on from the catch; after the pose, kept until the way out is in the air (the flip
+        // out, or the casper's own exit flip, hides the change), the skater is off the board, or rides again.
+        {
+            const bool posed_anti = r.anti && r.by_hold && r.freestyle != Freestyle::off;
+            static bool exit_airborne{};
+            bool want = posed_anti;
+            if (posed_anti) {
+                r.mirror_until = now + 3000;
+                exit_airborne = false;
+            } else if (r.mirror_on) {
+                if (in_air) exit_airborne = true;
+                const bool done = now >= r.mirror_until || (physics.valid && physics.state >= 300) || exit_airborne ||
+                                  (physics.valid && physics.state == 100 && now + 2500 > r.mirror_until);
+                want = !done;
+            }
+            if (want || r.mirror_on) {
+                if (!r.s_mirrored) r.s_mirrored = find_state(base, "Animation/Dingo/Bool.Anim.Mirrored");
+                (void)write_state_at(base, r.s_mirrored, 0, want ? 1 : 0);
+                if (want != r.mirror_on)
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: anti-casper mirror {} (physics {}).", want ? "on" : "off", physics.valid ? static_cast<int>(physics.state) : -1);
+                r.mirror_on = want;
+            }
+            if (!want && !posed_anti) r.anti = false;
         }
         // Keep the flick that ends a trick from reaching the game while the stick comes back.
         if (r.freestyle != Freestyle::off || (click && !r.stick_armed)) DingoSDKOverlayTricksMask();
@@ -1504,6 +1561,28 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off" && arguments[0] != "watch")) return "usage: tricks rootup on|off|watch";
         r.rootup = arguments[0] == "on" ? 2 : arguments[0] == "watch" ? 1 : 0;
         return r.rootup == 2 ? "The skater's root is held upright in a pose." : r.rootup == 1 ? "The skater's root is watched in a pose." : "The skater's root is the game's in a pose.";
+    }
+    if (verb == "anti") {
+        // tricks anti on|off | steady <ms>
+        if (arguments.size() == 2 && arguments[0] == "steady") {
+            std::uint32_t ms{};
+            if (!number(arguments[1], ms) || ms > 2000) return "usage: tricks anti steady <ms>";
+            r.anti_steady_ms = ms;
+            return std::format("The anti-casper is caught after the stick rests up for {} ms.", ms);
+        }
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks anti on|off | steady <ms>";
+        r.anti_on = arguments[0] == "on";
+        return r.anti_on ? "Anti-casper on: the stick resting up at the catch." : "Anti-casper off.";
+    }
+    if (verb == "riderframe") {
+        // tricks riderframe on|off|watch | feet game|turn|all
+        if (arguments.size() == 2 && arguments[0] == "feet" && (arguments[1] == "game" || arguments[1] == "turn" || arguments[1] == "all")) {
+            r.rider_feet = arguments[1] == "game" ? 0 : arguments[1] == "turn" ? 1 : 2;
+            return std::format("The rider's feet drives in a pose: {}.", arguments[1]);
+        }
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off" && arguments[0] != "watch")) return "usage: tricks riderframe on|off|watch | feet game|turn|all";
+        r.riderframe = arguments[0] == "on" ? 2 : arguments[0] == "watch" ? 1 : 0;
+        return r.riderframe == 2 ? "The rider's drives get an upright deck in a pose." : r.riderframe == 1 ? "The rider's drives are watched in a pose." : "The rider's drives are the game's in a pose.";
     }
     if (verb == "level2") {
         // tricks level2 on|off | delay <ms>: the held pose's target kept level (the older `level` is the slide's pitch knob).

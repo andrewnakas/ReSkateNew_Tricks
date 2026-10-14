@@ -12,7 +12,8 @@ Tiers describe how a trick gets built:
 | # | Trick | Asked by | Tier | Route | Status |
 |---|---|---|---|---|---|
 | 1 | Casper flip as a variant of the hospital flip | strumzino, kash, Die. | A | Casper → `onboard.freestyle.casper.fliptrickexit` (two exit clips) | ready to test (click + RS up in a casper) |
-| 2 | Caspers and primos | Die. | A | `onboard.freestyle.*`: hold WantsFreestyle and FreestyleTrick | ready to test (click + RS down / left / right) |
+| 2 | Caspers and primos | Die. | A | `onboard.freestyle.*`: hold WantsFreestyle and FreestyleTrick | needs test: casper flop fixed 2026-10-13 (root source frame held upright) |
+| 2b | Anti-casper (nose-side casper) | owner | A+ | The casper played mirrored (Bool.Anim.Mirrored), caught with the right stick resting up | needs test (headless: holds, exits, flicks out) |
 | 3 | Casper slides (dark catch into a casper, slide on slick materials) | strumzino | A+C | Casper loop plus slide physics by material | ready to test (slide carries speed, `tricks slide`); per-material friction todo |
 | 4 | Primo exit into FS shuvit | (hidden content) | A | `primo_exit_fs_shuvit` clip | ready to test (let go of the click in a primo) |
 | 5 | No comply flips and shuvs | Punkrek, strumzino | B | No comply state, then a flip enum and the flip clip | ready to test: flick after the no comply starts (procedural board turn; no name/score yet) |

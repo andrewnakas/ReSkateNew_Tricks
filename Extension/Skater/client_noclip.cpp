@@ -9,6 +9,9 @@
 #include "Engine/Game/Build/20260929/offboard_flight.h"
 #include "free_flight.h"
 #include <cmath>
+#include <format>
+#include <mutex>
+#include <string>
 
 namespace dingosdk::client_source::detail {
 namespace {
@@ -381,7 +384,7 @@ struct RootUpright {
     std::atomic<std::uintptr_t> rig{};  // the local skater's, from the slide
     std::atomic<ULONGLONG> seen{};
     std::atomic<float> low{2.0f}, high{-2.0f};
-    std::atomic<std::uint32_t> calls{}, fixed{};
+    std::atomic<std::uint32_t> calls{}, fixed{}, source_fixed{};
     // Motion hook only.
     bool latched{};
     float heading[3]{};
@@ -395,6 +398,7 @@ struct RootTrace {
     ULONGLONG started{}, last{};
 };
 std::atomic<std::uintptr_t> trace_part{};
+std::atomic<float> target_up{}, target_right{};
 RootTrace& root_trace() { static auto* value = new RootTrace; return *value; }
 void trace_root(std::uintptr_t rig, float high, float low, float mean) noexcept {
     auto& t = root_trace();
@@ -412,7 +416,14 @@ void trace_root(std::uintptr_t rig, float high, float low, float mean) noexcept 
     __try {
         std::memcpy(board.data(), reinterpret_cast<const void*>(trace_part.load(std::memory_order_relaxed) + 0x20), sizeof(board)); // <dev> the board's first physics part: its own frame
     } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
-    t.samples[count] = {static_cast<float>(now - t.started), frame[5], high, low, mean, board[5]};
+    // The frame the root is built from: the height of its up and side rows (the clip's board at rig + 0x49e0 was
+    // measured steady through a casper's flop; this one rolled).
+    std::array<float, 12> model{};
+    __try {
+        std::memcpy(model.data(), reinterpret_cast<const void*>(*reinterpret_cast<const std::uintptr_t*>(rig + 0x59b0) + 0x5b0), sizeof(model));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    (void)mean; (void)board;
+    t.samples[count] = {static_cast<float>(now - t.started), frame[5], high, low, model[5], model[1]};
     t.count.store(count + 1, std::memory_order_relaxed);
     t.last = now;
 }
@@ -480,6 +491,277 @@ bool upright_root(std::uintptr_t rig) noexcept {
     u.fixed.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
+// ReSkate Tricks: the rider's drives to the deck. The solver world of the skater's deck (w = core[0x430][0x718][0x80]
+// [0x28]) holds five drives that pull the rider's bodies to the deck and put nothing back on it (MassBias 1): the
+// pelvis to a point 0.905 m up the deck's own up axis, the feet to points on its top, each with a target orientation
+// in the deck's frame (record [w+0xe68] + row * 0xc0: point on B +0x30, orientation in B +0x6c (w,x,y,z), their
+// previous values +0x88 / +0xa4; ReSkateRustRewrite docs/re/world-step.md "Round twelve", drive-compile.md). With the
+// deck upside down (a casper) the pelvis' point is under the board: the drawn body sinks onto the ground (measured
+// 2026-10-13: the rider's parts from 0.86 to 0.2 m over the board). While a pose is held they are given an upright
+// deck instead: the deck's own place and heading, standing up.
+struct RiderDrives {
+    std::atomic<int> mode{};   // 0 the game's, 1 watched, 2 turned upright
+    std::atomic<int> feet{1};  // the feet's rows: 0 the game's, 1 orientation turned, 2 orientation and point turned
+    std::atomic<std::uintptr_t> core{}, part{};
+    std::atomic<ULONGLONG> seen{};
+    // Physics thread only.
+    std::uintptr_t w{};
+    int deck{-1}, pelvis{-1}, count{};
+    std::array<int, 12> rows{}, bodies{};
+    struct Saved {
+        std::array<float, 3> point{}, wrote_point{};
+        std::array<float, 4> turn{}, wrote_turn{};
+        bool valid{};
+        // The game sets this row again every step (measured 2026-10-13: a second pelvis row follows the skater's
+        // root): it is the game's, never turned.
+        bool live{};
+    };
+    std::array<Saved, 12> saved{};
+    ULONGLONG started{}, last{}, next_sample{};
+    std::atomic<std::uint32_t> writes{}, regame{};
+    std::mutex text_lock;
+    std::string text;
+};
+RiderDrives& rider_drives() { static auto* value = new RiderDrives; return *value; }
+template<class T> bool peek_at(std::uintptr_t at, T& value) noexcept { return at && memory::peek(at, value); }
+// The rows whose body B is the deck and whose drive is the rider's (limit 10000; the trucks' are 39600). The deck is
+// the B of the row whose point is the pelvis' (0.905 m up).
+bool find_rider_rows(RiderDrives& d) noexcept {
+    std::uint32_t count{};
+    std::uintptr_t pairs{}, records{};
+    if (!peek_at(d.w + 0x90 + 0x1c, count) || !peek_at(d.w + 0x90 + 0x50, pairs) || !peek_at(d.w + 0xe68, records) || !pairs || !records || count > 4096) return false;
+    auto pair = [&](std::uint32_t row, std::uint32_t& a, std::uint32_t& b) {
+        const auto at = pairs + 4 * ((row & ~3u) + row);
+        return peek_at(at, a) && peek_at(at + 0x10, b);
+    };
+    int deck = -1, pelvis = -1;
+    for (std::uint32_t row = 0; row < count && deck < 0; ++row) {
+        std::array<float, 3> point{};
+        float limit{};
+        std::uint32_t a{}, b{};
+        if (!peek_at(records + row * 0xc0 + 0x30, point) || !peek_at(records + row * 0xc0 + 0x10, limit) || !pair(row, a, b)) continue;
+        if (std::abs(limit - 10000.0f) < 1.0f && std::abs(point[1] - 0.905f) < 0.05f && std::abs(point[0]) < 0.3f && std::abs(point[2]) < 0.3f && a != b) {
+            deck = static_cast<int>(b);
+            pelvis = static_cast<int>(row);
+        }
+    }
+    if (deck < 0) return false;
+    d.count = 0;
+    for (std::uint32_t row = 0; row < count && d.count < static_cast<int>(d.rows.size()); ++row) {
+        float limit{};
+        std::uint32_t a{}, b{};
+        if (!pair(row, a, b) || static_cast<int>(b) != deck || a == b || !peek_at(records + row * 0xc0 + 0x10, limit) || std::abs(limit - 10000.0f) >= 1.0f) continue;
+        d.rows[d.count] = static_cast<int>(row);
+        d.bodies[d.count] = static_cast<int>(a);
+        ++d.count;
+    }
+    d.deck = deck;
+    d.pelvis = pelvis;
+    for (auto& s : d.saved) s = {};
+    return d.count > 0;
+}
+// q = a (x) b, both (w, x, y, z).
+std::array<float, 4> quat_mul(const std::array<float, 4>& a, const std::array<float, 4>& b) noexcept {
+    return {a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3], a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+            a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1], a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]};
+}
+// The rotation m (column vectors: v' = m v) as (w, x, y, z).
+std::array<float, 4> quat_of(const float m[3][3]) noexcept {
+    std::array<float, 4> q{};
+    const float trace = m[0][0] + m[1][1] + m[2][2];
+    if (trace > 0) {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        q = {0.25f * s, (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s};
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+        const float s = std::sqrt(1.0f + m[0][0] - m[1][1] - m[2][2]) * 2.0f;
+        q = {(m[2][1] - m[1][2]) / s, 0.25f * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s};
+    } else if (m[1][1] > m[2][2]) {
+        const float s = std::sqrt(1.0f + m[1][1] - m[0][0] - m[2][2]) * 2.0f;
+        q = {(m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s, 0.25f * s, (m[1][2] + m[2][1]) / s};
+    } else {
+        const float s = std::sqrt(1.0f + m[2][2] - m[0][0] - m[1][1]) * 2.0f;
+        q = {(m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25f * s};
+    }
+    return q;
+}
+// The turn from the deck's frame to an upright one at the same heading, in the deck's own axes: rows of `deck` are its
+// axes x, y (up), z (forward) in the world.
+bool upright_turn(const std::array<float, 12>& deck, float m[3][3]) noexcept {
+    const float *x = deck.data(), *y = deck.data() + 4, *z = deck.data() + 8;
+    for (const float* row : {x, y, z}) {
+        const float length = row[0] * row[0] + row[1] * row[1] + row[2] * row[2];
+        if (!(length > 0.9f && length < 1.1f)) return false;
+    }
+    const float run = std::sqrt(z[0] * z[0] + z[2] * z[2]);
+    if (!(run > 0.3f)) return false; // the deck stands on its nose or tail: no heading to keep
+    const float uz[3]{z[0] / run, 0.0f, z[2] / run}, uy[3]{0.0f, 1.0f, 0.0f};
+    const float cross[3]{y[1] * z[2] - y[2] * z[1], y[2] * z[0] - y[0] * z[2], y[0] * z[1] - y[1] * z[0]};
+    const float hand = cross[0] * x[0] + cross[1] * x[1] + cross[2] * x[2] < 0 ? -1.0f : 1.0f;
+    const float ux[3]{hand * (uy[1] * uz[2] - uy[2] * uz[1]), hand * (uy[2] * uz[0] - uy[0] * uz[2]), hand * (uy[0] * uz[1] - uy[1] * uz[0])};
+    const float* mine[3]{x, y, z};
+    const float* upright[3]{ux, uy, uz};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) m[i][j] = mine[i][0] * upright[j][0] + mine[i][1] * upright[j][1] + mine[i][2] * upright[j][2];
+    return true;
+}
+void put_back_rider_rows(RiderDrives& d) noexcept {
+    std::uintptr_t records{};
+    if (!peek_at(d.w + 0xe68, records) || !records) return;
+    for (int k = 0; k < d.count; ++k) {
+        auto& s = d.saved[k];
+        s.live = false;
+        if (!s.valid) continue;
+        s.valid = false;
+        const auto at = records + static_cast<std::uintptr_t>(d.rows[k]) * 0xc0;
+        std::array<float, 3> point{};
+        std::array<float, 4> turn{};
+        // Only what this code wrote is put back: a row the game set since is the game's.
+        if (!peek_at(at + 0x30, point) || !peek_at(at + 0x6c, turn) || point != s.wrote_point || turn != s.wrote_turn) continue;
+        (void)copy_to(at + 0x30, s.point.data(), sizeof(s.point));
+        (void)copy_to(at + 0x88, s.point.data(), sizeof(s.point));
+        (void)copy_to(at + 0x6c, s.turn.data(), sizeof(s.turn));
+        (void)copy_to(at + 0xa4, s.turn.data(), sizeof(s.turn));
+    }
+}
+void tricks_rider_drives(std::uintptr_t core) noexcept {
+    auto& d = rider_drives();
+    if (!core || core != d.core.load(std::memory_order_relaxed)) return;
+    const auto now = GetTickCount64();
+    const int mode = d.mode.load(std::memory_order_relaxed);
+    const bool posed = mode && now - d.seen.load(std::memory_order_relaxed) < 100;
+    std::uintptr_t a{}, b{}, c{}, w{};
+    if (!peek_at(core + 0x430, a) || !peek_at(a + 0x718, b) || !peek_at(b + 0x80, c) || !peek_at(c + 0x28, w) || !w) return;
+    if (w != d.w) {
+        d.w = w;
+        d.deck = -1;
+        d.count = 0;
+    }
+    if (!posed) {
+        put_back_rider_rows(d);
+        d.started = 0;
+        return;
+    }
+    if (d.deck < 0 && !find_rider_rows(d)) return;
+    std::uintptr_t records{};
+    if (!peek_at(w + 0xe68, records) || !records) return;
+    std::array<float, 12> deck{};
+    if (!peek_at(d.part.load(std::memory_order_relaxed) + 0x20, deck)) return;
+    if (!d.started) { d.started = now; d.next_sample = now; }
+    // <dev> the rows as the game has them, at the pose's start and 0.3, 0.6, 1.2 and 2 s into it
+    if (now >= d.next_sample) {
+        const auto since = now - d.started;
+        std::string line = std::format(" | {}ms deck {} up {:.2f},{:.2f},{:.2f} fwd {:.2f},{:.2f},{:.2f}:", since, d.deck, deck[4], deck[5], deck[6], deck[8], deck[9], deck[10]);
+        for (int k = 0; k < d.count; ++k) {
+            std::array<float, 3> point{};
+            std::array<float, 4> turn{};
+            std::array<float, 4> k4{};
+            const auto at = records + static_cast<std::uintptr_t>(d.rows[k]) * 0xc0;
+            (void)peek_at(at + 0x30, point); (void)peek_at(at + 0x6c, turn); (void)peek_at(at, k4);
+            const bool mine = d.saved[k].valid && point == d.saved[k].wrote_point;
+            line += std::format(" r{}/b{}{}{} p(", d.rows[k], d.bodies[k], mine ? "*" : "", d.saved[k].live ? "~" : "");
+            line += std::format("{:.2f},{:.2f},{:.2f}) q({:.2f},{:.2f},{:.2f},{:.2f}) k{:.0f}", point[0], point[1], point[2], turn[0], turn[1], turn[2], turn[3], k4[0]);
+        }
+        // Every other drive that holds a rider body to something that is not the rider or the deck (its root, the
+        // world): point on A, point on B, orientation in B.
+        std::uint32_t count{};
+        std::uintptr_t pairs{};
+        int pelvis_body = -1;
+        for (int k = 0; k < d.count; ++k)
+            if (d.rows[k] == d.pelvis) pelvis_body = d.bodies[k];
+        if (pelvis_body >= 0 && peek_at(w + 0x90 + 0x1c, count) && peek_at(w + 0x90 + 0x50, pairs) && pairs && count <= 4096) {
+            line += " / others:";
+            auto rider = [&](std::uint32_t body) { return static_cast<int>(body) >= pelvis_body - 8 && static_cast<int>(body) <= pelvis_body + 30; };
+            for (std::uint32_t row = 0; row < count; ++row) {
+                std::uint32_t ra{}, rb{};
+                const auto at = pairs + 4 * ((row & ~3u) + row);
+                if (!peek_at(at, ra) || !peek_at(at + 0x10, rb)) continue;
+                if (static_cast<int>(rb) == d.deck || static_cast<int>(ra) == d.deck || (!rider(ra) && !rider(rb)) || (rider(ra) && rider(rb) && ra != static_cast<std::uint32_t>(pelvis_body) && rb != static_cast<std::uint32_t>(pelvis_body))) continue;
+                std::array<float, 3> pa{}, pb{};
+                std::array<float, 4> qb{}, k4{};
+                const auto rec = records + static_cast<std::uintptr_t>(row) * 0xc0;
+                (void)peek_at(rec + 0x24, pa); (void)peek_at(rec + 0x30, pb); (void)peek_at(rec + 0x6c, qb); (void)peek_at(rec, k4);
+                line += std::format(" r{}:{}-{} a({:.2f},{:.2f},{:.2f}) b({:.2f},{:.2f},{:.2f}) q({:.2f},{:.2f},{:.2f},{:.2f}) k{:.0f}/{:.0f}", row, ra, rb, pa[0], pa[1], pa[2], pb[0], pb[1], pb[2], qb[0], qb[1], qb[2], qb[3], k4[0], k4[2]);
+            }
+        }
+        {
+            std::lock_guard lock(d.text_lock);
+            if (d.text.size() < 30000) d.text += line;
+        }
+        d.next_sample = d.started + (since < 300 ? 300 : since < 600 ? 600 : since < 1200 ? 1200 : since < 2000 ? 2000 : 100000);
+    }
+    // </dev>
+    if (mode < 2) return;
+    float m[3][3]{};
+    if (!upright_turn(deck, m)) return;
+    const auto upright = quat_of(m);
+    const int feet = d.feet.load(std::memory_order_relaxed);
+    for (int k = 0; k < d.count; ++k) {
+        const bool is_pelvis = d.rows[k] == d.pelvis;
+        if (!is_pelvis && feet == 0) continue;
+        auto& s = d.saved[k];
+        const auto at = records + static_cast<std::uintptr_t>(d.rows[k]) * 0xc0;
+        std::array<float, 3> point{};
+        std::array<float, 4> turn{};
+        if (!peek_at(at + 0x30, point) || !peek_at(at + 0x6c, turn)) continue;
+        // A row the game set since the last step (or not yet seen) is the game's new value: turned from there.
+        if (s.live) continue;
+        if (!s.valid || point != s.wrote_point || turn != s.wrote_turn) {
+            if (s.valid) {
+                d.regame.fetch_add(1, std::memory_order_relaxed);
+                s.live = true;
+                s.valid = false;
+                continue;
+            }
+            s.point = point;
+            s.turn = turn;
+            s.valid = true;
+        }
+        std::array<float, 3> new_point = s.point;
+        if (is_pelvis || feet == 2)
+            for (int i = 0; i < 3; ++i) new_point[i] = m[i][0] * s.point[0] + m[i][1] * s.point[1] + m[i][2] * s.point[2];
+        const auto new_turn = quat_mul(upright, s.turn);
+        if (!copy_to(at + 0x30, new_point.data(), sizeof(new_point)) || !copy_to(at + 0x88, new_point.data(), sizeof(new_point)) ||
+            !copy_to(at + 0x6c, new_turn.data(), sizeof(new_turn)) || !copy_to(at + 0xa4, new_turn.data(), sizeof(new_turn))) continue;
+        // Read back: the stored form (a quaternion's sign, a rounding) is what the next step compares with.
+        (void)peek_at(at + 0x30, s.wrote_point);
+        (void)peek_at(at + 0x6c, s.wrote_turn);
+        d.writes.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+// The frame the root update builds the root from ([rig + 0x59b0] + 0x5b0: rows side, up, forward, + 0x5e0 position).
+// It, not the board or the clip, is what rolls in a casper (measured 2026-10-13: its up row from 1.00 to 0.06 and
+// back over 1.5 s with its side row going straight up, the root copying it and the drawn body following 60 ms later,
+// while the board's part and the clip's board stayed still). Set upright on its heading before the update, so the
+// root and everything placed from it start upright.
+bool upright_root_source(std::uintptr_t rig) noexcept {
+    auto& u = root_upright();
+    if (u.mode.load(std::memory_order_relaxed) < 2) return false;
+    std::uintptr_t source{};
+    if (!memory::peek(rig + 0x59b0, source) || !source) return false;
+    std::array<float, 12> rows{};
+    __try {
+        std::memcpy(rows.data(), reinterpret_cast<const void*>(source + 0x5b0), sizeof(rows));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    float *side = rows.data(), *up = rows.data() + 4, *forward = rows.data() + 8;
+    for (const float* row : {side, up, forward}) {
+        const float length = row[0] * row[0] + row[1] * row[1] + row[2] * row[2];
+        if (!(length > 0.9f && length < 1.1f)) return false;
+    }
+    if (up[1] > 0.999f) return false; // already upright
+    // The heading: the forward row over the ground (the roll is about it, so it stays level).
+    const float run = std::sqrt(forward[0] * forward[0] + forward[2] * forward[2]);
+    if (!(run > 0.3f)) return false;
+    const float cross[3]{up[1] * forward[2] - up[2] * forward[1], up[2] * forward[0] - up[0] * forward[2], up[0] * forward[1] - up[1] * forward[0]};
+    const float hand = cross[0] * side[0] + cross[1] * side[1] + cross[2] * side[2] < 0 ? -1.0f : 1.0f;
+    forward[0] /= run; forward[1] = 0.0f; forward[2] /= run;
+    up[0] = 0.0f; up[1] = 1.0f; up[2] = 0.0f;
+    side[0] = hand * (up[1] * forward[2] - up[2] * forward[1]);
+    side[1] = 0.0f;
+    side[2] = hand * (up[0] * forward[1] - up[1] * forward[0]);
+    if (!copy_to(source + 0x5b0, rows.data(), sizeof(rows))) return false;
+    u.source_fixed.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
 void tricks_freestyle_slide(std::uintptr_t core) noexcept {
     auto& f = freestyle_slide();
     const float deceleration = f.deceleration.load(std::memory_order_relaxed);
@@ -494,6 +776,11 @@ void tricks_freestyle_slide(std::uintptr_t core) noexcept {
         const auto bodies = debug_noclip_bodies(state.trial.base, f.client, f.entity);
         if (bodies.core != core || bodies.offboard || bodies.parts.empty() || !(bodies.seconds > 0 && bodies.seconds < 0.1f)) return;
         trace_part.store(bodies.parts[0], std::memory_order_relaxed);
+        if (rider_drives().mode.load(std::memory_order_relaxed)) {
+            rider_drives().core.store(core, std::memory_order_relaxed);
+            rider_drives().part.store(bodies.parts[0], std::memory_order_relaxed);
+            rider_drives().seen.store(GetTickCount64(), std::memory_order_relaxed);
+        }
         if (root_upright().mode.load(std::memory_order_relaxed))
         {
             // <dev> the rider's physics parts: highest, lowest and mean height over the board's
@@ -503,6 +790,17 @@ void tricks_freestyle_slide(std::uintptr_t core) noexcept {
                 const float h = parts.value<float>(bodies.parts[i], 0x54) - bodies.board_height;
                 high = std::max(high, h); low = std::min(low, h); sum += h;
             }
+            // <dev> which physics part the root update takes its position from (rig + 0x48a0 rows, + 0x48d0 position:
+            // board part 8, distance 0, measured 2026-10-13); shown in place of the lowest part
+            std::array<float, 3> source{};
+            float nearest = 1e9f;
+            if (memory::peek(bodies.rig_wrapper + 0x48d0, source))
+                for (std::size_t i = 0; i < bodies.parts.size(); ++i) {
+                    std::array<float, 3> at{};
+                    if (!memory::peek(bodies.parts[i] + 0x50, at)) continue;
+                    const float dx = at[0] - source[0], dy = at[1] - source[1], dz = at[2] - source[2], dd = dx * dx + dy * dy + dz * dz;
+                    if (dd < nearest) { nearest = dd; low = static_cast<float>(i) + std::min(std::sqrt(dd), 0.99f); }
+                }
             trace_root(bodies.rig_wrapper, high, low, bodies.parts.size() > 9 ? sum / static_cast<float>(bodies.parts.size() - 9) : 0.0f);
         }
         root_upright().rig.store(bodies.rig_wrapper, std::memory_order_relaxed);
@@ -604,6 +902,7 @@ void noclip_physics_update(std::uintptr_t core) {
     trainer_apply_jump_scale(core);
     trainer_push_speed(core);
     tricks_freestyle_slide(core);
+    tricks_rider_drives(core);
     if (const auto step = tricks_step().load(std::memory_order_acquire)) step();
 }
 bool noclip_motion_target(std::uintptr_t rig, std::uintptr_t context,
@@ -741,7 +1040,30 @@ void freestyle_root_updated(std::uintptr_t rig) noexcept {
     if (u.rig.load(std::memory_order_relaxed) != rig || GetTickCount64() - u.seen.load(std::memory_order_relaxed) > 200) return;
     (void)upright_root(rig);
 }
+void freestyle_root_updating(std::uintptr_t rig) noexcept {
+    auto& u = root_upright();
+    if (u.rig.load(std::memory_order_relaxed) != rig || GetTickCount64() - u.seen.load(std::memory_order_relaxed) > 200) return;
+    (void)upright_root_source(rig);
+}
+std::uint32_t take_freestyle_root_source() noexcept { return root_upright().source_fixed.exchange(0, std::memory_order_relaxed); }
 void set_freestyle_root_upright(int mode) noexcept { root_upright().mode.store(mode, std::memory_order_relaxed); }
+void set_freestyle_target_heights(float up, float right) noexcept {
+    target_up.store(up, std::memory_order_relaxed);
+    target_right.store(right, std::memory_order_relaxed);
+}
+void set_freestyle_rider_drives(int mode, int feet) noexcept {
+    rider_drives().mode.store(mode, std::memory_order_relaxed);
+    rider_drives().feet.store(feet, std::memory_order_relaxed);
+}
+std::string take_freestyle_rider_drives(std::uint32_t& writes, std::uint32_t& regame) noexcept {
+    auto& d = rider_drives();
+    writes = d.writes.exchange(0, std::memory_order_relaxed);
+    regame = d.regame.exchange(0, std::memory_order_relaxed);
+    try {
+        std::lock_guard lock(d.text_lock);
+        return std::exchange(d.text, {});
+    } catch (...) { return {}; }
+}
 std::uint32_t take_freestyle_root_upright(float& low, float& high, std::uint32_t& fixed) noexcept {
     auto& u = root_upright();
     low = u.low.exchange(2.0f, std::memory_order_relaxed);
