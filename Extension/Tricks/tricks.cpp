@@ -192,6 +192,12 @@ struct Runtime {
     float height_at_edge{0.0f}, height_at_middle{1.0f}, height_inner{0.45f}, height_now{0.5f};
     std::uint64_t height_last{};
     bool anti_turn{true};
+    // A primo's flick-out as the game's own ollie + flip trick (Bool.Intent.OllieNorth, EnumGS.Intent.FlipTrick held
+    // for a moment once the skater rides): the flip trick wanted (0 none), until when, and since when it is asked.
+    bool primo_game_pop{true};
+    std::uint32_t pop_flip{};
+    std::uint64_t pop_until{}, pop_started{};
+    std::uintptr_t s_ollie{}, s_jump{}, s_flip_intent{}, s_flip_speed_intent{};
     std::uint64_t exit_guard_until{};
     bool exit_guard_air{};
     std::uint32_t exit_guard_ms{2000};
@@ -1285,12 +1291,23 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                             logging::log(logging::Level::info, logging::Channel::skater, "Tricks: {} out is switched off.", turn);
                         } else {
                         logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flicked out of the {} ({}).", freestyle_name(r.freestyle), turn);
-                        score_trick(id, std::format("{} {}", r.anti ? "Anti Casper" : casper ? "Casper" : "Primo", turn));
+                        // Named as the flip it is (the owner, 2026-10-14: "Kickflip", not "Casper Kickflip").
+                        score_trick(id, turn);
                         if (casper) {
                             r.out_until = now + 1500;
                             leave(9, 2500);
+                        } else if (r.primo_game_pop) {
+                            // The primo has no pop of its own. It puts the board down (its own way out) and, the moment the
+                            // skater rides, the game is asked for an ollie with this flip trick: the game's own flip, which
+                            // the catch can take into a pose again (the owner, 2026-10-14: not through the casper).
+                            r.pop_flip = id == std::string_view("flick_kickflip") ? 2u : id == std::string_view("flick_heelflip") ? 3u : id == std::string_view("flick_shuvit") ? 4u : id == std::string_view("flick_fsshuvit") ? 7u : 11u;
+                            r.pop_until = now + 1500;
+                            r.pop_started = 0;
+                            r.out_roll = r.out_yaw = 0; // the game's own flip: no turn of ours
+                            r.out_until = 0;
+                            leave(0, 1500);
                         } else {
-                            // The primo has no pop of its own: over to the casper, whose flip out carries the turn.
+                            // Through the casper, whose flip out carries the turn (the older way: `tricks primopop off`).
                             r.freestyle = Freestyle::casper;
                             r.after_primo = Freestyle::off;
                             r.primo_out_at = now + r.primo_out_ms;
@@ -1385,6 +1402,29 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 r.leaving_until = now + 1500;
             }
             r.by_pad = false;
+        }
+        // The primo's flick-out: the game's ollie with the flip trick, asked for once the skater rides again.
+        if (r.pop_flip) {
+            if (now >= r.pop_until || (physics.valid && physics.state >= 300)) {
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flick-out {} gave up (physics {}).", r.pop_flip, physics.valid ? static_cast<int>(physics.state) : -1);
+                r.pop_flip = 0;
+            } else if (physics.valid && physics.state == 100 && !r.pop_started) r.pop_started = now;
+            const bool asking = r.pop_started && now - r.pop_started < 160;
+            if (r.pop_started) {
+                if (!r.s_ollie) r.s_ollie = find_state(base, "Animation/Dingo/Bool.Intent.OllieNorth");
+                if (!r.s_jump) r.s_jump = find_state(base, "Animation/Dingo/Float.Intent.JumpStrength");
+                if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
+                if (!r.s_flip_speed_intent) r.s_flip_speed_intent = find_state(base, "Animation/Dingo/Float.Intent.TrickFlipSpeed");
+                (void)write_state_at(base, r.s_ollie, 0, asking ? 1 : 0);
+                if (asking) (void)write_state_at(base, r.s_jump, 2, 1.0);
+                (void)write_state_at(base, r.s_flip_intent, 1, r.pop_flip);
+                (void)write_state_at(base, r.s_flip_speed_intent, 2, 1.0);
+            }
+            if (in_air && r.pop_started) {
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flick-out popped as the game's flip trick {} ({} ms after riding).", r.pop_flip, now - r.pop_started);
+                r.pop_flip = 0; // the game's own trick from here: the catch is as after any flip
+                r.leaving_until = std::min(r.leaving_until, now);
+            }
         }
         // The anti-casper's mirror: on from the catch; after the pose, kept until the way out is in the air (the flip
         // out, or the casper's own exit flip, hides the change), the skater is off the board, or rides again.
@@ -1685,15 +1725,17 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             const float x = rx / 32767.0f, y = ry / 32767.0f;
             float roll = 0, yaw = 0, pitch = 0;
             const char *what = "extra flip";
-            if (y > 0.45f && std::abs(x) > 0.45f) { pitch = 180.0f; roll = 180.0f; yaw = x > 0 ? -360.0f : 360.0f; what = "dragon flip"; }
-            else if (std::abs(x) > 0.6f && std::abs(x) >= std::abs(y)) { yaw = x > 0 ? -180.0f : 180.0f; what = "late shuvit"; }
-            else if (std::abs(y) > 0.6f) { pitch = y > 0 ? 180.0f : -180.0f; roll = 180.0f; what = "dolphin turn"; }
+            // (Dolphin and dragon flips are flick-it tricks now, right stick only: the owner, 2026-10-14. A tap with the stick
+            // up, down or on a diagonal does nothing.)
+            bool none = false;
+            if (std::abs(x) > 0.6f && std::abs(x) >= std::abs(y)) { yaw = x > 0 ? -180.0f : 180.0f; what = "late shuvit"; }
+            else if (std::abs(y) > 0.45f) none = true;
             else roll = 360.0f * way;
-            const char *id = yaw != 0 && pitch != 0 ? "air_dragon" : yaw != 0 ? "air_lateshuv" : pitch != 0 ? "air_dolphin" : "air_extraflip";
-            if (trick_enabled(r, id)) {
+            const char *id = yaw != 0 ? "air_lateshuv" : "air_extraflip";
+            if (!none && trick_enabled(r, id)) {
                 start_board_spin(roll, yaw, pitch, r.air_spin_ms);
                 ++r.air_used;
-                score_trick(id, yaw != 0 && pitch != 0 ? std::string_view("Dragon Flip") : yaw != 0 ? std::string_view("Late Shuvit") : pitch != 0 ? std::string_view("Dolphin Flip") : extra_flip_name(trick));
+                score_trick(id, yaw != 0 ? std::string_view("Late Shuvit") : extra_flip_name(trick));
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: in-air {} on flip trick {} (roll {}, yaw {}, pitch {}).", what, trick, roll, yaw, pitch);
             }
         }
@@ -2101,6 +2143,11 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         r.height_at_middle = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 1.0f);
         if (arguments.size() > 2) r.height_inner = std::clamp(static_cast<float>(std::atof(arguments[2].c_str())), 0.25f, 0.9f);
         return std::format("Casper height: {:.2f} at the edge, {:.2f} at {:.2f} out.", r.height_at_edge, r.height_at_middle, r.height_inner);
+    }
+    if (verb == "primopop") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks primopop on|off";
+        r.primo_game_pop = arguments[0] == "on";
+        return r.primo_game_pop ? "A primo's flick-out is the game's own ollie and flip." : "A primo's flick-out goes through the casper.";
     }
     if (verb == "anti") {
         // tricks anti on|off | steady <ms>

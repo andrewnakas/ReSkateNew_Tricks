@@ -82,20 +82,20 @@ const std::vector<Guide> &guides(tricks::Family family) {
           {"Stick to the middle: fall (casper)", Click::held, {at(275), centre}, false}}},
     };
     static const std::vector<Guide> flickouts{
-        {"flick_kickflip", "Kickflip out",
+        {"flick_kickflip", "Kickflip (out of a pose)",
          "From a held casper (stick down), swipe the right stick quickly up and to the left and let it spring back. The board pops out of the pose with a kickflip; land it, catch it again, or dark catch it.\n"
          "From an anti casper (stick up) swipe down-left instead. From a primo, swipe up-left.",
          {{"Casper: swipe up-left", Click::held, {at(275), at(130)}, false}, {"Anti casper: swipe down-left", Click::held, {at(95), at(230)}, false}}},
-        {"flick_heelflip", "Heelflip out",
+        {"flick_heelflip", "Heelflip (out of a pose)",
          "Swipe up and to the right from a casper (down-right from an anti casper, up-right from a primo).",
          {{"Casper: swipe up-right", Click::held, {at(275), at(50)}, false}, {"Anti casper: swipe down-right", Click::held, {at(95), at(310)}, false}}},
-        {"flick_treflip", "Tre Flip out",
+        {"flick_treflip", "Tre Flip (out of a pose)",
          "Swipe straight up from a casper (straight down from an anti casper, straight up from a primo).",
          {{"Casper: swipe up", Click::held, {at(275), at(90)}, false}, {"Anti casper: swipe down", Click::held, {at(95), at(270)}, false}}},
-        {"flick_shuvit", "Pop Shuvit out",
+        {"flick_shuvit", "Pop Shuvit (out of a pose)",
          "From a casper or anti casper, a quick swipe to the left rim (under 0.16 s from the held place). Resting there instead changes over to the primo.",
          {{"Quick swipe to the left rim", Click::held, {at(275), at(180)}, false}}},
-        {"flick_fsshuvit", "FS Pop Shuvit out",
+        {"flick_fsshuvit", "FS Pop Shuvit (out of a pose)",
          "From a casper or anti casper, a quick swipe to the right rim.",
          {{"Quick swipe to the right rim", Click::held, {at(275), at(0)}, false}}},
     };
@@ -143,12 +143,6 @@ const std::vector<Guide> &guides(tricks::Family family) {
         {"air_lateshuv", "Late Shuvit",
          "In the air, hold the right stick left or right and tap L3: the board turns half round.",
          {{"Stick left + tap L3", Click::tap, {centre, at(180)}, true}, {"Stick right + tap L3", Click::tap, {centre, at(0)}, true}}},
-        {"air_dolphin", "Dolphin Flip",
-         "In the air, hold the right stick up or down and tap L3: the board goes end over end and comes down turned round.",
-         {{"Stick up + tap L3", Click::tap, {centre, at(90)}, true}, {"Stick down + tap L3", Click::tap, {centre, at(270)}, true}}},
-        {"air_dragon", "Dragon Flip",
-         "In the air, hold the right stick on an up diagonal and tap L3: a dolphin flip with a 360 shuvit.",
-         {{"Up-left + tap L3", Click::tap, {centre, at(135)}, true}, {"Up-right + tap L3", Click::tap, {centre, at(45)}, true}}},
     };
     switch (family) {
     case F::poses: return poses;
