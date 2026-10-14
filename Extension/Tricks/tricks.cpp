@@ -129,6 +129,7 @@ struct Runtime {
     std::uint64_t gs_until{};
     std::uint32_t gs_ms{380};
     float gs_hop{0.05f}; // metres the board comes off the ground at the middle of the turn
+    bool gs_scoop{true};  // the legs' scoop (the game's trick-setup crouch) while it turns
     // The owner's control scheme (2026-10-12): poses are landed into and held on the right stick.
     //   Land a flip trick with the right stick held part of the way left / right: primo / primo2.
     //   Land it with the left stick clicked and the right stick held part of the way out: casper.
@@ -195,6 +196,14 @@ struct Runtime {
     // A primo's flick-out as the game's own ollie + flip trick (Bool.Intent.OllieNorth, EnumGS.Intent.FlipTrick held
     // for a moment once the skater rides): the flip trick wanted (0 none), until when, and since when it is asked.
     bool primo_game_pop{true};
+    // The anti casper as a nose manual (the owner, 2026-10-14: the mirrored casper "totally twists you and spins you
+    // around"; "it should just be a nose manual casper, front foot on the nose, rear foot under the board"): the game's
+    // own nose manual held (EnumGS.Intent.Manual at the nose manual's value, learned from the player's nose manuals),
+    // the board following its clip (103) turned upside down and further nose down, so the raised tail is over the back foot.
+    bool anti_nose{true}, anti_spun{};
+    int nose_manual_value{-1};
+    float anti_pitch{15.0f};
+    std::uintptr_t s_manual_intent{};
     std::uint32_t pop_flip{};
     std::uint64_t pop_until{}, pop_started{};
     std::uintptr_t s_ollie{}, s_jump{}, s_flip_intent{}, s_flip_speed_intent{};
@@ -1001,6 +1010,14 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 if (tail != 0) r.manual_kind = 1;
                 else if (nose != 0) r.manual_kind = 2;
                 else if (brake == 0) r.manual_kind = 0;
+                if (nose != 0) { // the nose manual's intent value, for the anti casper
+                    if (!r.s_manual_intent) r.s_manual_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.Manual");
+                    double value{};
+                    if (r.s_manual_intent && read_state_at(base, r.s_manual_intent, 1, value) && value > 0 && static_cast<int>(value) != r.nose_manual_value) {
+                        r.nose_manual_value = static_cast<int>(value);
+                        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: the nose manual's intent value is {}.", r.nose_manual_value);
+                    }
+                }
                 if (brake != 0 && r.manual_kind == 1) r.tail_down_at = now;
                 if (brake != 0 && r.manual_kind == 2) r.nose_down_at = now;
                 if (brake != 0 && !(r.manual_seen_brake)) r.brake_since = now; // a new brake
@@ -1095,7 +1112,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 if (in_pose && (r.primo_out_at || r.after_primo != Freestyle::off || (zone != Freestyle::off && zone != current))) r.unhold_until = now + 900;
                 set_freestyle_slide_hold(in_pose && now - r.pose_since > 450 && now >= r.unhold_until);
                 // Level and on one heading from the moment the pose is in (not while it changes to another or leaves).
-                set_board_level(r.level && in_pose && now - r.pose_since >= r.level_delay && now >= r.unhold_until && !r.primo_out_at
+                set_board_level(r.level && in_pose && !(r.anti && r.anti_nose) && now - r.pose_since >= r.level_delay && now >= r.unhold_until && !r.primo_out_at
                                     ? (current == Freestyle::casper ? 1 : 2)
                                     : 0);
             }
@@ -1171,7 +1188,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         }
                     }
                 }
-                const bool in_pose_air = r.air_pose && in_air && r.by_hold && r.freestyle != Freestyle::off &&
+                const bool in_pose_air = r.air_pose && in_air && r.by_hold && r.freestyle != Freestyle::off && !(r.anti && r.anti_nose) &&
                                          (r.freestyle == Freestyle::casper || r.air_pose_on || primo_due);
                 if (in_pose_air || r.air_pose_on) {
                     if (!r.s_filtered) r.s_filtered = find_state(base, "Animation/Dingo/EnumGS.FilteredPhysicsState");
@@ -1293,10 +1310,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flicked out of the {} ({}).", freestyle_name(r.freestyle), turn);
                         // Named as the flip it is (the owner, 2026-10-14: "Kickflip", not "Casper Kickflip").
                         score_trick(id, turn);
-                        if (casper) {
+                        if (casper && !(r.anti && r.anti_nose)) {
                             r.out_until = now + 1500;
                             leave(9, 2500);
-                        } else if (r.primo_game_pop) {
+                        } else if (r.primo_game_pop || (r.anti && r.anti_nose)) {
                             // The primo has no pop of its own. It puts the board down (its own way out) and, the moment the
                             // skater rides, the game is asked for an ollie with this flip trick: the game's own flip, which
                             // the catch can take into a pose again (the owner, 2026-10-14: not through the casper).
@@ -1429,7 +1446,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         // The anti-casper's mirror: on from the catch; after the pose, kept until the way out is in the air (the flip
         // out, or the casper's own exit flip, hides the change), the skater is off the board, or rides again.
         {
-            const bool posed_anti = r.anti && r.by_hold && r.freestyle != Freestyle::off;
+            const bool posed_anti = r.anti && !r.anti_nose && r.by_hold && r.freestyle != Freestyle::off;
             static bool exit_airborne{};
             bool want = posed_anti;
             if (posed_anti) {
@@ -1511,6 +1528,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         DingoSDKOverlayTricksMask();
         if (r.gs_phase == 1) {
             r.writes += write_state(base, State::ground_trick, 7);
+            // A slight scoop with the legs (the owner, 2026-10-14: "it looks like a revert"): the game's own trick-setup
+            // crouch held while the board turns under the feet.
+            if (r.gs_scoop) {
+                if (!r.s_early) r.s_early = find_state(base, r.early_name.c_str());
+                (void)write_state_at(base, r.s_early, 0, now < r.gs_until ? 1 : 0);
+            }
             // Riding keeps the board on its physics (ForcePhysicsSkateboard), so the ground trick value alone never
             // reaches the ground animation state: the state selector is told to go there for the length of the turn.
             if (now < r.gs_until) hold_ground_animation(120);
@@ -1625,6 +1648,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             }
         }
     }
+    // The skater's heading is held while the mod spins the board under the feet: a no comply flip, a ground shuvit. The
+    // body is built from the board's frame and was dragged round with it (the owner, 2026-10-14: "the pop shuv and
+    // kickflip no complys still 180 your body"; the ground shuvit "looks like a revert").
+    set_freestyle_root_heading_lock(r.rig, (r.nc_trick != 0 && r.nc_air) || r.gs_phase == 1);
     // Flick-it flips (the owner, 2026-10-14): read from the flick that popped the skater, in the first moments of its
     // air, and turned on top of the game's own trick: the dolphin flip (stick down, up and straight back down: the
     // board flips end over end forward), the dragon flip (the same ending on a lower diagonal: with a 360 shuvit) and
@@ -1765,6 +1792,29 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         }
         keep_holds_alive();
         return;
+    }
+    // The anti casper as a nose manual: the manual intent held, the board on its clip (103), turned over and down.
+    const bool anti_nose_on = r.freestyle != Freestyle::off && r.anti && r.anti_nose;
+    if (anti_nose_on) {
+        if (!r.s_manual_intent) r.s_manual_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.Manual");
+        (void)write_state_at(base, r.s_manual_intent, 1, r.nose_manual_value > 0 ? r.nose_manual_value : 2);
+        r.writes += write_state(base, State::wants_freestyle, 0);
+        const auto physics = watched_physics_state();
+        const bool grounded = physics.valid && (physics.state == 100 || physics.state == 103);
+        if (grounded) hold_ground_animation(150);
+        if (physics.valid && physics.state == 103 && !r.anti_spun) {
+            start_board_spin(180.0f, 0.0f, r.anti_pitch, 140);
+            r.anti_spun = true;
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: anti casper (nose manual {}) board turned over.", r.nose_manual_value);
+        }
+        return;
+    }
+    if (r.anti_spun) { // the anti casper is over: the board flips back the rest of the way round
+        r.anti_spun = false;
+        start_board_spin(360.0f, 0.0f, 0.0f, 0);
+        stop_board_spin();
+        if (!r.s_manual_intent) r.s_manual_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.Manual");
+        (void)write_state_at(base, r.s_manual_intent, 1, 0);
     }
     // Written through the game's setters every tick while freestyle is on (nothing else writes these states).
     if (r.freestyle != Freestyle::off) {
@@ -2143,6 +2193,16 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         r.height_at_middle = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 1.0f);
         if (arguments.size() > 2) r.height_inner = std::clamp(static_cast<float>(std::atof(arguments[2].c_str())), 0.25f, 0.9f);
         return std::format("Casper height: {:.2f} at the edge, {:.2f} at {:.2f} out.", r.height_at_edge, r.height_at_middle, r.height_inner);
+    }
+    if (verb == "antistyle") {
+        // tricks antistyle nose|mirror | pitch <degrees>
+        if (arguments.size() == 2 && arguments[0] == "pitch") {
+            r.anti_pitch = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), -60.0f, 60.0f);
+            return std::format("The anti casper's board goes {:.0f} degrees further nose down.", r.anti_pitch);
+        }
+        if (arguments.empty() || (arguments[0] != "nose" && arguments[0] != "mirror")) return "usage: tricks antistyle nose|mirror | pitch <degrees>";
+        r.anti_nose = arguments[0] == "nose";
+        return r.anti_nose ? "The anti casper is a nose manual with the board turned over." : "The anti casper is the casper mirrored and turned.";
     }
     if (verb == "primopop") {
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks primopop on|off";

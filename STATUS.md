@@ -452,3 +452,13 @@ NEXT: ground entries from manuals (tail manual fully down + L3 + stick -> casper
 - So the structs are only followed (a rise = a sequence banked: our sequence points join the line; a drop = the line ended: everything ours goes to the finished line), never changed (changed, their value came back through the float: 433 + 975 showed as 2,383). Our points go into the HUD line floats: during the line + our banked points; at the reset, the game's finished total + all of ours.
 - Verified on the THPS training map: banner "LINE: 1,087" (112 + 975), the next line showing 1,087 until it banks; "LINE: 1,206" (231 + 975). Big number: 487 / 600 / 1575.
 - Still display only: challenges, throwdowns and stats read the game's own scoring.
+
+## 2026-10-14 14:55 (built, not installed: the owner is playing the 14:2x build)
+
+- Flick-outs named by their flip alone ("Kickflip", "Tre Flip"...), letting go stays "Casper Flip". L3-tap dolphin/dragon removed (flick-it ones stay); big spin keeps the left stick (owner).
+- Primo flick-out: primo exit + the game's own ollie with the flip trick (Bool.Intent.OllieNorth, Float.Intent.JumpStrength, EnumGS.Intent.FlipTrick held 160 ms once riding): the game's real flip, catchable again. `tricks primopop on|off`. UNTESTED.
+- Body heading held while the mod spins the board (no comply flips, ground shuvit): `set_freestyle_root_heading_lock`. Owner: no comply flips "look good and then on landing you spin" (before this): after a shuvit the board is reversed and the game realigns the body; the game's own pop shuvit uses the board-backwards / mirrored machinery (ctx +0x13c4 bit 13, air.md 1062) - not solved.
+- Anti casper rebuilt as a nose manual (`tricks antistyle nose|mirror`, `pitch <deg>`, nose default): EnumGS.Intent.Manual held at the nose manual's value (learned from the player's nose manuals; 2 until then), 103 forced, board turned over (roll 180) and 15 degrees further nose down; no mirror, no turn; flick-outs through the game's pop. UNTESTED.
+- Ground shuvit: the game's trick-setup crouch held during the turn (a scoop), body heading held. UNTESTED.
+- Grabs while grinding: the grind node has no grab route (only a ground grab on landing); grind clips tag Bool.Anim.CannotGrab. Idea: drive the hands with the game's reach IK states (floatchooser.mirrored.*.wrist.reach / boolchooser.mirrored.*.wrist.locked, set by ReachLockIKTag) while grinding with the trigger held.
+- Kickflip-to-indy: no indy clips by name; the fingerflip family (seq_c_proto_inair_grab_*_fingerflip_*, incl. bs_kick_fingerflip) has hand-on-board grabs with reach IK. Needs in-game tests of grabbing during a flip.

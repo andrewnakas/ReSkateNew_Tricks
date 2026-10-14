@@ -388,6 +388,11 @@ struct RootUpright {
     std::atomic<float> source_low{2.0f}, source_sum{};
     std::atomic<bool> turn{};               // the root's source turned half round (the anti-casper)
     std::atomic<bool> hold{};               // held upright whatever the physics state (a pose's way out, in the air too)
+    // The heading held as it was when the lock began (the board spun under the feet: a no comply flip, a ground shuvit):
+    // the frame follows the board, and a board turned, or upside down, dragged the body round with it.
+    std::atomic<bool> heading_lock{};
+    bool lock_latched{};      // root hook only
+    float lock_heading[3]{};
     std::atomic<std::uintptr_t> turn_rig{}; // the local skater's rig, from the game thread
     std::atomic<std::uint32_t> turned{};
     // Motion hook only.
@@ -740,7 +745,9 @@ void tricks_rider_drives(std::uintptr_t core) noexcept {
 // root and everything placed from it start upright.
 bool upright_root_source(std::uintptr_t rig) noexcept {
     auto& u = root_upright();
-    if (u.mode.load(std::memory_order_relaxed) < 2) return false;
+    const bool locked = u.heading_lock.load(std::memory_order_relaxed);
+    if (!locked) u.lock_latched = false;
+    if (u.mode.load(std::memory_order_relaxed) < 2 && !locked) return false;
     std::uintptr_t source{};
     if (!memory::peek(rig + 0x59b0, source) || !source) return false;
     std::array<float, 12> rows{};
@@ -759,13 +766,19 @@ bool upright_root_source(std::uintptr_t rig) noexcept {
         u.source_sum.store(u.source_sum.load(std::memory_order_relaxed) + (1.0f - tip), std::memory_order_relaxed);
         u.source_calls.fetch_add(1, std::memory_order_relaxed);
     }
-    if (up[1] > 0.999f) return false; // already upright
-    // The heading: the forward row over the ground (the roll is about it, so it stays level).
+    if (up[1] > 0.999f && !locked) return false; // already upright
+    // The heading: the forward row over the ground (the roll is about it, so it stays level), or the one latched.
     const float run = std::sqrt(forward[0] * forward[0] + forward[2] * forward[2]);
-    if (!(run > 0.3f)) return false;
+    if (locked && !u.lock_latched) {
+        if (!(run > 0.3f)) return false;
+        u.lock_heading[0] = forward[0] / run; u.lock_heading[1] = 0.0f; u.lock_heading[2] = forward[2] / run;
+        u.lock_latched = true;
+    }
+    if (!locked && !(run > 0.3f)) return false;
     const float cross[3]{up[1] * forward[2] - up[2] * forward[1], up[2] * forward[0] - up[0] * forward[2], up[0] * forward[1] - up[1] * forward[0]};
     const float hand = cross[0] * side[0] + cross[1] * side[1] + cross[2] * side[2] < 0 ? -1.0f : 1.0f;
-    forward[0] /= run; forward[1] = 0.0f; forward[2] /= run;
+    if (locked) { forward[0] = u.lock_heading[0]; forward[1] = 0.0f; forward[2] = u.lock_heading[2]; }
+    else { forward[0] /= run; forward[1] = 0.0f; forward[2] /= run; }
     up[0] = 0.0f; up[1] = 1.0f; up[2] = 0.0f;
     side[0] = hand * (up[1] * forward[2] - up[2] * forward[1]);
     side[1] = 0.0f;
@@ -1055,7 +1068,7 @@ void freestyle_root_updated(std::uintptr_t rig) noexcept {
 }
 void freestyle_root_updating(std::uintptr_t rig) noexcept {
     auto& u = root_upright();
-    const bool held = u.hold.load(std::memory_order_relaxed) && rig && rig == u.turn_rig.load(std::memory_order_relaxed);
+    const bool held = (u.hold.load(std::memory_order_relaxed) || u.heading_lock.load(std::memory_order_relaxed)) && rig && rig == u.turn_rig.load(std::memory_order_relaxed);
     if (held || (u.rig.load(std::memory_order_relaxed) == rig && GetTickCount64() - u.seen.load(std::memory_order_relaxed) <= 200)) (void)upright_root_source(rig);
     // The anti-casper: the game's mirror turns the skater over to the board's other side (the casper as seen from
     // behind: owner, 2026-10-14); turned half round about the vertical as well, the skater faces its own side again
@@ -1074,6 +1087,10 @@ void freestyle_root_updating(std::uintptr_t rig) noexcept {
 void set_freestyle_root_hold(std::uintptr_t rig, bool on) noexcept {
     root_upright().turn_rig.store(rig, std::memory_order_relaxed);
     root_upright().hold.store(on, std::memory_order_relaxed);
+}
+void set_freestyle_root_heading_lock(std::uintptr_t rig, bool on) noexcept {
+    if (on) root_upright().turn_rig.store(rig, std::memory_order_relaxed);
+    root_upright().heading_lock.store(on, std::memory_order_relaxed);
 }
 void set_freestyle_root_turn(std::uintptr_t rig, bool on) noexcept {
     root_upright().turn_rig.store(rig, std::memory_order_relaxed);

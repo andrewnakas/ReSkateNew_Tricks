@@ -33,6 +33,8 @@ void register_tricks_commands(Commands &registry) {
         {"balance", "The casper's balance blend", "<0 to 1> | stick | off"},
         {"rootup", "Hold the skater upright in a held pose", "on|off|watch"},
         {"anti", "The anti-casper (the casper mirrored and turned), caught with the right stick resting up", "on|off | steady <ms> | turn on|off"},
+        {"antistyle", "The anti casper as a nose manual with the board turned over, or the mirrored casper", "nose|mirror | pitch <degrees>"},
+        {"primopop", "A primo's flick-out as the game's own ollie and flip (or through the casper)", "on|off"},
         {"height", "The casper's height on how far the right stick is out (edge low, toward the middle high)", "on|off | <edge> <middle> [inner]"},
         {"riderframe", "Give the rider's drives to the deck an upright deck in a held pose", "on|off|watch | feet game|turn|all"},
         {"level2", "Keep a held pose level and on one heading", "on|off | delay <ms>"},
