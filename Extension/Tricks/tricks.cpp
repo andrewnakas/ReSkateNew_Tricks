@@ -3,6 +3,7 @@
 #include "tricks_board.h"
 #include "tricks_view.h"
 #include "tricks_score_hud.h"
+#include "tricks_scan.h"
 #include "Engine/Core/Json/json.h"
 #include <shlobj.h>
 #include "Extension/Trainer/trainer.h"
@@ -215,6 +216,9 @@ struct Runtime {
     std::array<bool, trick_count> trick_on = [] { std::array<bool, trick_count> a{}; a.fill(true); return a; }();
     std::array<bool, family_count> family_on = [] { std::array<bool, family_count> a{}; a.fill(true); return a; }();
     bool score_feed{true};
+    bool scan_auto{};
+    float scan_last{-1};
+    std::uint64_t scan_next_read{};
     bool store_loaded{}, view_due{true}, save_due{};
     std::uint64_t next_save{}; // the skater (root) turned half round while mirrored: `tricks anti turn on|off`
     std::uint32_t anti_steady_ms{150}; // the stick passes the top during a flick: it has to rest there this long
@@ -681,6 +685,22 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
     }
     if (r.view_due) publish_view(r);
     update_trick_entries(base);
+    // <dev> `tricks scan auto`: every change of the HUD's line score narrows the search; changes logged throughout.
+    if (r.scan_auto && now >= r.scan_next_read) {
+        r.scan_next_read = now + 50;
+        float line{};
+        if (read_hud_line_score(base, line) && line != r.scan_last) {
+            r.scan_last = line;
+            std::string step;
+            if (line > 0 && !scan_busy()) {
+                const auto left = scan_left();
+                if (left >= 1000000) step = scan_command("new", line);
+                else if (left > 8) step = scan_command("next", line);
+                else step = scan_command("list", 0);
+            }
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: scan auto: line score {} at {} ms. {}", line, now % 100000, step);
+        }
+    }
     if (r.save_due && now >= r.next_save) {
         r.next_save = now + 500;
         save_store(r);
@@ -1749,6 +1769,28 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         if (arguments.size() != 2) return "usage: tricks set <setting> <value>";
         if (!set_setting(r, arguments[0], std::atof(arguments[1].c_str()))) return "error: no setting " + arguments[0] + ".";
         return std::format("{} = {:.2f}.", arguments[0], setting_value(r, arguments[0]));
+    }
+    if (verb == "scan") {
+        // <dev> tricks scan hud | next hud | <value> | next <value> | list | status | add <value>
+        // "hud" takes the line score the score HUD shows right now.
+        if (arguments.empty()) return "usage: tricks scan hud | next hud | <value> | next <value> | list | status | add <value>";
+        const bool next = arguments[0] == "next";
+        const std::string what = next ? "next" : arguments[0];
+        if (what == "list" || what == "status") return scan_command(what, 0);
+        if (what == "auto") {
+            r.scan_auto = arguments.size() < 2 || arguments[1] != "off";
+            r.scan_last = -1;
+            return r.scan_auto ? "Scan follows the line score." : "Scan auto off.";
+        }
+        if (what == "add" || what == "addi" || what == "addf") return arguments.size() > 1 ? scan_command(what, std::atof(arguments[1].c_str())) : "usage: tricks scan add|addi|addf <value>";
+        const std::string source = next ? (arguments.size() > 1 ? arguments[1] : "hud") : arguments[0];
+        double value{};
+        if (source == "hud") {
+            float line{};
+            if (!read_hud_line_score(r.base, line)) return "error: the score HUD is not there.";
+            value = line;
+        } else value = std::atof(source.c_str());
+        return std::format("(line score {}) ", value) + scan_command(next ? "next" : "new", value);
     }
     if (verb == "score") {
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks score on|off";

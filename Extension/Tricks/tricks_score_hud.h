@@ -15,6 +15,8 @@ namespace dingosdk::tricks {
 void queue_trick_entry(const std::string &name, int points) noexcept;
 // Adds what is queued and frees entries the game has dropped from its list. Game (client) thread, every tick.
 void update_trick_entries(std::uintptr_t base) noexcept;
+// <dev> The line score the score HUD shows (ScoringHUDViewModel 0x40bff667, a float). Game (client) thread.
+bool read_hud_line_score(std::uintptr_t base, float &value) noexcept;
 // <dev> What happened, for the logs.
 std::string trick_entries_status();
 } // namespace dingosdk::tricks

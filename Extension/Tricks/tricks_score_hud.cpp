@@ -174,6 +174,18 @@ void update_trick_entries(std::uintptr_t base) noexcept {
         }
     } catch (...) { ++s.failures; s.pending.clear(); }
 }
+bool read_hud_line_score(std::uintptr_t base, float &value) noexcept {
+    bool found = false;
+    try {
+        with_ui_models(base, [&](const menu_data::Context &context) {
+            const auto roots = context.roots({corner::score_view_schema});
+            if (roots.empty()) return;
+            value = menu_data::read<float>(context.address(context.field(roots.front().model, 0x40bff667)));
+            found = true;
+        });
+    } catch (...) { return false; }
+    return found;
+}
 std::string trick_entries_status() {
     const auto &s = state();
     return std::format("trick list: {} added, {} dropped by the game, {} failed, {} live", s.added, s.dropped, s.failures, s.owned.size());

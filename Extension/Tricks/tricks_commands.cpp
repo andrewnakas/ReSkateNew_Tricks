@@ -14,6 +14,7 @@ void register_tricks_commands(Commands &registry) {
         {"enable", "Switch one of the mod's tricks on or off (ids: tricks_view.h)", "<trick> on|off"},
         {"family", "Switch a family of tricks on or off: poses, flickouts, ground, nocomply, air", "<family> on|off"},
         {"set", "Change a trick setting (zone_left, height_edge, snap_casper, out_spin_ms, ...)", "<setting> <value>"},
+        {"scan", "Search the game's memory for a value, e.g. the line score (diagnostic)", "hud | next hud | <value> | next <value> | list | status | add <value>"},
         {"score", "Add the mod's tricks to the game's score line", "on|off"},
         {"freestyle", "Ride in a casper or primo (the game's own freestyle animations)", "casper|primo|primo2|off"},
         {"casperflip", "Flip out of a casper", "[FreeStyleFlipTrick value]"},
