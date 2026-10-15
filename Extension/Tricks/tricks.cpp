@@ -158,6 +158,7 @@ struct Runtime {
     bool grab_hand_back{};
     std::uint64_t flip_grab_started{};
     std::uint32_t flip_grab_ms{900}; // slower: the owner could not see the catch at 520; one fluid motion at 900
+    std::uint32_t flip_grab_spin_ms{420}; // the flip into the game's grab (a retail flip's length)
     float flip_grab_rise{0.55f};  // metres the board rises at the top of a flip grab (from the feet to the waist)
     float flip_grab_reach{0.25f};  // and out in front of the skater (toward the toes, the skater's side row)
     float grab_rigid{40.0f};      // the board's drive strength through a flip grab's path
@@ -278,6 +279,8 @@ struct Runtime {
     int air_flip_seen{}; // <dev> the game's flip seen in this air (the stock check at the landing)
     std::uint32_t flickit_spin_ms{450};
     std::uint32_t out_spin_ms{320}; // a flick-out's flip
+    std::uint64_t out_spin_at{};
+    std::uint32_t out_spin_len{};
     // The Tricks page (Insert menu): each trick and each family switched on or off, kept in tricks.json.
     std::array<bool, trick_count> trick_on = [] { std::array<bool, trick_count> a{}; a.fill(true); return a; }();
     std::array<bool, family_count> family_on = [] { std::array<bool, family_count> a{}; a.fill(true); return a; }();
@@ -300,6 +303,8 @@ struct Runtime {
     int manual_kind{};   // 1 tail, 2 nose: the manual being ridden (kept through its brake)
     bool manual_seen_brake{};
     std::uint64_t zone_since{}, shuv_down_at{}, shuv_side_at{};
+    bool gs_rim{};           // the ground shuvit's stroke went out to the rim (the game's pop shuvit, not this)
+    float gs_peak{}, gs_rim_at{0.88f};
     int shuv_side{};
     bool trace{true};
     std::uint64_t primo_out_at{};
@@ -1204,21 +1209,35 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: ground shuvit gesture: physics {}, pose {}, leaving {}, phase {}, {} ms since the air, stick at {:.0f}.", physics.valid ? static_cast<int>(physics.state) : -1,
                              static_cast<int>(r.freestyle), r.leaving, r.gs_phase, now - r.air_last, angle);
             } else if (!modifier) r.gs_logged = false;
-            if (r.ground_shuvs && trick_enabled(r, "groundshuv") && physics.valid && physics.state == 100 && r.freestyle == Freestyle::off && !r.leaving && !r.gs_phase && now - r.air_last > 500) {
-                if (held > 0.8f && angle >= 250.0f && angle <= 292.0f) {
-                    r.shuv_down_at = now;
-                } else if (held > 0.8f && modifier && ((angle > 296.0f && angle <= 338.0f) || (angle >= 205.0f && angle < 246.0f))) {
-                    if (r.shuv_side != 0 || now - r.shuv_down_at < 700) {
-                        r.shuv_side = angle > 270.0f ? 1 : -1;
+            // The owner's pick (2026-10-15): a small flick with no click. The stick goes part way down and rolls over to
+            // a side, never out to its rim, and is let go: the click + stick down was the casper's, which took it first
+            // (physics 103 in all of the owner's tries). A stroke that reaches the rim is the game's pop shuvit
+            // (a part-way stroke never popped: run q1).
+            if (r.ground_shuvs && trick_enabled(r, "groundshuv") && !modifier && physics.valid && physics.state == 100 && r.freestyle == Freestyle::off && !r.leaving && !r.gs_phase && now - r.air_last > 500) {
+                if (held < 0.2f) {
+                    if (r.shuv_side != 0 && !r.gs_rim && now - r.shuv_side_at < 350 && state_objects_known()) {
+                        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: ground shuvit flick ({}, peak {:.2f}).", r.shuv_side > 0 ? "FS" : "BS", r.gs_peak);
+                        start_ground_shuv(r, now, r.shuv_side > 0);
+                    }
+                    r.shuv_side = 0;
+                    r.shuv_down_at = 0;
+                    r.gs_rim = false;
+                    r.gs_peak = 0;
+                } else {
+                    r.gs_peak = std::max(r.gs_peak, held);
+                    if (held > r.gs_rim_at) r.gs_rim = true; // out to the rim: the game's own trick
+                    else if (held >= 0.3f && angle >= 240.0f && angle <= 300.0f) r.shuv_down_at = now;
+                    else if (held >= 0.3f && r.shuv_down_at && now - r.shuv_down_at < 500 && ((angle > 300.0f || angle <= 20.0f) || (angle >= 160.0f && angle < 240.0f))) {
+                        r.shuv_side = angle > 270.0f || angle <= 20.0f ? 1 : -1;
                         r.shuv_side_at = now;
                     }
-                } else if (held > 0.8f) {
-                    r.shuv_side = 0;
-                } else if (held < 0.3f && r.shuv_side != 0) {
-                    if (now - r.shuv_side_at < 400 && state_objects_known()) start_ground_shuv(r, now, r.shuv_side > 0);
-                    r.shuv_side = 0;
                 }
-            } else r.shuv_side = 0;
+            } else {
+                r.shuv_side = 0;
+                r.shuv_down_at = 0;
+                r.gs_rim = false;
+                r.gs_peak = 0;
+            }
             // Caught in the air: the board is turned to the pose there (on its side for a primo, upside down for a
             // casper) and moved down out of the feet, and stays so until the game's own pose has it on the ground.
             if (r.catch_turn && !r.air_pose && in_air && r.by_hold && r.freestyle != Freestyle::off) {
@@ -1513,9 +1532,14 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     // Timed by the whole turn (about 180 for the roll back over), so a half flip is not slowed to a
                     // big flip's time nor a big one rushed (the owner: tre from a casper "does way too much").
                     const float turn = std::max(180.0f + std::abs(r.out_roll), std::abs(r.out_yaw));
-                    const auto ms = static_cast<std::uint32_t>((260.0f + 0.65f * turn) * static_cast<float>(r.out_spin_ms) / 320.0f);
-                    start_air_spin(r, r.out_roll, r.out_yaw, 0, ms, false, false, r.out_dir);
+                    // Done before the touchdown (the casper's hop is short: a landing mid-turn finished the rest in 90 ms
+                    // and threw the skater, the owner 2026-10-15), with no dip (the hop is a few centimetres off the
+                    // ground: a dipped board went into it, "fall through the map").
+                    const auto ms = static_cast<std::uint32_t>((180.0f + 0.5f * turn) * static_cast<float>(r.out_spin_ms) / 320.0f);
+                    start_air_spin(r, r.out_roll, r.out_yaw, 0, ms, true, false, r.out_dir);
                     r.out_spinning = true;
+                    r.out_spin_at = now;
+                    r.out_spin_len = ms;
                     if (r.out_legs && r.out_legs_flip) {
                         if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
                         (void)write_state_at(base, r.s_current_flip, 1, r.out_legs_flip);
@@ -1528,6 +1552,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 r.out_until = 0;
             } else if (r.out_until && now >= r.out_until) r.out_until = 0;
             if (r.out_spinning && on_ground) {
+                // <dev> How far the turn was at the touchdown (wall clock: a guide).
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flick-out down {} ms into its {} ms turn (still turning: {}).", now - r.out_spin_at, r.out_spin_len, kinematic_spin_running());
                 stop_board_spin();
                 r.out_spinning = false;
             }
@@ -1616,51 +1642,37 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     r.flip_grab_until = now + r.flip_grab_ms;
                     r.flip_grab_started = now;
                     r.grab_hand_back = right;
-                    // The flip is the mod's from here (the clip's board would turn it twice): one turn of it on the way up.
+                    // The flip is the mod's from here (the clip's board would turn it twice), played on the game's own board
+                    // for its grab (the drive's target): the game's grab clip brings the hand to that board, so the hand
+                    // and the board meet where the game's grab has them, and nothing has to be put back under the feet
+                    // (the owner, 2026-10-15, on a path of the mod's: "the board goes through the legs and the hand does
+                    // not grab it and put it back"; the mod's writes never moved the hand). The flip turns while the
+                    // hand comes in, dipped under the tucked feet, and is done when the hand has it.
                     const int f = static_cast<int>(flip);
                     const float roll = f == 3 ? -360.0f : f == 4 || f == 7 ? 0.0f : 360.0f, yaw = f == 4 ? 180.0f : f == 7 ? -180.0f : f == 11 ? 360.0f : 0.0f;
-                    start_board_spin_kinematic(core, roll, yaw, 0, r.flip_grab_ms, 0.42f, 0.0f);
-                    set_kinematic_spin_with_pelvis(true);
-                    set_board_carry(core, r.flip_grab_ms, r.flip_grab_rise, r.flip_grab_reach, 0.42f, 0.7f);
-                    set_board_carry_hand(right ? 11 : 15, right ? r.grab_side : -r.grab_side);
-                    // (The turn is done by the top: right side up when the hand takes it.)
+                    start_board_spin_kinematic(core, roll, yaw, 0, r.flip_grab_spin_ms, 1.0f, r.flip_dip);
+                    set_kinematic_spin_follow(true);
                     if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
                     (void)write_state_at(base, r.s_flip_intent, 1, 0);
-                    set_feet_free(core, r.flip_grab_ms + 60, r.feet_free);
-                    // The grabbing arm lets go of the clip's pose for the catch, and the pelvis drive comes down for the tuck (their motors beat the
-                    // mod's pull: the hand stayed 0.6 m off the board), the pelvis lowered toward the board; eased back from
-                    // the way down to the feet.
-                    set_limb_free(core, r.flip_grab_ms * 7 / 10, r.grab_arm_mask ? r.grab_arm_mask : right ? 1 : 2, r.grab_limbs, r.grab_tuck);
+                    set_feet_free(core, r.flip_grab_spin_ms + 60, r.feet_free);
+                    // The vert tuck: the pelvis drive lowered toward the board, the knees come up (the arms stay the
+                    // game's grab).
+                    set_limb_free(core, r.flip_grab_ms, 0, 1.0f, r.grab_tuck);
                     score_trick(right ? "flipgrab" : "flipgrab", std::format("{} {}", flip_name(static_cast<std::uint32_t>(flip)), right ? "Indy" : "Melon"));
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab (flip {}, {} hand).", flip, right ? "back" : "front");
                 }
             }
             if (r.flip_grab_on) {
-                // The path is timed in the game's time (the board's own play), not the wall clock.
-                if (r.flip_grab_until < now + 20000 && !kinematic_spin_running() && now > r.flip_grab_started + 50) r.flip_grab_until = std::min(r.flip_grab_until, now);
-                else if (r.flip_grab_until < now + 20000 && kinematic_spin_running()) r.flip_grab_until = std::max(r.flip_grab_until, now + 20);
-                // Held to the landing while the trigger is: the hand stays on the board at the feet (the grab held).
-                if (in_air && now >= r.flip_grab_until && (r.grab_hand_back ? right : left)) {
-                    if (r.flip_grab_until + 30000 > now) { // the path is over: the board is the clip's again, the hand stays
-                        stop_board_spin();
-                        r.flip_grab_until = now + 30000;
-                    }
-                    if (core) {
-                        set_hand_pull(core, 80, r.grab_hand_back ? 11 : 15, r.grab_hand_back ? 12 : 16, r.grab_hand_back ? r.grab_side : -r.grab_side, 0.03f, 0.0f, r.grab_gain, 0.0f);
-                        set_limb_free(core, 80, r.grab_hand_back ? 1 : 2, r.grab_limbs, 0.0f);
-                    }
-                } else if (!in_air || now >= r.flip_grab_until) {
-                    float gap{}, board_gap{};
-                    const auto steps = take_hand_pull(gap);
-                    const auto carried = take_board_carry(board_gap);
-                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab over ({}): {} steps pulled, the hand {:.2f} m from the board; {} steps carried, the deck {:.2f} m off its path.",
-                                 in_air ? "time" : "landed", steps, gap, carried, board_gap);
-                    if (core) set_board_carry(core, 0, 0, 0, 0, 0);
+                // The tuck is held while the trigger is (eased out over 0.15 s when let go); the board is the game's grab
+                // once the flip has turned.
+                const bool holding = r.grab_hand_back ? right : left;
+                if (in_air && holding && core) set_limb_free(core, 80, 0, 1.0f, r.grab_tuck);
+                if (!in_air) {
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab landed {} ms after the catch (the flip {}).", now - r.flip_grab_started,
+                                 kinematic_spin_running() ? "still turning" : "done");
                     r.flip_grab_on = false;
                     stop_board_spin();
-                    if (core) set_hand_pull(core, 0, -1, -1, 0, 0, 0, 0, 0);
                 }
-                // (While the path runs, the carry moves the hand with the board: one motion, not two springs meeting.)
             }
         }
         // <dev> Grab while grinding (experiment).
@@ -2604,6 +2616,8 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             else if (arguments[0] == "reach") r.flip_grab_reach = std::clamp(v, -0.8f, 0.8f);
             else if (arguments[0] == "rigid") r.grab_rigid = std::clamp(v, 0.0f, 2000.0f);
             else if (arguments[0] == "ms") r.flip_grab_ms = static_cast<std::uint32_t>(std::clamp(v, 150.0f, 1500.0f));
+            else if (arguments[0] == "spin") r.flip_grab_spin_ms = static_cast<std::uint32_t>(std::clamp(v, 150.0f, 1500.0f));
+            else if (arguments[0] == "tuck") r.grab_tuck = std::clamp(v, 0.0f, 0.5f);
         }
         float gap{};
         const auto steps = take_hand_pull(gap);
