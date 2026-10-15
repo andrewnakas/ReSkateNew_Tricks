@@ -31,6 +31,7 @@
 // (Extension/UI/Overlay/input_capture.cpp).
 extern "C" void DingoSDKOverlayTricksPad(void *gamepad);
 extern "C" void DingoSDKOverlayTricksMask();
+extern "C" std::uint32_t DingoSDKOverlayTricksMaskedPolls();
 extern "C" void DingoSDKOverlayTricksAutoMask();
 extern "C" void DingoSDKOverlayTricksMaskLeft();
 // <dev> The scripted controller (Extension/UI/Overlay/input_capture.cpp), for test runs.
@@ -176,6 +177,12 @@ struct Runtime {
     std::uint64_t centre_since{}, edge_since{}, edge_last{}, air_click_at{};
     float edge_x{}, edge_y{};
     float out_roll{}, out_yaw{};
+    // A casper's flick-out turned from the pose (the owner, 2026-10-14): the roll back over is the flip. out_dir is the
+    // way it rolls back (1 kickflip, -1 heelflip, 0 the shorter), out_roll then only what comes on top of it.
+    bool out_pose{};
+    int out_dir{};
+    int flickout_flip{0}; // kick / heel: 0 a half flip, 1 bigger (one and a half)
+    int flickout_up{0};   // stick up: 0 tre half flip, 1 tre with the bigger flip, 2 a straight half flip (no shuv)
     std::uint64_t out_until{}; // a flick out of the casper: its turn starts when the exit is in the air
     bool out_spinning{};
     bool exit_air{}; // the flip out of a casper has left the ground
@@ -260,6 +267,7 @@ struct Runtime {
     bool pop_checked{}, pop_spinning{};
     std::uint64_t nc_takeoff_at{};
     std::uint64_t takeoff_at{};
+    int air_flip_seen{}; // <dev> the game's flip seen in this air (the stock check at the landing)
     std::uint32_t flickit_spin_ms{450};
     std::uint32_t out_spin_ms{320}; // a flick-out's flip
     // The Tricks page (Insert menu): each trick and each family switched on or off, kept in tricks.json.
@@ -379,13 +387,16 @@ bool board_backwards_state(std::uintptr_t rig, int &flag, float &offset) noexcep
 // A flip in the air: the board drops under the feet as it turns and comes back up to them for the catch (the stock
 // flips' board turns well below the lifted feet; the mod's turned at the feet and went through the shoes: stills
 // 2026-10-14). A flat turn (a shuvit) drops half as far.
-void start_air_spin(const Runtime &r, float roll, float yaw, float pitch, std::uint32_t ms, bool near_ground = false, bool follow_clip = false) noexcept {
+// `pose` (not -2): turned from the board's pose as it is (a flick-out), rolled back over the way `pose` says (1, -1, 0
+// the shorter) with `roll` on top.
+void start_air_spin(const Runtime &r, float roll, float yaw, float pitch, std::uint32_t ms, bool near_ground = false, bool follow_clip = false, int pose = -2) noexcept {
     std::uintptr_t kin_core{};
     if (r.kinematic && r.rig) (void)copy_rows(r.rig + 0x4630, reinterpret_cast<float *>(&kin_core), 2);
     if (kin_core) {
-        const float kdip = near_ground ? 0.0f : pitch != 0 ? r.flip_dip * 1.5f : roll != 0 ? r.flip_dip : r.flip_dip * 0.5f;
+        const float kdip = near_ground ? 0.0f : pitch != 0 ? r.flip_dip * 1.5f : roll != 0 || pose != -2 ? r.flip_dip : r.flip_dip * 0.5f;
         start_board_spin_kinematic(kin_core, roll, yaw, pitch, ms, 1.0f, kdip);
         set_kinematic_spin_follow(follow_clip);
+        if (pose != -2) set_kinematic_spin_pose(true, pose);
         if (r.feet_free < 1.0f) set_feet_free(kin_core, ms + 60, r.feet_free);
         return;
     }
@@ -455,10 +466,14 @@ int popped_flip(const Runtime &r, std::uint64_t now, std::uint64_t window) {
 }
 // The dolphin's stroke (stick down, up, and straight back down): 1; ending on a lower diagonal (the dragon): 2, with the
 // side it ended on in `side` (-1 left, 1 right). 0: none.
-int forward_flick(const Runtime &r, std::uint64_t now, std::uint64_t window, int &side) {
+// From the nose (`nollie`): the same stroke the other way up, as the game's nollie is its ollie's flick reversed
+// (stick up, straight down, and pushed back up; ending on an upper diagonal: the nollie dragon).
+int forward_flick(const Runtime &r, std::uint64_t now, std::uint64_t window, int &side, bool nollie = false) {
     const auto v = recent_sticks(r, now, window);
+    const float sense = nollie ? -1.0f : 1.0f;
     int stage = 0; // 0 looking for down, 1 for up, 2 for the second down
-    for (const auto &s : v) {
+    for (const auto &sample : v) {
+        const Runtime::StickSample s{sample.at, sample.rx, sample.ry * sense, sample.lx};
         if (stage == 0 && s.ry < -0.6f) stage = 1;
         else if (stage == 1 && s.ry > 0.75f && std::abs(s.rx) < 0.4f) stage = 2; // straight up: a kickflip's flick is diagonal
         else if (stage == 2 && s.ry < -0.8f && std::sqrt(s.rx * s.rx + s.ry * s.ry) > 0.85f) { // pushed down, not the spring-back
@@ -490,6 +505,8 @@ double setting_value(const Runtime &r, std::string_view key) {
     if (key == "nc_spin_ms") return r.nc_spin_ms;
     if (key == "air_spin_ms") return r.air_spin_ms;
     if (key == "flickit_spin_ms") return r.flickit_spin_ms;
+    if (key == "flickout_flip") return r.flickout_flip;
+    if (key == "flickout_up") return r.flickout_up;
     return 0;
 }
 // Clamped to the setting's range; false for a key that is not a setting.
@@ -517,6 +534,8 @@ bool set_setting(Runtime &r, std::string_view key, double value) {
     else if (key == "nc_spin_ms") r.nc_spin_ms = ms;
     else if (key == "air_spin_ms") r.air_spin_ms = ms;
     else if (key == "flickit_spin_ms") r.flickit_spin_ms = ms;
+    else if (key == "flickout_flip") r.flickout_flip = static_cast<int>(ms);
+    else if (key == "flickout_up") r.flickout_up = static_cast<int>(ms);
     else return false;
     return true;
 }
@@ -1390,12 +1409,16 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         const float flick = std::atan2(r.edge_y, r.edge_x) * 180.0f / 3.14159265f;
                         r.out_roll = r.out_yaw = 0;
                         const char *turn = "Tre Flip";
+                        r.out_pose = true;
+                        r.out_dir = 0;
+                        const float bigger = r.flickout_flip ? 360.0f : 0.0f;
                         const char *id = "flick_treflip";
                         if (flick >= 150.0f || flick <= -150.0f) { r.out_yaw = 180; turn = "Pop Shuvit"; id = "flick_shuvit"; }
                         else if (flick <= 30.0f) { r.out_yaw = -180; turn = "FS Pop Shuvit"; id = "flick_fsshuvit"; }
-                        else if (flick >= 100.0f) { r.out_roll = 360; turn = "Kickflip"; id = "flick_kickflip"; }
-                        else if (flick < 80.0f) { r.out_roll = -360; turn = "Heelflip"; id = "flick_heelflip"; }
-                        else { r.out_roll = 360; r.out_yaw = 360; }
+                        else if (flick >= 100.0f) { r.out_dir = 1; r.out_roll = bigger; turn = "Kickflip"; id = "flick_kickflip"; }
+                        else if (flick < 80.0f) { r.out_dir = -1; r.out_roll = -bigger; turn = "Heelflip"; id = "flick_heelflip"; }
+                        else if (r.flickout_up == 2) { turn = "Half Flip"; } // straight back over, no shuv
+                        else { r.out_dir = 1; r.out_roll = r.flickout_up == 1 ? 360.0f : 0.0f; r.out_yaw = 360; }
                         r.edge_brief = false;
                         // A flick-out switched off on the Tricks page: the swipe does nothing and the pose stays.
                         if (!trick_enabled(r, id)) {
@@ -1415,6 +1438,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                             r.pop_until = now + 1500;
                             r.pop_started = 0;
                             r.out_roll = r.out_yaw = 0; // the game's own flip: no turn of ours
+                            r.out_pose = false;
                             r.out_until = 0;
                             leave(0, 1500);
                         } else {
@@ -1458,7 +1482,14 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             }
             // The flick's turn, once the casper's flip out is in the air; dropped again on the ground.
             if (r.out_until && in_air) {
-                if (r.out_roll != 0 || r.out_yaw != 0) {
+                if (r.out_pose) {
+                    // Timed by the whole turn (about 180 for the roll back over), so a half flip is not slowed to a
+                    // big flip's time nor a big one rushed (the owner: tre from a casper "does way too much").
+                    const float turn = std::max(180.0f + std::abs(r.out_roll), std::abs(r.out_yaw));
+                    const auto ms = static_cast<std::uint32_t>((260.0f + 0.65f * turn) * static_cast<float>(r.out_spin_ms) / 320.0f);
+                    start_air_spin(r, r.out_roll, r.out_yaw, 0, ms, false, false, r.out_dir);
+                    r.out_spinning = true;
+                } else if (r.out_roll != 0 || r.out_yaw != 0) {
                     start_air_spin(r, r.out_roll, r.out_yaw, 0, r.out_spin_ms);
                     r.out_spinning = true;
                 }
@@ -1906,21 +1937,53 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         const bool air = physics.valid && physics.state >= 200 && physics.state < 300;
         const bool ground = physics.valid && physics.state >= 100 && physics.state <= 105;
         if (ground) {
+            // <dev> Stock check (the owner: plain kickflips and pop shuvs stay fully stock): what of the mod's touched
+            // this air. A stock flip must show 0 masked polls and 0 hook turns (board play and feet are in the watch).
+            if (r.takeoff_at) {
+                std::uint32_t seen{}, turned{};
+                board_hook_counts(seen, turned);
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: stock check: flip {}, {} masked polls, {} hook turns, mod trick {}.", r.air_flip_seen,
+                             DingoSDKOverlayTricksMaskedPolls(), turned, r.pop_spinning || r.out_spinning || r.flip_grab_on || r.nc_trick ? "yes" : "no");
+                r.air_flip_seen = 0;
+            }
             if (r.pop_spinning) stop_board_spin();
             r.pop_spinning = false;
             r.pop_checked = false;
             r.takeoff_at = 0;
-        } else if (air && !r.takeoff_at) r.takeoff_at = now;
+        } else if (air && !r.takeoff_at) {
+            r.takeoff_at = now;
+        }
+        if (air && r.s_current_flip) {
+            double f{};
+            if (read_state_at(base, r.s_current_flip, 1, f) && f != 0) r.air_flip_seen = static_cast<int>(f);
+        }
         if (air && !r.pop_checked && r.takeoff_at && r.freestyle == Freestyle::off && !r.by_hold && !r.nc_trick && !r.leaving && !r.out_spinning) {
             // The dolphin's second stroke (the stick back down after the pop) is not the game's: it read it as a flip
             // and played a 360 flip first (the owner, 2026-10-14). Hidden from the game while it could still come.
-            {
-                bool up_seen = false;
-                for (const auto &sample : recent_sticks(r, now, 500)) up_seen = up_seen || (sample.ry > 0.75f && std::abs(sample.rx) < 0.4f);
-                if (up_seen && (trick_enabled(r, "dolphin") || trick_enabled(r, "dragon"))) DingoSDKOverlayTricksMask();
+            // Only on a plain pop (the game's flip still none): a kickflip's flick passes through the straight-up cone too,
+            // and the mask then hid the stick in its air (the owner: plain kickflips and pop shuvs stay fully stock).
+            if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
+            double game_flip{};
+            const bool plain_pop = r.s_current_flip && read_state_at(base, r.s_current_flip, 1, game_flip) && game_flip == 0;
+            if (plain_pop && (trick_enabled(r, "dolphin") || trick_enabled(r, "dragon"))) {
+                bool straight_seen = false; // the middle stroke: straight up (from the tail) or straight down (from the nose)
+                for (const auto &sample : recent_sticks(r, now, 500)) straight_seen = straight_seen || (std::abs(sample.ry) > 0.75f && std::abs(sample.rx) < 0.4f);
+                if (straight_seen) DingoSDKOverlayTricksMask();
             }
             int side = 0;
-            const int forward = forward_flick(r, now, 700, side);
+            int forward = plain_pop ? forward_flick(r, now, 700, side) : 0;
+            bool nollie = false;
+            if (!forward && plain_pop) {
+                forward = forward_flick(r, now, 700, side, true);
+                nollie = forward != 0;
+            }
+            // Riding fakie, or popped from the nose, the board flips end over end backwards (the owner, 2026-10-14);
+            // the turn keeps the stick's side. Both at once (switch nollie) is forward again.
+            double fakie_value{};
+            if (forward && !r.s_riding_fakie) r.s_riding_fakie = find_state(base, "Animation/Dingo/Bool.Physics.RidingFakie");
+            const bool fakie = forward && r.s_riding_fakie && read_state_at(base, r.s_riding_fakie, 0, fakie_value) && fakie_value != 0;
+            const float pitch = fakie != nollie ? -360.0f : 360.0f;
+            const char *stance = fakie && nollie ? "Switch Nollie " : fakie ? "Fakie " : nollie ? "Nollie " : "";
             const char *id = nullptr;
             std::string name;
             const auto plain_ollie = [&] { // the game's own flip trick set back to none: the board's turn is the mod's
@@ -1935,15 +1998,15 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             // the dragon a forward 360 (one front flip and a full turn of the board: the nose goes all the way round in
             // both).
             if (forward == 1 && trick_enabled(r, "dolphin")) {
-                start_air_spin(r, 0, side > 0 ? -180.0f : 180.0f, 360, r.flickit_spin_ms, false, true);
+                start_air_spin(r, 0, side > 0 ? -180.0f : 180.0f, pitch, r.flickit_spin_ms, false, true);
                 flip_legs(r, base);
                 id = "dolphin";
-                name = "Dolphin Flip";
+                name = std::format("{}Dolphin Flip", stance);
             } else if (forward == 2 && trick_enabled(r, "dragon")) {
-                start_air_spin(r, 0, side > 0 ? -360.0f : 360.0f, 360, r.flickit_spin_ms, false, true);
+                start_air_spin(r, 0, side > 0 ? -360.0f : 360.0f, pitch, r.flickit_spin_ms, false, true);
                 flip_legs(r, base);
                 id = "dragon";
-                name = "Dragon Flip";
+                name = std::format("{}Dragon Flip", stance);
             } else if (r.big_spin && trick_enabled(r, "bigspin")) {
                 if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
                 double current{};

@@ -1105,6 +1105,11 @@ struct KinematicSpin {
     // board at the start levelled: no comply and flick-it flips (their clip's board swung far round, and the board
     // snapped on to it when let go: 2026-10-14).
     std::atomic<bool> follow{};
+    // The base is the board as it was at the start, not levelled: a pose's flick-out (its roll already brings the
+    // board right side up: the levelling's half turn came on top of it, the owner 2026-10-14 "does way too much").
+    std::atomic<bool> pose{};
+    std::atomic<int> pose_dir{}; // the roll back over: 1 the roll's positive way, -1 the other, 0 the shorter
+    float pose_roll{};           // physics thread: the roll back over plus the asked roll (`roll`), degrees
     // Physics thread only: a landing before the end finishes the turn quickly instead of at once.
     bool finishing{};
     float finish_from{};
@@ -1213,6 +1218,15 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
                 const float d[3]{at[0] - centre[0], at[1] - centre[1], at[2] - centre[2]};
                 for (int j = 0; j < 3; ++j) k.local_at[i][j] = d[0] * k.rows0[j][0] + d[1] * k.rows0[j][1] + d[2] * k.rows0[j][2];
             }
+            if (k.pose.load(std::memory_order_relaxed)) {
+                // The roll about the deck's own length that brings its up row nearest the world's up (as kin_turn rolls
+                // side into up: up' = c up - s side), taken the asked way round, plus the asked roll.
+                float back = std::atan2(-k.rows0[0][1], k.rows0[1][1]) * 57.2958f;
+                const int dir = k.pose_dir.load(std::memory_order_relaxed);
+                if (dir > 0 && back < 0) back += 360.0f;
+                if (dir < 0 && back > 0) back -= 360.0f;
+                k.pose_roll = back + k.roll.load(std::memory_order_relaxed);
+            }
             k.last_offset = 0;
             k.finishing = false;
             k.started = true;
@@ -1229,7 +1243,7 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
                 up[c] = bt_follow.rows[static_cast<std::size_t>(3 + c)].load(std::memory_order_relaxed);
                 fwd[c] = bt_follow.rows[static_cast<std::size_t>(6 + c)].load(std::memory_order_relaxed);
             }
-        } else {
+        } else if (!k.pose.load(std::memory_order_relaxed)) {
             float axis_raw[3]{-up[2], 0.0f, up[0]}; // up x (0,1,0): the turn that brings the up row to the world's up
             float s = std::sqrt(axis_raw[0] * axis_raw[0] + axis_raw[2] * axis_raw[2]);
             // Upside down (a pose's flick-out): no tilt to take out, so the board rolls back over along its length.
@@ -1299,7 +1313,7 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
             const float e = kin_ease(q, k.ease_in.load(std::memory_order_relaxed), k.ease_slow.load(std::memory_order_relaxed));
             if (const float a = k.yaw.load(std::memory_order_relaxed) * e; a != 0) kin_turn(fwd, side, a);
             if (const float a = k.pitch.load(std::memory_order_relaxed) * e; a != 0) kin_turn(up, fwd, a);
-            if (const float a = k.roll.load(std::memory_order_relaxed) * e; a != 0) kin_turn(side, up, a);
+            if (const float a = (k.pose.load(std::memory_order_relaxed) ? k.pose_roll : k.roll.load(std::memory_order_relaxed)) * e; a != 0) kin_turn(side, up, a);
         }
         // Under the feet as it turns: down and back up again (the place is the physics', moved by the change).
         const float offset = -k.dip.load(std::memory_order_relaxed) * std::sin(p * 3.14159265358979f);
@@ -1847,9 +1861,14 @@ void set_board_target_rows(const float* rows) noexcept {
     bt.at.store(GetTickCount64(), std::memory_order_relaxed);
 }
 void set_kinematic_spin_follow(bool follow) noexcept { kinematic_spin().follow.store(follow, std::memory_order_relaxed); }
+void set_kinematic_spin_pose(bool pose, int dir) noexcept {
+    kinematic_spin().pose_dir.store(dir, std::memory_order_relaxed);
+    kinematic_spin().pose.store(pose, std::memory_order_relaxed);
+}
 void set_kinematic_spin(std::uintptr_t core, std::uint32_t milliseconds, float roll, float yaw, float pitch, float top, float ease_in, float ease_slow, float dip) noexcept {
     auto& k = kinematic_spin();
     k.follow.store(false, std::memory_order_relaxed);
+    k.pose.store(false, std::memory_order_relaxed);
     k.start.store(0, std::memory_order_release);
     k.finish_now.store(false, std::memory_order_relaxed);
     if (!milliseconds) return;

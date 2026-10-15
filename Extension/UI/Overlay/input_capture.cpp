@@ -617,6 +617,7 @@ struct TricksPad {
     // The left stick hidden too (a held pose: the thumb holding the click down cannot keep the stick still, and the
     // game steers and leans the skater with it).
     std::atomic<std::uint64_t> left_until{};
+    std::atomic<std::uint32_t> changed{}; // <dev> recorded polls the masks changed (a stock trick must see none)
 };
 TricksPad& tricks_pad() { static auto* value = new TricksPad; return *value; }
 // XInput exports can forward through one another, so one poll can pass through the hook more than once: the
@@ -633,11 +634,13 @@ void tricks_filter(XINPUT_GAMEPAD& pad, bool record) noexcept {
     }
     const auto now = GetTickCount64();
     if (now < t.left_until.load(std::memory_order_relaxed)) {
+        if (record && (pad.sThumbLX || pad.sThumbLY)) t.changed.fetch_add(1, std::memory_order_relaxed);
         pad.sThumbLX = 0;
         pad.sThumbLY = 0;
     }
     const bool held = (pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0 || pad.bLeftTrigger > 128;
     if (now >= t.mask_until.load(std::memory_order_relaxed) && !(held && now < t.auto_until.load(std::memory_order_relaxed))) return;
+    if (record && (held || pad.sThumbRX || pad.sThumbRY)) t.changed.fetch_add(1, std::memory_order_relaxed);
     pad.wButtons = static_cast<WORD>(pad.wButtons & ~XINPUT_GAMEPAD_LEFT_THUMB);
     pad.sThumbRX = 0;
     pad.sThumbRY = 0;
@@ -722,6 +725,9 @@ extern "C" void DingoSDKOverlayTricksMaskLeft() {
 }
 extern "C" void DingoSDKOverlayTricksAutoMask() {
     dingosdk::overlay::detail::tricks_pad().auto_until.store(GetTickCount64() + 300, std::memory_order_relaxed);
+}
+extern "C" std::uint32_t DingoSDKOverlayTricksMaskedPolls() {
+    return dingosdk::overlay::detail::tricks_pad().changed.exchange(0, std::memory_order_relaxed);
 }
 extern "C" void DingoSDKOverlayTricksMask() {
     dingosdk::overlay::detail::tricks_pad().mask_until.store(GetTickCount64() + 500, std::memory_order_relaxed);

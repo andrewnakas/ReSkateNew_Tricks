@@ -82,6 +82,8 @@ inline constexpr SettingInfo setting_catalog[]{
     {"slide", Family::poses, "Slide slowdown", "Speed a held pose scrubs off each second", 0, 10, 0.1f, "%.1f m/s"},
     {"rigid", Family::poses, "Board hold", "How firmly a held pose's board keeps its pose (the game's own is 1)", 1, 100, 1, "%.0f"},
     {"out_spin_ms", Family::flickouts, "Flick-out flip time", "How long the board takes to flip after a flick-out", 150, 800, 10, "%.0f ms"},
+    {"flickout_flip", Family::flickouts, "Flick-out flip size", "Kickflip / heelflip out of a casper: 0 a half flip (the roll back over is the flip), 1 one and a half", 0, 1, 1, "%.0f"},
+    {"flickout_up", Family::flickouts, "Flick-out stick up", "0 tre half flip, 1 tre with the bigger flip, 2 a straight half flip (no shuv)", 0, 2, 1, "%.0f"},
     {"exit_guard_ms", Family::flickouts, "Exit guard", "How long a way out of a pose is kept on the board at most", 500, 4000, 100, "%.0f ms"},
     {"groundshuv_ms", Family::ground, "Ground shuvit time", "How long the board takes to turn", 200, 800, 10, "%.0f ms"},
     {"groundshuv_hop", Family::ground, "Ground shuvit lift", "How far the board comes off the ground in the middle of the turn", 0, 0.2f, 0.01f, "%.2f m"},

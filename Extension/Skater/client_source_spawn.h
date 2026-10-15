@@ -79,6 +79,7 @@ void set_kinematic_spin(std::uintptr_t core, std::uint32_t milliseconds, float r
 void finish_kinematic_spin() noexcept;
 // For the spin just set: turned on top of the game's own board for its clip (the drive's target) each step.
 void set_kinematic_spin_follow(bool follow) noexcept;
+void set_kinematic_spin_pose(bool pose, int dir) noexcept;
 // The board's drive target (rows side, up, forward at 0, 4, 8 of a 4x4 frame), from the board hook every step.
 void set_board_target_rows(const float* rows) noexcept;
 bool kinematic_spin_running() noexcept;
