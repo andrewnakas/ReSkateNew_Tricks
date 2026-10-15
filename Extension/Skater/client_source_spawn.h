@@ -64,6 +64,25 @@ void set_freestyle_root_hold(std::uintptr_t rig, bool on) noexcept;
 void request_parts_log() noexcept;
 // The local skater's heading held as it was when the lock began, while the mod spins the board under the feet.
 void set_freestyle_root_heading_lock(std::uintptr_t rig, bool on) noexcept;
+// The local skater (client, entity) whose board a released board spin turns back.
+void set_board_turn_owner(std::uintptr_t client, std::uintptr_t entity) noexcept;
+// At the next physics step: the board's nine parts turned about the vertical through the deck so the deck heads the way
+// the skater's root does (a board spun half round under the feet ends as the clip has it, with no swing back: a deck
+// looks the same either way round), when they are more than 60 degrees apart; then `after` is called (in the same
+// step, or once the request times out). False when no owner is known (then `after` is not called).
+bool request_board_turn_back(void (*after)() noexcept) noexcept;
+// The local skater's feet (skater core `core`) let go of the deck for the next `milliseconds`: their rider-to-deck
+// drives' force limits times `scale`; put back after. 0 ms puts them back at the next step.
+void set_feet_free(std::uintptr_t core, std::uint32_t milliseconds, float scale) noexcept;
+// <dev> Rows written since the last call.
+std::uint32_t take_feet_free_writes() noexcept;
+// <dev> How many turn-backs were done since the last call, and the last angle turned (degrees).
+std::uint32_t take_board_turn_backs(float& last) noexcept;
+// <dev> The deck's physics heading against the root's (degrees) and the deck's up row height, measured each step while
+// this is called (false on the first call).
+bool watch_board_heading(float& angle, float& up) noexcept;
+// <dev> The deck's turn rate at the last watched step, degrees a second.
+float watched_board_spin() noexcept;
 std::uint32_t take_freestyle_root_turned() noexcept;
 // Called after the game's root update of a rig (any skater's): the local skater's root is set upright if asked.
 void freestyle_root_updated(std::uintptr_t rig) noexcept;

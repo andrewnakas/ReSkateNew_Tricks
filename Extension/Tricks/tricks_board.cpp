@@ -8,6 +8,7 @@
 #include <cstring>
 
 namespace dingosdk::tricks {
+void release_board_spin() noexcept;
 namespace {
 // Game build 20260929. (board, out: 4x4 matrix, flag): copies the target frame at *(board + 0x178) to `out`, optionally
 // transforms it, and gives it to the board's drive. The frame's rows are right, up, forward and position.
@@ -50,8 +51,14 @@ struct Spin {
     std::atomic<float> hop{};  // metres the board is lifted at the middle of the turn (a ground shuvit: just off the ground)
     std::atomic<std::uint64_t> start{}; // QueryPerformanceCounter
     std::atomic<std::uint64_t> length{};
+    std::atomic<bool> turned_back{}; // the turn back was asked for (once per spin)
 };
 Spin spin;
+std::atomic<bool> turn_back_on{true};
+// The spin's own board: the clip's turn of the board is replaced by the skater's root frame (level, the skater's
+// heading), so the game can play a flip clip for the legs while the mod alone turns the board.
+std::atomic<std::uintptr_t> base_rig{};
+std::atomic<bool> base_root{};
 // The board's angular drive to its animated pose: three strengths in the board's drive request (board + 0x7a0, + 0x7b0,
 // + 0x794), each multiplied into the deck's AngularDriveLimit (600). Every state enters with 1; the game's own
 // boneless uses 1000 and its slappy 30. A posed board on the ground at speed is pushed past the limit of 1 (it rocks,
@@ -171,6 +178,20 @@ std::uint64_t clock_frequency() noexcept {
     }();
     return value;
 }
+// How far a flip has turned at `p` of its time. The retail flips' turn rate (a stock heelflip's deck, measured per step
+// 2026-10-14): full speed within the first steps, easing off a little toward the catch, then a dead stop. A constant
+// rate looked mechanical; this one starts with the flick's snap and slows as if the air held it.
+std::atomic<float> ease_in{0.08f}, ease_slow{0.3f};
+float flip_ease(float p) noexcept {
+    const float a = std::clamp(ease_in.load(std::memory_order_relaxed), 0.0f, 0.5f), k = std::clamp(ease_slow.load(std::memory_order_relaxed), 0.0f, 0.9f);
+    const auto area = [&](float x) { // the integral of the turn rate: rising to 1 over [0, a], then falling by k to the end
+        if (x <= a) return a > 0 ? x * x / (2.0f * a) : 0.0f;
+        const float t = x - a;
+        return a / 2.0f + t - k * t * t / (2.0f * (1.0f - a));
+    };
+    const float total = area(1.0f);
+    return total > 0 ? std::clamp(area(std::clamp(p, 0.0f, 1.0f)) / total, 0.0f, 1.0f) : p;
+}
 // Turn rows a and b of the frame toward each other by `degrees` (a rotation about the third axis).
 void turn(float *a, float *b, float degrees) noexcept {
     const float radians = degrees * 3.14159265358979f / 180.0f, c = std::cos(radians), s = std::sin(radians);
@@ -196,19 +217,35 @@ bool turn_frame(std::uintptr_t board) noexcept {
         }
         level_frame(frame);
         if (!spin.on.load(std::memory_order_acquire)) return false;
+        if (base_root.load(std::memory_order_relaxed)) {
+            float root[12]{};
+            const auto rig = base_rig.load(std::memory_order_relaxed);
+            if (rig) {
+                std::memcpy(root, reinterpret_cast<const void *>(rig + 0x4720), sizeof(root));
+                for (int i = 0; i < 12; ++i)
+                    if (i % 4 != 3) frame[i] = root[i];
+            }
+        }
         const auto length = spin.length.load(std::memory_order_relaxed);
         const auto elapsed = clock_now() - spin.start.load(std::memory_order_relaxed);
         float progress = length ? static_cast<float>(static_cast<double>(elapsed) / static_cast<double>(length)) : 1.0f;
         if (progress >= 1.0f) {
             // Whole turns leave the board as the clip has it; a half turn (a shuvit) is held until the spin is stopped.
             progress = 1.0f;
+            // A turn about the board's up axis is handed back once it is done, while still in the air: the board turned
+            // back to the skater's heading and the spin let go in one step (the game takes the skater off a board that
+            // lands turned against the root: measured 2026-10-14, a no comply pop shuvit, physics 504 on the landing).
+            if (spin.yaw.load(std::memory_order_relaxed) != 0 && turn_back_on.load(std::memory_order_relaxed) && !spin.turned_back.exchange(true))
+                (void)request_board_turn_back(&release_board_spin);
         }
         float *right = frame, *up = frame + 4, *forward = frame + 8;
+        const float hop_progress = progress;
+        progress = flip_ease(progress);
         const float roll = spin.roll.load(std::memory_order_relaxed) * progress, yaw = spin.yaw.load(std::memory_order_relaxed) * progress,
                     pitch = spin.pitch.load(std::memory_order_relaxed) * progress;
         if (const float drop = spin.drop.load(std::memory_order_relaxed) * progress; drop != 0)
             for (int i = 0; i < 3; ++i) frame[12 + i] -= up[i] * drop;
-        if (const float hop = spin.hop.load(std::memory_order_relaxed) * std::sin(progress * 3.14159265358979f); hop != 0)
+        if (const float hop = spin.hop.load(std::memory_order_relaxed) * std::sin(hop_progress * 3.14159265358979f); hop != 0)
             for (int i = 0; i < 3; ++i) frame[12 + i] += up[i] * hop;
         if (yaw != 0) turn(forward, right, yaw);   // about up
         if (pitch != 0) turn(up, forward, pitch);  // about right
@@ -265,7 +302,12 @@ bool start_board_hook(std::uintptr_t base) noexcept {
 }
 std::uint32_t take_root_update2_calls() noexcept { return root2_calls.exchange(0, std::memory_order_relaxed); }
 void set_board_context(std::uintptr_t context) noexcept { local_context.store(context, std::memory_order_relaxed); }
+void set_board_spin_base(std::uintptr_t rig, bool own) noexcept {
+    base_rig.store(rig, std::memory_order_relaxed);
+    base_root.store(own && rig, std::memory_order_relaxed);
+}
 void start_board_spin(float roll, float yaw, float pitch, std::uint32_t milliseconds) noexcept {
+    base_root.store(false, std::memory_order_relaxed);
     spin.on.store(false, std::memory_order_release);
     spin.drop.store(0, std::memory_order_relaxed);
     spin.hop.store(0, std::memory_order_relaxed);
@@ -273,13 +315,28 @@ void start_board_spin(float roll, float yaw, float pitch, std::uint32_t millisec
     spin.yaw.store(yaw, std::memory_order_relaxed);
     spin.pitch.store(pitch, std::memory_order_relaxed);
     spin.length.store(clock_frequency() * milliseconds / 1000, std::memory_order_relaxed);
+    spin.turned_back.store(false, std::memory_order_relaxed);
     spin.start.store(clock_now(), std::memory_order_relaxed);
     spin.on.store(true, std::memory_order_release);
 }
-void stop_board_spin() noexcept {
+void release_board_spin() noexcept {
     spin.on.store(false, std::memory_order_release);
     spin.drop.store(0, std::memory_order_relaxed);
 }
+void stop_board_spin() noexcept {
+    // A spin with a turn about the board's up axis left the deck heading another way than the clip's board: let go of
+    // it there and the board's drive swings it back round under the feet, and the game takes the skater off the board
+    // (measured 2026-10-14: a no comply pop shuvit landed at 180 degrees, then physics 504). The board is turned back
+    // to the root's heading in the step the spin is let go (a deck looks the same either way round).
+    if (spin.on.load(std::memory_order_acquire) && turn_back_on.load(std::memory_order_relaxed) && spin.yaw.load(std::memory_order_relaxed) != 0 &&
+        request_board_turn_back(&release_board_spin)) return;
+    release_board_spin();
+}
+void set_board_flip_ease(float in, float slow) noexcept {
+    ease_in.store(in, std::memory_order_relaxed);
+    ease_slow.store(slow, std::memory_order_relaxed);
+}
+void set_board_turn_back(bool on) noexcept { turn_back_on.store(on, std::memory_order_relaxed); }
 void set_board_rigid(float strength) noexcept { rigid.store(strength > 0 ? strength : 0.0f, std::memory_order_relaxed); }
 std::uint32_t take_board_rigid(float &first_seen) noexcept {
     first_seen = rigid_seen.exchange(-1.0f, std::memory_order_relaxed);
@@ -300,6 +357,12 @@ bool take_board_lean(float values[6]) noexcept {
 }
 void set_board_drop(float metres) noexcept { spin.drop.store(metres, std::memory_order_relaxed); }
 void set_board_hop(float metres) noexcept { spin.hop.store(metres, std::memory_order_relaxed); }
+float board_spin_progress() noexcept {
+    if (!spin.on.load(std::memory_order_acquire)) return -1.0f;
+    const auto length = spin.length.load(std::memory_order_relaxed);
+    const auto elapsed = clock_now() - spin.start.load(std::memory_order_relaxed);
+    return length ? std::min(1.0f, static_cast<float>(static_cast<double>(elapsed) / static_cast<double>(length))) : 1.0f;
+}
 bool board_spin_running() noexcept {
     if (!spin.on.load(std::memory_order_acquire)) return false;
     return clock_now() - spin.start.load(std::memory_order_relaxed) < spin.length.load(std::memory_order_relaxed);

@@ -634,6 +634,71 @@ void put_back_rider_rows(RiderDrives& d) noexcept {
         (void)copy_to(at + 0xa4, s.turn.data(), sizeof(s.turn));
     }
 }
+// The feet let go of the deck while the mod turns the board under them: the rider-to-deck drives of the feet (anchored
+// near the deck; the pelvis's sits 0.9 m up) have their five force limits (record +0x10 .. +0x20) scaled down, so the
+// legs keep the clip's pose and the board turns clear of the shoes instead of dragging the feet through itself
+// (stills 2026-10-14: a no comply kickflip's board went through the back foot). Put back when the spin ends.
+struct FeetFree {
+    std::atomic<std::uintptr_t> core{};
+    std::atomic<ULONGLONG> until{};
+    std::atomic<float> scale{0.05f};
+    std::atomic<std::uint32_t> writes{};
+    // Physics thread only.
+    RiderDrives rows;
+    std::array<std::array<float, 5>, 12> saved{}, wrote{};
+    std::array<bool, 12> held{};
+};
+FeetFree& feet_free() { static auto* value = new FeetFree; return *value; }
+void put_back_feet(FeetFree& f) noexcept {
+    std::uintptr_t records{};
+    if (!peek_at(f.rows.w + 0xe68, records) || !records) return;
+    for (int k = 0; k < f.rows.count; ++k) {
+        if (!f.held[k]) continue;
+        f.held[k] = false;
+        const auto at = records + static_cast<std::uintptr_t>(f.rows.rows[k]) * 0xc0 + 0x10;
+        std::array<float, 5> now{};
+        if (peek_at(at, now) && now == f.wrote[k]) (void)copy_to(at, f.saved[k].data(), sizeof(f.saved[k]));
+    }
+}
+void tricks_feet_free(std::uintptr_t core) noexcept {
+    auto& f = feet_free();
+    // The hold comes back over 150 ms after the spin (all at once, the feet were yanked to the deck).
+    const auto now = GetTickCount64(), until = f.until.load(std::memory_order_relaxed);
+    const bool wanted = core && core == f.core.load(std::memory_order_relaxed) && now < until + 150;
+    const bool holding = std::any_of(f.held.begin(), f.held.end(), [](bool h) { return h; });
+    if (!wanted) {
+        if (holding && core == f.core.load(std::memory_order_relaxed)) put_back_feet(f);
+        return;
+    }
+    std::uintptr_t a{}, b{}, c{}, w{};
+    if (!peek_at(core + 0x430, a) || !peek_at(a + 0x718, b) || !peek_at(b + 0x80, c) || !peek_at(c + 0x28, w) || !w) return;
+    if (w != f.rows.w) {
+        f.held.fill(false);
+        f.rows.w = w;
+        f.rows.deck = -1;
+        f.rows.count = 0;
+    }
+    if (f.rows.deck < 0 && !find_rider_rows(f.rows)) return;
+    std::uintptr_t records{};
+    if (!peek_at(w + 0xe68, records) || !records) return;
+    const float lowest = std::clamp(f.scale.load(std::memory_order_relaxed), 0.0f, 1.0f);
+    const float scale = now < until ? lowest : lowest + (1.0f - lowest) * static_cast<float>(now - until) / 150.0f;
+    for (int k = 0; k < f.rows.count; ++k) {
+        const auto row = records + static_cast<std::uintptr_t>(f.rows.rows[k]) * 0xc0;
+        std::array<float, 3> point{};
+        std::array<float, 5> limits{};
+        if (!peek_at(row + 0x30, point) || !peek_at(row + 0x10, limits)) continue;
+        if (point[1] > 0.5f) continue; // the pelvis's row: the body stays over the board
+        if (!f.held[k] || limits != f.wrote[k]) f.saved[k] = limits; // the game's own (first, or set again by the game)
+        std::array<float, 5> mine{};
+        for (std::size_t i = 0; i < 5; ++i) mine[i] = f.saved[k][i] * scale;
+        if (copy_to(row + 0x10, mine.data(), sizeof(mine))) {
+            f.wrote[k] = mine;
+            f.held[k] = true;
+            f.writes.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
 void tricks_rider_drives(std::uintptr_t core) noexcept {
     auto& d = rider_drives();
     if (!core || core != d.core.load(std::memory_order_relaxed)) return;
@@ -788,6 +853,81 @@ bool upright_root_source(std::uintptr_t rig) noexcept {
     u.source_fixed.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
+struct BoardTurnBack {
+    std::atomic<std::uintptr_t> client{}, entity{};
+    std::atomic<void (*)() noexcept> after{};
+    std::atomic<std::uint64_t> expires{};
+    std::atomic<std::uint32_t> done{};
+    std::atomic<float> last{};
+    std::atomic<std::uint64_t> watch_until{}; // <dev> the deck's heading against the root, measured every step
+    std::atomic<float> watch_angle{}, watch_up{}, watch_spin{};
+};
+BoardTurnBack& board_turn_back() { static auto* value = new BoardTurnBack; return *value; }
+void tricks_board_turn_back(std::uintptr_t core) noexcept {
+    auto& t = board_turn_back();
+    const auto after = t.after.load(std::memory_order_acquire);
+    const bool watching = GetTickCount64() < t.watch_until.load(std::memory_order_relaxed);
+    if (!after && !watching) return;
+    const auto finish = [&] {
+        if (after && t.after.exchange(nullptr, std::memory_order_acq_rel)) after();
+    };
+    if (after && GetTickCount64() >= t.expires.load(std::memory_order_relaxed)) { finish(); return; }
+    SourceLastError error;
+    auto& state = source_state();
+    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
+    SourceBusyScope scope{state.busy};
+    try {
+        const auto bodies = debug_noclip_bodies(state.trial.base, t.client.load(std::memory_order_relaxed), t.entity.load(std::memory_order_relaxed));
+        if (bodies.core != core) return; // another skater's step: the local one's comes
+        if (bodies.offboard || bodies.wipeout || bodies.parts.size() < 9) { finish(); return; }
+        SourceReader reader;
+        // The deck (board part 8: the one the root update takes the board from) against the root, in the ground plane.
+        const auto deck = bodies.parts[8];
+        const auto board_forward = reader.value<std::array<float, 4>>(deck, 0x40);
+        const auto root_forward = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4720 + 0x20);
+        const auto centre = reader.value<std::array<float, 3>>(deck, 0x50);
+        reader.verify();
+        const float cross = board_forward[2] * root_forward[0] - board_forward[0] * root_forward[2];
+        const float dot = board_forward[0] * root_forward[0] + board_forward[2] * root_forward[2];
+        const float a = std::atan2(cross, dot);
+        if (watching) {
+            t.watch_angle.store(-a * 57.2958f, std::memory_order_relaxed);
+            t.watch_up.store(reader.value<std::array<float, 4>>(deck, 0x30)[1], std::memory_order_relaxed);
+            const auto w = reader.value<std::array<float, 3>>(deck, 0x90);
+            t.watch_spin.store(std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) * 57.2958f, std::memory_order_relaxed);
+        }
+        if (!after) return;
+        if (!std::isfinite(a) || std::abs(a) < 60.0f / 57.2958f) { finish(); return; }
+        const float c = std::cos(a), s = std::sin(a);
+        const auto turn = [&](float& x, float& z) {
+            const float nx = c * x + s * z, nz = -s * x + c * z;
+            x = nx;
+            z = nz;
+        };
+        for (std::size_t i = 0; i < 9; ++i) {
+            const auto part = bodies.parts[i];
+            std::array<std::array<float, 4>, 3> rows{reader.value<std::array<float, 4>>(part, 0x20), reader.value<std::array<float, 4>>(part, 0x30),
+                reader.value<std::array<float, 4>>(part, 0x40)};
+            auto at = reader.value<std::array<float, 3>>(part, 0x50);
+            auto spin = reader.value<std::array<float, 3>>(part, 0x90);
+            const auto flags = reader.value<std::uint32_t>(part, 0x60);
+            reader.verify();
+            for (auto& row : rows) turn(row[0], row[2]);
+            float dx = at[0] - centre[0], dz = at[2] - centre[2];
+            turn(dx, dz);
+            at[0] = centre[0] + dx;
+            at[2] = centre[2] + dz;
+            turn(spin[0], spin[2]);
+            for (std::size_t row = 0; row < 3; ++row) body_write(part + 0x20 + row * 0x10, rows[row]);
+            body_write(part + 0x50, at);
+            body_write(part + 0x90, spin);
+            body_write(part + 0x60, flags | 1u | 4u | 0x20u);
+        }
+        t.last.store(a * 57.2958f, std::memory_order_relaxed);
+        t.done.fetch_add(1, std::memory_order_relaxed);
+    } catch (...) {}
+    finish();
+}
 void tricks_freestyle_slide(std::uintptr_t core) noexcept {
     auto& f = freestyle_slide();
     const float deceleration = f.deceleration.load(std::memory_order_relaxed);
@@ -941,6 +1081,8 @@ void noclip_physics_update(std::uintptr_t core) {
     noclip_apply_velocity(core);
     trainer_apply_jump_scale(core);
     trainer_push_speed(core);
+    tricks_board_turn_back(core);
+    tricks_feet_free(core);
     tricks_freestyle_slide(core);
     tricks_rider_drives(core);
     if (const auto step = tricks_step().load(std::memory_order_acquire)) step();
@@ -1156,6 +1298,37 @@ void set_tricks_step(void (*step)() noexcept) noexcept { tricks_step().store(ste
 void set_freestyle_slide_mean(bool mean) noexcept { freestyle_slide().mean.store(mean, std::memory_order_relaxed); }
 void set_freestyle_slide_soft(std::uint32_t milliseconds) noexcept { freestyle_slide().soft_ms.store(milliseconds, std::memory_order_relaxed); }
 void set_freestyle_slide_level(bool level) noexcept { freestyle_slide().level.store(level, std::memory_order_relaxed); }
+void set_board_turn_owner(std::uintptr_t client, std::uintptr_t entity) noexcept {
+    board_turn_back().client.store(client, std::memory_order_relaxed);
+    board_turn_back().entity.store(entity, std::memory_order_relaxed);
+}
+void set_feet_free(std::uintptr_t core, std::uint32_t milliseconds, float scale) noexcept {
+    auto& f = feet_free();
+    f.core.store(core, std::memory_order_relaxed);
+    f.scale.store(scale, std::memory_order_relaxed);
+    f.until.store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_relaxed);
+}
+std::uint32_t take_feet_free_writes() noexcept { return feet_free().writes.exchange(0, std::memory_order_relaxed); }
+bool request_board_turn_back(void (*after)() noexcept) noexcept {
+    auto& t = board_turn_back();
+    if (!after || !t.client.load(std::memory_order_relaxed) || !t.entity.load(std::memory_order_relaxed)) return false;
+    t.expires.store(GetTickCount64() + 200, std::memory_order_relaxed);
+    t.after.store(after, std::memory_order_release);
+    return true;
+}
+float watched_board_spin() noexcept { return board_turn_back().watch_spin.load(std::memory_order_relaxed); }
+bool watch_board_heading(float& angle, float& up) noexcept {
+    auto& t = board_turn_back();
+    const bool was = GetTickCount64() < t.watch_until.load(std::memory_order_relaxed);
+    t.watch_until.store(GetTickCount64() + 300, std::memory_order_relaxed);
+    angle = t.watch_angle.load(std::memory_order_relaxed);
+    up = t.watch_up.load(std::memory_order_relaxed);
+    return was;
+}
+std::uint32_t take_board_turn_backs(float& last) noexcept {
+    last = board_turn_back().last.load(std::memory_order_relaxed);
+    return board_turn_back().done.exchange(0, std::memory_order_relaxed);
+}
 void set_freestyle_slide(std::uintptr_t client, std::uintptr_t entity, float deceleration) noexcept {
     auto& f = freestyle_slide();
     f.client = client;

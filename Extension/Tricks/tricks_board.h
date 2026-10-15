@@ -17,6 +17,13 @@ void set_board_context(std::uintptr_t context) noexcept;
 // over `milliseconds`, starting now. A new spin replaces the one running.
 void start_board_spin(float roll, float yaw, float pitch, std::uint32_t milliseconds) noexcept;
 void stop_board_spin() noexcept;
+// A released spin that turned the board about its up axis turns the board back to the skater's heading (on by default).
+void set_board_turn_back(bool on) noexcept;
+// For the spin just started: the board turned from the skater's root frame (`rig`, + 0x4720) instead of the clip's
+// board, so a flip clip can play for the legs alone. Cleared by the next start.
+void set_board_spin_base(std::uintptr_t rig, bool own) noexcept;
+// The flips' turn rate: full within `in` of the flip's time, then slowing by `slow` (a fraction) to the catch.
+void set_board_flip_ease(float in, float slow) noexcept;
 // After start_board_spin: the board is also moved down its own up axis by this much as the turn goes.
 void set_board_drop(float metres) noexcept;
 // Keeps a held pose's target level and on the heading it was taken with: 1 a casper, 2 a primo, 0 off.
@@ -35,6 +42,8 @@ std::uint32_t take_board_rigid(float &first_seen) noexcept;
 // Lifts the board up its own up axis, most at the middle of the running turn (0 at both ends).
 void set_board_hop(float metres) noexcept;
 bool board_spin_running() noexcept;
+// <dev> How far the running spin is (0..1), or -1 with none.
+float board_spin_progress() noexcept;
 // <dev> Calls of the second root update (0x4779330, any skater) since the last call.
 std::uint32_t take_root_update2_calls() noexcept;
 // How often the hook saw the local skater's frame since last asked, and how often it turned it.

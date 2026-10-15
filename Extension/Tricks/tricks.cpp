@@ -25,6 +25,7 @@
 #include <fstream>
 
 #include "Extension/Skater/no_bail.h"
+#include "Extension/Settings/named_settings.h"
 
 // The first controller as the game polls it, and the mask that keeps freestyle's inputs from the game
 // (Extension/UI/Overlay/input_capture.cpp).
@@ -131,6 +132,17 @@ struct Runtime {
     float gs_hop{0.05f}; // metres the board comes off the ground at the middle of the turn
     bool gs_scoop{true};
     bool nc_hide{true};
+    std::uint64_t watch_until{}, watch_next{}; // <dev> root vs board heading log after a board-turning trick
+    std::uintptr_t s_riding_fakie{};
+    std::uintptr_t s_watch_revert{};
+    bool watch_air{}, watch_fine{};
+    float flip_dip{0.2f};
+    float feet_free{0.05f};
+    int legs_flip{11}; // the game's flip clip played for the legs of a dolphin or dragon (11: 360 flip; 0: none) // the feet's hold on the deck through a flip of the mod's (1: the game's own) // metres the board drops under the feet at the middle of an air flip of the mod's
+    // <dev> tricks spinshot: the game nearly stopped at a point of a spin (or of any air) and a still asked for
+    float shot_progress{-1}; std::uint32_t shot_air_ms{}, shot_hold_ms{6000}, shot_count{};
+    bool shot_taken{}; std::uint64_t shot_until{}, shot_air_since{};
+    std::string shot_tag{"sp"}; // <dev> tricks watchair: the watch log after every air
     bool big_spin{}; // out for now (the owner, 2026-10-14: it turned pop shuvits 180 on landing) // the right stick hidden from the game through a no comply (its flick is the mod's)
     // <dev> Grabs while grinding (experiment, off): the game has no grab in its grind node, but its grab clips reach the
     // hands to the board through reach IK states (ReachLockIKTag: floatchooser / boolchooser mirrored wrist states).
@@ -330,6 +342,55 @@ Runtime &runtime() {
 
 // ---- the Tricks page: switches, settings, tricks.json --------------------------------------------------------
 // A trick is on when it and its family are both on.
+// <dev> The skater's root frame and the board's (part 8, as the root update copies it): their headings' angle, degrees.
+bool copy_rows(std::uintptr_t at, float *out, std::size_t floats) noexcept {
+    __try {
+        std::memcpy(out, reinterpret_cast<const void *>(at), floats * sizeof(float));
+        return true;
+    } __except (1) { return false; }
+}
+bool root_board_angle(std::uintptr_t rig, float &angle, float &board_up) noexcept {
+    float root[12]{}, board[12]{};
+    if (!rig || !copy_rows(rig + 0x4720, root, 12) || !copy_rows(rig + 0x48a0, board, 12)) return false;
+    const float rf[2]{root[8], root[10]}, bf[2]{board[8], board[10]};
+    const float a = std::atan2(rf[0] * bf[1] - rf[1] * bf[0], rf[0] * bf[0] + rf[1] * bf[1]);
+    angle = a * 57.2958f;
+    board_up = board[5];
+    return true;
+}
+// <dev> The board-backwards flag (rig+0x59a5) and the offset frame's heading (rig+0x4920, forward row), degrees.
+bool board_backwards_state(std::uintptr_t rig, int &flag, float &offset) noexcept {
+    float rows[12]{};
+    if (!rig || !copy_rows(rig + 0x4920, rows, 12)) return false;
+    __try { flag = *reinterpret_cast<const std::uint8_t *>(rig + 0x59a5); } __except (1) { return false; }
+    offset = std::atan2(rows[8], rows[10]) * 57.2958f;
+    return true;
+}
+// A flip in the air: the board drops under the feet as it turns and comes back up to them for the catch (the stock
+// flips' board turns well below the lifted feet; the mod's turned at the feet and went through the shoes: stills
+// 2026-10-14). A flat turn (a shuvit) drops half as far.
+void start_air_spin(const Runtime &r, float roll, float yaw, float pitch, std::uint32_t ms, bool near_ground = false) noexcept {
+    start_board_spin(roll, yaw, pitch, ms);
+    // An end-over-end turn stands the board up: half a board's length more to clear (stills 2026-10-14: a dolphin's
+    // upper end reached the soles at 0.2 m).
+    // A no comply's air is a step off the ground: no room under the board (a dipped no comply shuvit hit the ground
+    // and landed on its edge, 2026-10-14).
+    const float dip = near_ground ? 0.0f : pitch != 0 ? r.flip_dip * 1.5f : roll != 0 ? r.flip_dip : r.flip_dip * 0.5f;
+    if (dip > 0) set_board_hop(-dip);
+    // The feet let go of the deck while it turns (the core is the rig's owner, rig + 0x4630).
+    std::uintptr_t core{};
+    if (r.feet_free < 1.0f && r.rig && copy_rows(r.rig + 0x4630, reinterpret_cast<float *>(&core), 2) && core)
+        set_feet_free(core, ms + 60, r.feet_free);
+}
+// The legs of a flip trick for a flip of the mod's (the owner, 2026-10-14: the feet should get out of the board's way
+// as in a 360 flip): the game's animation flip trick set (EnumGS.Anim.CurrentFlipTrick; the intent stays none, so
+// the game neither scores nor turns the board for it) and the board turned from the skater's frame, not the clip's.
+void flip_legs(Runtime &r, std::uintptr_t base) noexcept {
+    if (r.legs_flip <= 0) return;
+    if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
+    (void)write_state_at(base, r.s_current_flip, 1, r.legs_flip);
+    set_board_spin_base(r.rig, true);
+}
 bool trick_enabled(const Runtime &r, std::string_view id) {
     const int i = trick_index(id);
     return i < 0 || (r.trick_on[i] && r.family_on[static_cast<std::size_t>(trick_catalog[i].family)]);
@@ -1378,7 +1439,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             // The flick's turn, once the casper's flip out is in the air; dropped again on the ground.
             if (r.out_until && in_air) {
                 if (r.out_roll != 0 || r.out_yaw != 0) {
-                    start_board_spin(r.out_roll, r.out_yaw, 0, r.out_spin_ms);
+                    start_air_spin(r, r.out_roll, r.out_yaw, 0, r.out_spin_ms);
                     r.out_spinning = true;
                 }
                 r.out_until = 0;
@@ -1535,6 +1596,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         r.after_primo = Freestyle::off;
     }
     r.shown = r.freestyle;
+    if (r.entity) set_board_turn_owner(client, r.entity);
     if ((r.freestyle != Freestyle::off || now < r.exit_guard_until) && r.entity) set_freestyle_slide(client, r.entity, r.slide);
     set_freestyle_slide_upright(r.upright);
     // The casper's loop is a blend of three clips (low, medium, high) on Float.Intent.Balance, 0 to 1: the left
@@ -1684,7 +1746,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 case 9: roll = 360; yaw = -180; break;   // hardflip (as a turn: a flip with a front side half turn)
                 default: roll = 360; break;
                 }
-                start_board_spin(roll, yaw, 0, r.nc_spin_ms);
+                start_air_spin(r, roll, yaw, 0, r.nc_spin_ms, true);
                 const char *nc_id = r.nc_trick == 2 ? "nc_kickflip" : r.nc_trick == 3 ? "nc_heelflip" : r.nc_trick == 4 ? "nc_shuvit" : r.nc_trick == 7 ? "nc_fsshuvit" : "nc_kickflip";
                 score_trick(nc_id, std::format("{} {}", r.plant_flip ? "Boneless" : "No Comply", flip_name(r.nc_trick)));
             }
@@ -1694,6 +1756,69 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 r.nc_trick = 0;
             }
         }
+    }
+    // <dev> Spin stills: the game slowed nearly to a stop where asked, a still logged, then the speed put back.
+    if (r.shot_until && now >= r.shot_until) {
+        (void)change_named_setting("SimulationTime.TimeScale", "1", false);
+        r.shot_until = 0;
+    }
+    if ((r.shot_progress >= 0 || r.shot_air_ms) && !r.shot_until) {
+        const auto ph = watched_physics_state();
+        const bool in_air = ph.valid && ph.state >= 200 && ph.state < 300;
+        if (!in_air) r.shot_air_since = 0;
+        else if (!r.shot_air_since) r.shot_air_since = now;
+        const float progress = board_spin_progress();
+        bool due = false;
+        if (r.shot_progress >= 0) {
+            if (progress < 0) r.shot_taken = false;
+            else if (!r.shot_taken && progress >= r.shot_progress) due = true;
+        } else if (r.shot_air_ms) {
+            if (!in_air) r.shot_taken = false;
+            else if (!r.shot_taken && now - r.shot_air_since >= r.shot_air_ms) due = true;
+        }
+        if (due) {
+            r.shot_taken = true;
+            (void)change_named_setting("SimulationTime.TimeScale", "0.02", false);
+            r.shot_until = now + r.shot_hold_ms;
+            logging::log(logging::Level::info, logging::Channel::skater, "shot-{}{} (Tricks: still at spin {:.2f})", r.shot_tag, ++r.shot_count, progress);
+        }
+    }
+    // <dev> After a board-turning trick: does the body face the board, and does the game think it rides fakie?
+    if ((r.nc_trick && r.nc_air) || r.gs_phase == 1 || r.pop_spinning || r.out_spinning || r.leaving) r.watch_until = now + 3500;
+    if (r.watch_air) {
+        const auto ph = watched_physics_state();
+        if (ph.valid && ph.state >= 200 && ph.state < 300) r.watch_until = now + 2500;
+    }
+    if (now < r.watch_until && now >= r.watch_next) {
+        r.watch_next = now + (r.watch_fine ? 15 : 100);
+        float angle{}, up{};
+        double fakie{};
+        if (!r.s_riding_fakie) r.s_riding_fakie = find_state(base, "Animation/Dingo/Bool.Physics.RidingFakie");
+        (void)read_state_at(base, r.s_riding_fakie, 0, fakie);
+        const auto ph = watched_physics_state();
+        float turned_by = 0;
+        if (const auto feet = take_feet_free_writes())
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: watch: feet rows loosened {} times.", feet);
+        if (const auto turns = take_board_turn_backs(turned_by))
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: watch: board turned back {:.0f} deg ({}).", turned_by, turns);
+        int backwards = -1;
+        float offset = 0;
+        (void)board_backwards_state(r.rig, backwards, offset);
+        float deck_angle{}, deck_up{};
+        if (watch_board_heading(deck_angle, deck_up)) {
+            angle = deck_angle;
+            up = deck_up;
+            double flip_now{}, flip_wanted{}, revert{};
+            if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
+            if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
+            if (!r.s_watch_revert) r.s_watch_revert = find_state(base, "Animation/Dingo/Bool.Intent.Revert");
+            (void)read_state_at(base, r.s_current_flip, 1, flip_now);
+            (void)read_state_at(base, r.s_flip_intent, 1, flip_wanted);
+            (void)read_state_at(base, r.s_watch_revert, 0, revert);
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: watch: {} ms deck {:.0f} deg, up {:.2f}, spin {:.0f}/s, fakie {}, physics {}, offset {:.0f}, flip {} intent {} revert {}.", now % 100000, angle, up,
+                         watched_board_spin(), fakie != 0, ph.valid ? static_cast<int>(ph.state) : -1, offset, flip_now, flip_wanted, revert != 0);
+        } else if (root_board_angle(r.rig, angle, up))
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: watch: body vs board {:.0f} deg, board up {:.2f}, fakie {}, physics {}, flag {}, offset {:.0f}.", angle, up, fakie != 0, ph.valid ? static_cast<int>(ph.state) : -1, backwards, offset);
     }
     // The skater's heading is held while the mod spins the board under the feet: a no comply flip, a ground shuvit. The
     // body is built from the board's frame and was dragged round with it (the owner, 2026-10-14: "the pop shuv and
@@ -1731,16 +1856,19 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
                 (void)write_state_at(base, r.s_flip_intent, 1, 0);
             };
-            if ((forward == 1 && trick_enabled(r, "dolphin")) || (forward == 2 && trick_enabled(r, "dragon"))) plain_ollie();
+            const bool forward_flip = (forward == 1 && trick_enabled(r, "dolphin")) || (forward == 2 && trick_enabled(r, "dragon"));
+            if (forward_flip) plain_ollie();
             // The owner's turns (2026-10-14): the dolphin is a forward varial (one front flip and a half turn of the board),
             // the dragon a forward 360 (one front flip and a full turn of the board: the nose goes all the way round in
             // both).
             if (forward == 1 && trick_enabled(r, "dolphin")) {
-                start_board_spin(0, side > 0 ? -180.0f : 180.0f, 360, r.flickit_spin_ms);
+                start_air_spin(r, 0, side > 0 ? -180.0f : 180.0f, 360, r.flickit_spin_ms);
+                flip_legs(r, base);
                 id = "dolphin";
                 name = "Dolphin Flip";
             } else if (forward == 2 && trick_enabled(r, "dragon")) {
-                start_board_spin(0, side > 0 ? -360.0f : 360.0f, 360, r.flickit_spin_ms);
+                start_air_spin(r, 0, side > 0 ? -360.0f : 360.0f, 360, r.flickit_spin_ms);
+                flip_legs(r, base);
                 id = "dragon";
                 name = "Dragon Flip";
             } else if (r.big_spin && trick_enabled(r, "bigspin")) {
@@ -1751,7 +1879,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 bool spun = false;
                 for (const auto &sample : recent_sticks(r, now, 700)) spun = spun || std::abs(sample.lx) > 0.6f;
                 if ((flip == 4 || flip == 7) && spun) {
-                    start_board_spin(0, flip == 4 ? 180.0f : -180.0f, 0, r.flickit_spin_ms);
+                    start_air_spin(r, 0, flip == 4 ? 180.0f : -180.0f, 0, r.flickit_spin_ms);
                     id = "bigspin";
                     name = flip == 4 ? "Big Spin" : "FS Big Spin";
                 }
@@ -1824,7 +1952,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             else roll = 360.0f * way;
             const char *id = yaw != 0 ? "air_lateshuv" : "air_extraflip";
             if (!none && trick_enabled(r, id)) {
-                start_board_spin(roll, yaw, pitch, r.air_spin_ms);
+                start_air_spin(r, roll, yaw, pitch, r.air_spin_ms);
                 ++r.air_used;
                 score_trick(id, yaw != 0 ? std::string_view("Late Shuvit") : extra_flip_name(trick));
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: in-air {} on flip trick {} (roll {}, yaw {}, pitch {}).", what, trick, roll, yaw, pitch);
@@ -2257,6 +2385,50 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         r.height_at_middle = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 1.0f);
         if (arguments.size() > 2) r.height_inner = std::clamp(static_cast<float>(std::atof(arguments[2].c_str())), 0.25f, 0.9f);
         return std::format("Casper height: {:.2f} at the edge, {:.2f} at {:.2f} out.", r.height_at_edge, r.height_at_middle, r.height_inner);
+    }
+    if (verb == "spinshot") { // <dev> spinshot <tag> <progress 0..1> | <tag> air <ms> | off
+        if (arguments.empty() || arguments[0] == "off") {
+            r.shot_progress = -1;
+            r.shot_air_ms = 0;
+            return "Spin stills off.";
+        }
+        r.shot_tag = arguments[0];
+        r.shot_count = 0;
+        if (arguments.size() > 2 && arguments[1] == "air") {
+            r.shot_progress = -1;
+            r.shot_air_ms = static_cast<std::uint32_t>(std::atoi(arguments[2].c_str()));
+        } else {
+            r.shot_air_ms = 0;
+            r.shot_progress = arguments.size() > 1 ? static_cast<float>(std::atof(arguments[1].c_str())) : 0.5f;
+        }
+        return "Spin stills on.";
+    }
+    if (verb == "dip") { // dip <metres> | ease <in> <slow>
+        if (arguments.size() == 3 && arguments[0] == "ease") {
+            set_board_flip_ease(static_cast<float>(std::atof(arguments[1].c_str())), static_cast<float>(std::atof(arguments[2].c_str())));
+            return std::format("Flip turn rate: full within {} of the flip, slowing by {} to the catch.", arguments[1], arguments[2]);
+        }
+        if (arguments.size() == 2 && arguments[0] == "legs") {
+            r.legs_flip = std::atoi(arguments[1].c_str());
+            return std::format("Dolphins and dragons play the game's flip {} for the legs.", r.legs_flip);
+        }
+        if (arguments.size() == 2 && arguments[0] == "feet") {
+            r.feet_free = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 1.0f);
+            return std::format("The feet hold the deck at {:.2f} of the game's strength through a flip.", r.feet_free);
+        }
+        if (arguments.empty()) return std::format("Flips drop the board {:.2f} m under the feet. usage: tricks dip <metres> | ease <in> <slow>", r.flip_dip);
+        r.flip_dip = std::clamp(static_cast<float>(std::atof(arguments[0].c_str())), 0.0f, 0.6f);
+        return std::format("Flips drop the board {:.2f} m under the feet.", r.flip_dip);
+    }
+    if (verb == "turnback") {
+        const bool on = arguments.empty() || arguments[0] != "off";
+        set_board_turn_back(on);
+        return on ? "A board spun round under the feet is turned back to the skater's heading when it lands." : "Turn-back off.";
+    }
+    if (verb == "watchair") { // <dev>
+        r.watch_air = arguments.empty() || arguments[0] != "off";
+        r.watch_fine = !arguments.empty() && arguments[0] == "fine";
+        return r.watch_air ? "The heading watch logs after every air." : "The heading watch logs after the mod's tricks only.";
     }
     if (verb == "parts") { // <dev>
         request_parts_log();
