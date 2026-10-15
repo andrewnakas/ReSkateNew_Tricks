@@ -1,5 +1,14 @@
 # ReSkate Tricks: status
 
+## START HERE (2026-10-14 ~23:10): the approved plan
+Plan: `C:\Users\andre\.claude\plans\quizzical-dazzling-muffin.md` (steps 0-8, from the owner's playtest of 19ba086). Memory note `project_reskate_tricks.md` has the owner's words.
+- **fafb89a** (built, NOT run yet: the commit limit was 8.5 GB free, the game needs ~10):
+  - Step 1: the dolphin mask fires only on a plain pop (game flip 0), so it can't touch a kickflip or pop shuv. A `Tricks: stock check:` line per landing gives masked polls and hook turns (both must be 0 on a stock flip).
+  - Step 2: fakie (`Bool.Physics.RidingFakie`) and nollie dolphin/dragon. Nollie = the reversed stroke: stick up, straight down, pushed back up (upper diagonal = dragon). Pitch -360 when fakie XOR nollie; the shuv keeps its stick side.
+  - Step 3 (casper side): the kinematic spin's `pose` base (no levelling; the roll back over is computed from the deck's start rows, the asked way round) plus settings `flickout_flip` (0 half, 1 one and a half) and `flickout_up` (0 tre half, 1 tre bigger, 2 straight half flip). The time scales with the whole turn.
+  - OPEN: primo flick-outs default to the game's own ollie + flip after the board is put down (`primo_game_pop`), so the half-flip rule can't apply there. Ask the owner, or route them through the casper (`tricks primopop off`).
+- Next: run KICK, PSHUV, DOLPHIN, NOLLIEDOLPHIN, GOFAKIE+DOLPHIN, CASPERTRE and CASPERSHUV (new macros are in pass.ps1), then Steps 4-8.
+
 ## START HERE (written 2026-10-13 ~04:30)
 **The 04:26 build is installed** (the trainer session may swap it overnight; it was told how to put it back: both files from `build\vs2022-x64\Release`). It carries the four things the owner asked for on 2026-10-13. All of it is checked by scripted runs only: **the owner's hands are the next test.**
 - **Casper caught in the air:** the feet and board take the pose 63 ms after the catch (it was ~560 ms, at touchdown). Lands straight into the pose, no bounce: 11 of 11 scripted landings, 3 of them with a wandering left stick.
