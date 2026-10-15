@@ -1,6 +1,22 @@
 # ReSkate Tricks: status
 
-## START HERE (2026-10-14 ~23:10): the approved plan
+## START HERE (2026-10-15 evening): the fix session
+6d78737 is installed in the Skate folder but not launched. The full list, with every measured fact, is in the memory note `project_reskate_tricks.md` ("NEXT SESSION").
+
+1. **Hand IK targets** for both the kickflip indy and the grind grab.
+   - The mod's writes to the rider's hand and the arm motor scaling never moved the hand.
+   - The game's grab IK is the way: `Set{Left,Right}HandGrabTargetData`, bone-align weights. See Rust rewrite `docs/re/script-graphs.md`.
+   - The grind animation ignores the grab states the mod now holds.
+   - The flip grab has the out-and-up board path, and `CanGrab` is held open so the game's grab plays. The hand position is still unconfirmed.
+2. **The mod's ollie request never pops** (`OllieNorth` + `JumpStrength`). This blocks primo flick-outs and the ground shuv's "clear flick" (`tricks groundshuv game on`).
+3. **Ground shuv:** the input is now a part-way stroke down, rolled to a side, no L3 (owner's pick). The feet still twist with the mod's turn.
+4. **Casper/primo flick-outs** still sometimes pop high, fall through the map, or glitch the legs. The turn already ends in the air (touchdown at 470-550 ms, the turn takes 379 ms).
+   - Suspects: the exit clip, the out-legs write, the final snap.
+5. **Owner OK:** fakie/nollie dolphin and dragon.
+
+**Curb rig:** `trainer tp 716.76 201.1 1194.24`, mount, then pad `a:200 n:300 a:200 n:300 lx=1:350 n:100 ry=-1:120 ry=1:100 n:400 rt=1:2500` gives a BS 50-50.
+
+## (older) START HERE (2026-10-14 ~23:10): the approved plan
 Plan: `C:\Users\andre\.claude\plans\quizzical-dazzling-muffin.md` (steps 0-8, from the owner's playtest of 19ba086). Memory note `project_reskate_tricks.md` has the owner's words.
 - **fafb89a** (built, NOT run yet: the commit limit was 8.5 GB free, the game needs ~10):
   - Step 1: the dolphin mask fires only on a plain pop (game flip 0), so it can't touch a kickflip or pop shuv. A `Tricks: stock check:` line per landing gives masked polls and hook turns (both must be 0 on a stock flip).
