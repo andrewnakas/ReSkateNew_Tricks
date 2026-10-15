@@ -22,6 +22,10 @@ void set_board_turn_back(bool on) noexcept;
 // For the spin just started: the board turned from the skater's root frame (`rig`, + 0x4720) instead of the clip's
 // board, so a flip clip can play for the legs alone. Cleared by the next start.
 void set_board_spin_base(std::uintptr_t rig, bool own) noexcept;
+// For the spin just started (after set_board_spin_base): the board carried up `rise` m and out `reach` m along the
+// skater's side row on a smooth path, there from `top` to `hold_end` of the time, back by the end; its turn done by
+// `top`. Cleared by the next start.
+void set_board_spin_path(float rise, float reach, float top, float hold_end) noexcept;
 // The flips' turn rate: full within `in` of the flip's time, then slowing by `slow` (a fraction) to the catch.
 void set_board_flip_ease(float in, float slow) noexcept;
 // After start_board_spin: the board is also moved down its own up axis by this much as the turn goes.

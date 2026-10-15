@@ -863,11 +863,182 @@ struct BoardTurnBack {
     std::atomic<float> watch_angle{}, watch_up{}, watch_spin{};
 };
 BoardTurnBack& board_turn_back() { static auto* value = new BoardTurnBack; return *value; }
+// A hand brought to the board (the mod's grabs): the rider is the drawn body, so one of its physics parts (a hand) is
+// given, every step, the velocity that takes it a share of the way to a point on the deck (in the deck's frame),
+// on top of the deck's own; the arm follows through its joints.
+struct HandPull {
+    std::atomic<std::uintptr_t> core{};
+    std::atomic<ULONGLONG> until{};
+    std::atomic<int> part{}, part2{-1};
+    std::atomic<float> x{}, y{}, z{}, gain{0.35f}, crouch{};
+    std::atomic<std::uint32_t> steps{};
+    std::atomic<float> gap{};
+};
+HandPull& hand_pull() { static auto* value = new HandPull; return *value; }
+BoardTurnBack& board_turn_back();
+void tricks_hand_pull(std::uintptr_t core) noexcept {
+    auto& h = hand_pull();
+    if (!core || core != h.core.load(std::memory_order_relaxed) || GetTickCount64() >= h.until.load(std::memory_order_relaxed)) return;
+    SourceLastError error;
+    auto& state = source_state();
+    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
+    SourceBusyScope scope{state.busy};
+    try {
+        auto& t = board_turn_back();
+        const auto bodies = debug_noclip_bodies(state.trial.base, t.client.load(std::memory_order_relaxed), t.entity.load(std::memory_order_relaxed));
+        if (bodies.core != core || bodies.offboard || bodies.wipeout || bodies.parts.size() < 32 || !(bodies.seconds > 0)) return;
+        SourceReader reader;
+        const auto deck = bodies.parts[8];
+        const auto right = reader.value<std::array<float, 4>>(deck, 0x20), up = reader.value<std::array<float, 4>>(deck, 0x30),
+                   forward = reader.value<std::array<float, 4>>(deck, 0x40);
+        const auto centre = reader.value<std::array<float, 3>>(deck, 0x50), deck_speed = reader.value<std::array<float, 3>>(deck, 0x70);
+        reader.verify();
+        const float x = h.x.load(std::memory_order_relaxed), y = h.y.load(std::memory_order_relaxed), z = h.z.load(std::memory_order_relaxed);
+        float target[3];
+        for (int i = 0; i < 3; ++i) target[i] = centre[i] + right[i] * x + up[i] * y + forward[i] * z;
+        const float share = std::clamp(h.gain.load(std::memory_order_relaxed), 0.0f, 1.0f) / bodies.seconds;
+        const auto pull = [&](int index, float weight) {
+            if (index < 0 || static_cast<std::size_t>(index) >= bodies.parts.size()) return;
+            const auto part = bodies.parts[static_cast<std::size_t>(index)];
+            SourceReader r2;
+            const auto at = r2.value<std::array<float, 3>>(part, 0x50);
+            const auto flags = r2.value<std::uint32_t>(part, 0x60);
+            r2.verify();
+            std::array<float, 3> v{};
+            float gap = 0;
+            for (int i = 0; i < 3; ++i) {
+                const float d = target[i] - at[i];
+                gap += d * d;
+                v[i] = d * share * weight;
+            }
+            // At most 15 m/s toward the board (the flip clips fling the arms out; a slower pull lost to the arm's drives).
+            const float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            if (speed > 15.0f)
+                for (auto& c : v) c *= 15.0f / speed;
+            for (int i = 0; i < 3; ++i) v[i] += deck_speed[i];
+            body_write(part + 0x70, v);
+            body_write(part + 0x60, flags | 8u);
+            if (weight == 1.0f) h.gap.store(std::sqrt(gap), std::memory_order_relaxed);
+        };
+        // The whole arm: the hand, its forearm (part - 1... given as part2) and the upper arm (part2 + 1), all at full pull:
+        // the hand alone stayed 0.8 m off, held out by the arm's own drives (measured 2026-10-14).
+        pull(h.part.load(std::memory_order_relaxed), 1.0f);
+        const int forearm = h.part2.load(std::memory_order_relaxed);
+        pull(forearm, 1.0f);
+        if (forearm >= 0) pull(forearm + 1, 0.8f);
+        // A crouch: the pelvis (part 31) and the chest (part 10) pulled down toward the board, so a short arm reaches it.
+        if (const float crouch = h.crouch.load(std::memory_order_relaxed); crouch > 0)
+            for (const int index : {31, 10}) {
+                const auto part = bodies.parts[static_cast<std::size_t>(index)];
+                SourceReader r3;
+                auto v = r3.value<std::array<float, 3>>(part, 0x70);
+                const auto flags = r3.value<std::uint32_t>(part, 0x60);
+                r3.verify();
+                for (int i = 0; i < 3; ++i) v[i] -= up[i] * crouch;
+                body_write(part + 0x70, v);
+                body_write(part + 0x60, flags | 8u);
+            }
+        h.steps.fetch_add(1, std::memory_order_relaxed);
+    } catch (...) {}
+}
+// A flip grab's board carried on its path: the board's target frame only turns it (its place in the air is not
+// driven: a lift through the target did nothing, 2026-10-14), so its nine parts are given, every step, the skater's
+// own travel plus the velocity that takes the deck most of the way to its place on the path. The path is in the
+// skater's root frame (+0x4720 side, +0x4730 up, +0x4750 place): from where the deck was at the start (under the feet)
+// up by `rise` and out along the side row by `reach`, there from `top` to `hold` of the time, back by the end.
+struct BoardCarry {
+    std::atomic<std::uintptr_t> core{};
+    std::atomic<std::uint64_t> start{}, length{}; // QueryPerformanceCounter
+    std::atomic<float> rise{}, reach{}, top{0.42f}, hold{0.58f}, gain{0.5f};
+    // Physics thread only: the deck's place in the root frame at the start.
+    bool started{}, logged{};
+    float side0{}, up0{}, forward0{};
+    std::atomic<std::uint32_t> steps{};
+    std::atomic<float> gap{};
+};
+BoardCarry& board_carry() { static auto* value = new BoardCarry; return *value; }
+float carry_smooth(float x) noexcept {
+    x = std::clamp(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+void tricks_board_carry(std::uintptr_t core) noexcept {
+    auto& c = board_carry();
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    const auto start = c.start.load(std::memory_order_acquire), length = c.length.load(std::memory_order_relaxed);
+    if (!core || core != c.core.load(std::memory_order_relaxed) || !start || !length || static_cast<std::uint64_t>(now.QuadPart) >= start + length) {
+        c.started = false;
+        c.logged = false;
+        return;
+    }
+    const float p = static_cast<float>(static_cast<double>(static_cast<std::uint64_t>(now.QuadPart) - start) / static_cast<double>(length));
+    SourceLastError error;
+    auto& state = source_state();
+    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
+    SourceBusyScope scope{state.busy};
+    try {
+        auto& t = board_turn_back();
+        const auto bodies = debug_noclip_bodies(state.trial.base, t.client.load(std::memory_order_relaxed), t.entity.load(std::memory_order_relaxed));
+        if (bodies.core != core || bodies.offboard || bodies.wipeout || bodies.parts.size() < 32 || !(bodies.seconds > 0)) return;
+        SourceReader reader;
+        const auto side = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4720), up = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4730),
+                   forward = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4740), place = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4750);
+        const auto deck_at = reader.value<std::array<float, 3>>(bodies.parts[8], 0x50);
+        const auto travel = reader.value<std::array<float, 3>>(bodies.parts[31], 0x70); // the pelvis: the skater's own travel
+        reader.verify();
+        const auto dot = [](const float* a, const std::array<float, 4>& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+        if (!c.started) {
+            const float d[3]{deck_at[0] - place[0], deck_at[1] - place[1], deck_at[2] - place[2]};
+            c.side0 = dot(d, side);
+            c.up0 = dot(d, up);
+            c.forward0 = dot(d, forward);
+            c.started = true;
+        }
+        const float top = std::clamp(c.top.load(std::memory_order_relaxed), 0.1f, 0.9f), hold = std::clamp(c.hold.load(std::memory_order_relaxed), top, 0.95f);
+        const float out = p < top ? carry_smooth(p / top) : p < hold ? 1.0f : 1.0f - carry_smooth((p - hold) / (1.0f - hold));
+        const float s = c.side0 + c.reach.load(std::memory_order_relaxed) * out, u = c.up0 + c.rise.load(std::memory_order_relaxed) * out, f = c.forward0;
+        float push[3], gap = 0;
+        const float share = std::clamp(c.gain.load(std::memory_order_relaxed), 0.0f, 1.0f) / bodies.seconds;
+        for (int i = 0; i < 3; ++i) {
+            const float target = place[i] + side[i] * s + up[i] * u + forward[i] * f;
+            const float d = target - deck_at[i];
+            gap += d * d;
+            push[i] = travel[i] + d * share;
+        }
+        for (std::size_t i = 0; i < 9; ++i) {
+            SourceReader r2;
+            const auto flags = r2.value<std::uint32_t>(bodies.parts[i], 0x60);
+            r2.verify();
+            const std::array<float, 3> v{push[0], push[1], push[2]};
+            body_write(bodies.parts[i] + 0x70, v);
+            body_write(bodies.parts[i] + 0x60, flags | 8u);
+        }
+        c.gap.store(std::sqrt(gap), std::memory_order_relaxed);
+        c.steps.fetch_add(1, std::memory_order_relaxed);
+        if (p > 0.5f && !c.logged) { // <dev> the axes: the deck's rows and the back hand's place, in the root frame
+            c.logged = true;
+            SourceReader r3;
+            const auto dr = r3.value<std::array<float, 4>>(bodies.parts[8], 0x20), du = r3.value<std::array<float, 4>>(bodies.parts[8], 0x30),
+                       df = r3.value<std::array<float, 4>>(bodies.parts[8], 0x40);
+            const auto hand = r3.value<std::array<float, 3>>(bodies.parts[11], 0x50), hand2 = r3.value<std::array<float, 3>>(bodies.parts[15], 0x50),
+                       head = r3.value<std::array<float, 3>>(bodies.parts[9], 0x50), feet = r3.value<std::array<float, 3>>(bodies.parts[23], 0x50);
+            r3.verify();
+            const auto rel = [&](const std::array<float, 3>& at) {
+                const float d[3]{at[0] - place[0], at[1] - place[1], at[2] - place[2]};
+                return std::format("({:.2f},{:.2f},{:.2f})", dot(d, side), dot(d, up), dot(d, forward));
+            };
+            const auto axis = [&](const std::array<float, 4>& a) { return std::format("({:.2f},{:.2f},{:.2f})", dot(a.data(), side), dot(a.data(), up), dot(a.data(), forward)); };
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: carry at {:.2f}: deck right {} up {} forward {}; deck {} back hand {} front hand {} head {} back foot {} (root frame side,up,forward).", p,
+                         axis(dr), axis(du), axis(df), rel(deck_at), rel(hand), rel(hand2), rel(head), rel(feet));
+        }
+    } catch (...) {}
+}
 void tricks_board_turn_back(std::uintptr_t core) noexcept {
     auto& t = board_turn_back();
     const auto after = t.after.load(std::memory_order_acquire);
     const bool watching = GetTickCount64() < t.watch_until.load(std::memory_order_relaxed);
-    if (!after && !watching) return;
+    const bool log_parts = parts_log_wanted.load(std::memory_order_relaxed);
+    if (!after && !watching && !log_parts) return;
     const auto finish = [&] {
         if (after && t.after.exchange(nullptr, std::memory_order_acq_rel)) after();
     };
@@ -879,6 +1050,20 @@ void tricks_board_turn_back(std::uintptr_t core) noexcept {
     try {
         const auto bodies = debug_noclip_bodies(state.trial.base, t.client.load(std::memory_order_relaxed), t.entity.load(std::memory_order_relaxed));
         if (bodies.core != core) return; // another skater's step: the local one's comes
+        if (log_parts && parts_log_wanted.exchange(false)) { // <dev> which part is which: places in the root frame
+            SourceReader parts;
+            const auto r0 = parts.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4720), r1 = parts.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4730),
+                       r2 = parts.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4740), r3 = parts.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4750);
+            std::string text;
+            for (std::size_t i = 0; i < bodies.parts.size(); ++i) {
+                const auto p = parts.value<std::array<float, 3>>(bodies.parts[i], 0x50);
+                const float d[3]{p[0] - r3[0], p[1] - r3[1], p[2] - r3[2]};
+                text += std::format(" {}:({:.2f},{:.2f},{:.2f})", i, d[0] * r0[0] + d[1] * r0[1] + d[2] * r0[2], d[0] * r1[0] + d[1] * r1[1] + d[2] * r1[2],
+                                    d[0] * r2[0] + d[1] * r2[1] + d[2] * r2[2]);
+            }
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: physics parts in the root frame (index:(side,up,forward)):{}", text);
+        }
+        if (!after && !watching) return;
         if (bodies.offboard || bodies.wipeout || bodies.parts.size() < 9) { finish(); return; }
         SourceReader reader;
         // The deck (board part 8: the one the root update takes the board from) against the root, in the ground plane.
@@ -1083,6 +1268,8 @@ void noclip_physics_update(std::uintptr_t core) {
     trainer_push_speed(core);
     tricks_board_turn_back(core);
     tricks_feet_free(core);
+    tricks_board_carry(core);
+    tricks_hand_pull(core);
     tricks_freestyle_slide(core);
     tricks_rider_drives(core);
     if (const auto step = tricks_step().load(std::memory_order_acquire)) step();
@@ -1301,6 +1488,41 @@ void set_freestyle_slide_level(bool level) noexcept { freestyle_slide().level.st
 void set_board_turn_owner(std::uintptr_t client, std::uintptr_t entity) noexcept {
     board_turn_back().client.store(client, std::memory_order_relaxed);
     board_turn_back().entity.store(entity, std::memory_order_relaxed);
+}
+void set_hand_pull(std::uintptr_t core, std::uint32_t milliseconds, int part, int part2, float x, float y, float z, float gain, float crouch) noexcept {
+    auto& h = hand_pull();
+    h.core.store(core, std::memory_order_relaxed);
+    h.part.store(part, std::memory_order_relaxed);
+    h.part2.store(part2, std::memory_order_relaxed);
+    h.x.store(x, std::memory_order_relaxed);
+    h.y.store(y, std::memory_order_relaxed);
+    h.z.store(z, std::memory_order_relaxed);
+    h.gain.store(gain, std::memory_order_relaxed);
+    h.crouch.store(crouch, std::memory_order_relaxed);
+    h.until.store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_relaxed);
+}
+std::uint32_t take_hand_pull(float& gap) noexcept {
+    gap = hand_pull().gap.load(std::memory_order_relaxed);
+    return hand_pull().steps.exchange(0, std::memory_order_relaxed);
+}
+void set_board_carry(std::uintptr_t core, std::uint32_t milliseconds, float rise, float reach, float top, float hold) noexcept {
+    auto& c = board_carry();
+    c.start.store(0, std::memory_order_release);
+    if (!milliseconds) return;
+    LARGE_INTEGER now{}, frequency{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    c.core.store(core, std::memory_order_relaxed);
+    c.rise.store(rise, std::memory_order_relaxed);
+    c.reach.store(reach, std::memory_order_relaxed);
+    c.top.store(top, std::memory_order_relaxed);
+    c.hold.store(hold, std::memory_order_relaxed);
+    c.length.store(static_cast<std::uint64_t>(frequency.QuadPart) * milliseconds / 1000, std::memory_order_relaxed);
+    c.start.store(static_cast<std::uint64_t>(now.QuadPart), std::memory_order_release);
+}
+std::uint32_t take_board_carry(float& gap) noexcept {
+    gap = board_carry().gap.load(std::memory_order_relaxed);
+    return board_carry().steps.exchange(0, std::memory_order_relaxed);
 }
 void set_feet_free(std::uintptr_t core, std::uint32_t milliseconds, float scale) noexcept {
     auto& f = feet_free();

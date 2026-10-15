@@ -59,6 +59,15 @@ std::atomic<bool> turn_back_on{true};
 // heading), so the game can play a flip clip for the legs while the mod alone turns the board.
 std::atomic<std::uintptr_t> base_rig{};
 std::atomic<bool> base_root{};
+// A flip grab's path (the owner, 2026-10-14: the board flips "in a smooth line from the flick to the waist about a foot in
+// front of the waist", is grabbed there and brought back down to the feet): up the skater's up row by `path_rise` and
+// out along its side row by `path_reach` (toward the toes), rising until `path_top` of the time, held there to
+// `path_hold`, down again by the end; the board's roll and yaw are done by the top.
+std::atomic<float> path_rise{}, path_reach{}, path_top{1.0f}, path_hold{1.0f}; // top 1: the turn takes the whole spin
+float smooth(float x) noexcept {
+    x = std::clamp(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
 // The board's angular drive to its animated pose: three strengths in the board's drive request (board + 0x7a0, + 0x7b0,
 // + 0x794), each multiplied into the deck's AngularDriveLimit (600). Every state enters with 1; the game's own
 // boneless uses 1000 and its slappy 30. A posed board on the ground at speed is pushed past the limit of 1 (it rocks,
@@ -226,6 +235,8 @@ bool turn_frame(std::uintptr_t board) noexcept {
                     if (i % 4 != 3) frame[i] = root[i];
             }
         }
+        const float rise = path_rise.load(std::memory_order_relaxed), reach = path_reach.load(std::memory_order_relaxed);
+        const float top = std::clamp(path_top.load(std::memory_order_relaxed), 0.1f, 1.0f), hold_end = std::clamp(path_hold.load(std::memory_order_relaxed), top, 1.0f);
         const auto length = spin.length.load(std::memory_order_relaxed);
         const auto elapsed = clock_now() - spin.start.load(std::memory_order_relaxed);
         float progress = length ? static_cast<float>(static_cast<double>(elapsed) / static_cast<double>(length)) : 1.0f;
@@ -240,6 +251,12 @@ bool turn_frame(std::uintptr_t board) noexcept {
         }
         float *right = frame, *up = frame + 4, *forward = frame + 8;
         const float hop_progress = progress;
+        if ((rise != 0 || reach != 0) && hold_end < 1.0f) {
+            // Out along the path (the frame is the skater's own here: up row 4, side row 0).
+            const float out = progress < top ? smooth(progress / top) : progress < hold_end ? 1.0f : 1.0f - smooth((progress - hold_end) / (1.0f - hold_end));
+            for (int i = 0; i < 3; ++i) frame[12 + i] += up[i] * rise * out + right[i] * reach * out;
+        }
+        if (top < 1.0f) progress = std::min(1.0f, progress / top); // the turn done by the top
         progress = flip_ease(progress);
         const float roll = spin.roll.load(std::memory_order_relaxed) * progress, yaw = spin.yaw.load(std::memory_order_relaxed) * progress,
                     pitch = spin.pitch.load(std::memory_order_relaxed) * progress;
@@ -302,12 +319,22 @@ bool start_board_hook(std::uintptr_t base) noexcept {
 }
 std::uint32_t take_root_update2_calls() noexcept { return root2_calls.exchange(0, std::memory_order_relaxed); }
 void set_board_context(std::uintptr_t context) noexcept { local_context.store(context, std::memory_order_relaxed); }
+void set_board_spin_path(float rise, float reach, float top, float hold_end) noexcept {
+    path_rise.store(rise, std::memory_order_relaxed);
+    path_reach.store(reach, std::memory_order_relaxed);
+    path_top.store(top, std::memory_order_relaxed);
+    path_hold.store(hold_end, std::memory_order_relaxed);
+}
 void set_board_spin_base(std::uintptr_t rig, bool own) noexcept {
     base_rig.store(rig, std::memory_order_relaxed);
     base_root.store(own && rig, std::memory_order_relaxed);
 }
 void start_board_spin(float roll, float yaw, float pitch, std::uint32_t milliseconds) noexcept {
     base_root.store(false, std::memory_order_relaxed);
+    path_rise.store(0, std::memory_order_relaxed);
+    path_reach.store(0, std::memory_order_relaxed);
+    path_top.store(1.0f, std::memory_order_relaxed);
+    path_hold.store(1.0f, std::memory_order_relaxed);
     spin.on.store(false, std::memory_order_release);
     spin.drop.store(0, std::memory_order_relaxed);
     spin.hop.store(0, std::memory_order_relaxed);

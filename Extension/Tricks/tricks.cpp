@@ -147,12 +147,20 @@ struct Runtime {
     // <dev> Grabs while grinding (experiment, off): the game has no grab in its grind node, but its grab clips reach the
     // hands to the board through reach IK states (ReachLockIKTag: floatchooser / boolchooser mirrored wrist states).
     // Those held while grinding with a trigger: does a hand go to the board?
-    bool grind_grab{};
+    bool grind_grab{true};
     std::array<std::uintptr_t, 4> s_reach{};
     bool grind_grab_on{};
     // <dev> A grab during a flip trick (experiment, off): the flip clips tag Bool.Anim.CannotGrab; held false when a
     // trigger is pressed in a flip's air, to see what the game's own grab does from there.
-    bool flip_grab{}, flip_grab_on{};
+    bool flip_grab{true}, flip_grab_on{};
+    bool grab_hand_back{};
+    std::uint32_t flip_grab_ms{520};
+    float flip_grab_rise{0.75f};  // metres the board rises at the top of a flip grab (from the feet to the waist)
+    float flip_grab_reach{0.3f};  // and out in front of the skater (toward the toes, the skater's side row)
+    float grab_rigid{40.0f};      // the board's drive strength through a flip grab's path
+    float grab_side{0.11f};      // the board's edge the back hand takes, in the deck's side axis (the front hand the other)
+    float grab_gain{0.6f};      // the share of the way to the board a hand is pulled each step
+    float grab_crouch{1.2f};     // m/s the pelvis and chest are pulled down in a grind grab
     std::uintptr_t s_cannot_grab{};
     std::uint64_t flip_grab_until{};  // the legs' scoop (the game's trick-setup crouch) while it turns
     // The owner's control scheme (2026-10-12): poses are landed into and held on the right stick.
@@ -1207,7 +1215,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             {
                 const bool posed = r.by_hold && r.freestyle != Freestyle::off;
                 const bool held_103 = (posed || exit_guard) && physics.valid && physics.state == 103;
-                set_board_rigid(held_103 ? r.rigid : 0.0f);
+                // A flip grab's board follows its path closely (it lagged and swung out on the drive's own strength).
+                set_board_rigid(held_103 ? r.rigid : r.flip_grab_on ? r.grab_rigid : 0.0f);
                 // Through the way out's air too: there the game's own frame follows the board, still upside down when
                 // the flip out pops, and the skater swung over head first (owner, 2026-10-14).
                 set_freestyle_root_upright(held_103 || exit_guard ? r.rootup : 0);
@@ -1517,35 +1526,79 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 r.leaving_until = std::min(r.leaving_until, now);
             }
         }
-        // <dev> Grab during a flip (experiment).
+        // Grab during a flip (the owner, 2026-10-14: "a clean kickflip animation that goes up to like waist where you grab
+        // it and catch it with your grabbing hand and bring it back to your feet in the grab position"). A trigger in a
+        // flip's air: the board rises to the waist and comes back down to the feet, the hand of that trigger meets it at
+        // the top and stays on it to the end (RT the back hand on the toe edge, LT the front hand on the heel edge).
         if (r.flip_grab || r.flip_grab_on) {
-            const bool trigger = pad[2] > 100 || pad[3] > 100;
-            if (r.flip_grab && in_air && trigger) {
+            const bool left = pad[2] > 100, right = pad[3] > 100;
+            std::uintptr_t core{};
+            if (r.rig) (void)copy_rows(r.rig + 0x4630, reinterpret_cast<float *>(&core), 2);
+            if (r.flip_grab && trick_enabled(r, "flipgrab") && in_air && (left || right) && !r.flip_grab_on && core) {
                 if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
                 double flip{};
-                if (read_state_at(base, r.s_current_flip, 1, flip) && flip != 0) r.flip_grab_until = now + 400;
+                if (read_state_at(base, r.s_current_flip, 1, flip) && flip != 0) {
+                    r.flip_grab_on = true;
+                    r.flip_grab_until = now + r.flip_grab_ms;
+                    r.grab_hand_back = right;
+                    // The flip is the mod's from here (the clip's board would turn it twice): one turn of it on the way up.
+                    const int f = static_cast<int>(flip);
+                    const float roll = f == 3 ? -360.0f : f == 4 || f == 7 ? 0.0f : 360.0f, yaw = f == 4 ? 180.0f : f == 7 ? -180.0f : f == 11 ? 360.0f : 0.0f;
+                    start_board_spin(roll, yaw, 0, r.flip_grab_ms);
+                    set_board_spin_base(r.rig, true);
+                    set_board_carry(core, r.flip_grab_ms, r.flip_grab_rise, r.flip_grab_reach, 0.42f, 0.58f);
+                    // The roll done by a quarter of the way (the board's drive lags it by about half a turn): right side up
+                    // when it reaches the hand at the top.
+                    set_board_spin_path(0, 0, 0.25f, 0.58f);
+                    if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
+                    (void)write_state_at(base, r.s_flip_intent, 1, 0);
+                    set_feet_free(core, r.flip_grab_ms + 60, r.feet_free);
+                    score_trick(right ? "flipgrab" : "flipgrab", std::format("{} {}", flip_name(static_cast<std::uint32_t>(flip)), right ? "Indy" : "Melon"));
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab (flip {}, {} hand).", flip, right ? "back" : "front");
+                }
             }
-            const bool want = r.flip_grab && in_air && now < r.flip_grab_until;
-            if (!r.s_cannot_grab) r.s_cannot_grab = find_state(base, "Animation/Dingo/Bool.Anim.CannotGrab");
-            if (want) (void)write_state_at(base, r.s_cannot_grab, 0, 0);
-            if (want != r.flip_grab_on) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab {} (state found {}).", want ? "on" : "off", r.s_cannot_grab != 0);
-            r.flip_grab_on = want;
+            if (r.flip_grab_on) {
+                // Held to the landing while the trigger is: the hand stays on the board at the feet (the grab held).
+                if (in_air && now >= r.flip_grab_until && (r.grab_hand_back ? right : left)) {
+                    if (r.flip_grab_until + 30000 > now) { // the path is over: the board is the clip's again, the hand stays
+                        stop_board_spin();
+                        r.flip_grab_until = now + 30000;
+                    }
+                    if (core) set_hand_pull(core, 80, r.grab_hand_back ? 11 : 15, r.grab_hand_back ? 12 : 16, r.grab_hand_back ? r.grab_side : -r.grab_side, 0.03f, 0.0f, r.grab_gain, 0.0f);
+                } else if (!in_air || now >= r.flip_grab_until) {
+                    float gap{}, board_gap{};
+                    const auto steps = take_hand_pull(gap);
+                    const auto carried = take_board_carry(board_gap);
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab over ({}): {} steps pulled, the hand {:.2f} m from the board; {} steps carried, the deck {:.2f} m off its path.",
+                                 in_air ? "time" : "landed", steps, gap, carried, board_gap);
+                    if (core) set_board_carry(core, 0, 0, 0, 0, 0);
+                    r.flip_grab_on = false;
+                    stop_board_spin();
+                    if (core) set_hand_pull(core, 0, -1, -1, 0, 0, 0, 0, 0);
+                } else if (core) {
+                    // The hand goes for the board from a third of the way up, and holds it from there.
+                    if (r.flip_grab_until > now + 20000 || now + r.flip_grab_ms * 2 / 3 >= r.flip_grab_until)
+                        set_hand_pull(core, 80, r.grab_hand_back ? 11 : 15, r.grab_hand_back ? 12 : 16, r.grab_hand_back ? r.grab_side : -r.grab_side, 0.03f, 0.0f, r.grab_gain, 0.0f);
+                }
+            }
         }
         // <dev> Grab while grinding (experiment).
         if (r.grind_grab || r.grind_grab_on) {
             const bool grinding = physics.valid && physics.state >= 400 && physics.state <= 406;
             const bool left = pad[2] > 100, right = pad[3] > 100; // LT, RT
-            const bool want = r.grind_grab && grinding && (left || right);
-            static const char *const names[4]{"Animation/Dingo/FloatChooser.Mirrored.Left.Wrist.Reach", "Animation/Dingo/BoolChooser.Mirrored.Left.Wrist.Locked",
-                                              "Animation/Dingo/FloatChooser.Mirrored.Right.Wrist.Reach", "Animation/Dingo/BoolChooser.Mirrored.Right.Wrist.Locked"};
-            for (int i = 0; i < 4; ++i)
-                if (!r.s_reach[i]) r.s_reach[i] = find_state(base, names[i]);
-            if (want != r.grind_grab_on)
-                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: grind grab {} (reach states found: {} {} {} {}).", want ? "on" : "off", r.s_reach[0] != 0, r.s_reach[1] != 0, r.s_reach[2] != 0, r.s_reach[3] != 0);
-            (void)write_state_at(base, r.s_reach[0], 2, want && left ? 1.0 : 0.0);
-            (void)write_state_at(base, r.s_reach[1], 0, want && left ? 1 : 0);
-            (void)write_state_at(base, r.s_reach[2], 2, want && right ? 1.0 : 0.0);
-            (void)write_state_at(base, r.s_reach[3], 0, want && right ? 1 : 0);
+            const bool want = r.grind_grab && trick_enabled(r, "grindgrab") && grinding && (left || right);
+            // The hand of the trigger brought to the board's edge, the body crouched down to it (the game's grind clips
+            // never grab: its reach states did nothing).
+            std::uintptr_t core{};
+            if (r.rig) (void)copy_rows(r.rig + 0x4630, reinterpret_cast<float *>(&core), 2);
+            if (want && core)
+                set_hand_pull(core, 80, right ? 11 : 15, right ? 12 : 16, right ? r.grab_side : -r.grab_side, 0.03f, 0.0f, r.grab_gain, r.grab_crouch);
+            if (want && !r.grind_grab_on) score_trick("grindgrab", right ? "Indy Grind Grab" : "Melon Grind Grab");
+            if (want != r.grind_grab_on) {
+                float gap{};
+                const auto steps = take_hand_pull(gap);
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: grind grab {} ({} hand; {} steps pulled, the hand {:.2f} m from the board).", want ? "on" : "off", right ? "back" : "front", steps, gap);
+            }
             r.grind_grab_on = want;
         }
         // The anti-casper's mirror: on from the catch; after the pose, kept until the way out is in the air (the flip
@@ -2402,6 +2455,22 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             r.shot_progress = arguments.size() > 1 ? static_cast<float>(std::atof(arguments[1].c_str())) : 0.5f;
         }
         return "Spin stills on.";
+    }
+    if (verb == "grab") { // grab side|gain|crouch|rise|ms <value> | status
+        if (arguments.size() == 2) {
+            const float v = static_cast<float>(std::atof(arguments[1].c_str()));
+            if (arguments[0] == "side") r.grab_side = v;
+            else if (arguments[0] == "gain") r.grab_gain = std::clamp(v, 0.0f, 1.0f);
+            else if (arguments[0] == "crouch") r.grab_crouch = std::clamp(v, 0.0f, 5.0f);
+            else if (arguments[0] == "rise") r.flip_grab_rise = std::clamp(v, 0.0f, 1.2f);
+            else if (arguments[0] == "reach") r.flip_grab_reach = std::clamp(v, -0.8f, 0.8f);
+            else if (arguments[0] == "rigid") r.grab_rigid = std::clamp(v, 0.0f, 2000.0f);
+            else if (arguments[0] == "ms") r.flip_grab_ms = static_cast<std::uint32_t>(std::clamp(v, 150.0f, 1500.0f));
+        }
+        float gap{};
+        const auto steps = take_hand_pull(gap);
+        return std::format("Grabs: side {:.2f}, gain {:.2f}, crouch {:.1f}, flip grab rise {:.2f} m over {} ms; {} steps pulled, the hand {:.2f} m from the board.", r.grab_side, r.grab_gain,
+                           r.grab_crouch, r.flip_grab_rise, r.flip_grab_ms, steps, gap);
     }
     if (verb == "dip") { // dip <metres> | ease <in> <slow>
         if (arguments.size() == 3 && arguments[0] == "ease") {

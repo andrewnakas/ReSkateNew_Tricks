@@ -74,6 +74,18 @@ bool request_board_turn_back(void (*after)() noexcept) noexcept;
 // The local skater's feet (skater core `core`) let go of the deck for the next `milliseconds`: their rider-to-deck
 // drives' force limits times `scale`; put back after. 0 ms puts them back at the next step.
 void set_feet_free(std::uintptr_t core, std::uint32_t milliseconds, float scale) noexcept;
+// A flip grab's board carried for `milliseconds` on a path in the skater's root frame: from where the deck is now, up
+// `rise` m and out `reach` m along the side row, there from `top` to `hold` of the time, back by the end. 0 ms stops.
+void set_board_carry(std::uintptr_t core, std::uint32_t milliseconds, float rise, float reach, float top, float hold) noexcept;
+// <dev> Steps carried since the last call and the deck's last distance from its place on the path (m).
+std::uint32_t take_board_carry(float& gap) noexcept;
+// For the next `milliseconds`: the rider's physics part `part` (and `part2` half as hard, -1 none) pulled each step a
+// `gain` share of the way to (x side, y up, z forward) in the deck's frame; `crouch` m/s pulls the pelvis and chest
+// down toward the deck. The rider's parts (index into the skater's 35 parts): 11 back hand, 12 its forearm, 15 front
+// hand, 16 its forearm, 31 pelvis (measured 2026-10-14 from their places in the root frame).
+void set_hand_pull(std::uintptr_t core, std::uint32_t milliseconds, int part, int part2, float x, float y, float z, float gain, float crouch) noexcept;
+// <dev> Steps pulled since the last call, and the hand's last distance to its point (m).
+std::uint32_t take_hand_pull(float& gap) noexcept;
 // <dev> Rows written since the last call.
 std::uint32_t take_feet_free_writes() noexcept;
 // <dev> How many turn-backs were done since the last call, and the last angle turned (degrees).

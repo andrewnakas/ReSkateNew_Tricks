@@ -37,6 +37,8 @@ void register_tricks_commands(Commands &registry) {
         {"turnback", "Turn a board spun round under the feet back to the skater's heading on landing", "[off]"},
         {"dip", "How far the board drops under the feet in an air flip; or the flips' turn rate curve", "<metres>|ease <in> <slow>"},
         {"spinshot", "Dev: slow the game to a stop at a point of a spin and take a still", "<tag> <progress>|<tag> air <ms>|off"},
+        {"grab", "The mod's grabs (grind and flip): the hand's edge, pull, crouch, the flip grab's rise and length", "side|gain|crouch|rise|ms <value> | status"},
+        {"parts", "Dev: log every physics part's place in the skater's root frame", nullptr},
         {"watchair", "Dev: log the body and board heading after every air", "[off]"},
         {"grindgrab", "Experiment: reach a hand to the board while grinding with a trigger held", "on|off"},
         {"antistyle", "The anti casper as a nose manual with the board turned over, or the mirrored casper", "nose|mirror | pitch <degrees>"},
