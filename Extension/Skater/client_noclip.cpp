@@ -1468,7 +1468,7 @@ void tricks_limb_free(std::uintptr_t core) noexcept {
     if (wanted) {
         f.last_mask = f.mask.load(std::memory_order_relaxed);
         f.last_scale = std::clamp(f.scale.load(std::memory_order_relaxed), 0.0f, 1.0f);
-        f.last_drop = std::clamp(f.drop.load(std::memory_order_relaxed), 0.0f, 0.5f);
+        f.last_drop = std::clamp(f.drop.load(std::memory_order_relaxed), -0.2f, 0.5f); // below 0 raises (a ground shuvit's lift)
     }
     const float share = 1.0f - (1.0f - f.last_scale) * carry_smooth(f.weight);
     int slot = 0;
@@ -1509,7 +1509,7 @@ void tricks_limb_free(std::uintptr_t core) noexcept {
         auto& held = f.pelvis_held[static_cast<std::size_t>(k)];
         if (!held || point != wrote) saved = point;
         const float drop = f.last_drop * carry_smooth(f.weight);
-        if (drop <= 0) {
+        if (std::abs(drop) < 1e-4f) {
             if (held && point == wrote) { (void)copy_to(at + 0x30, saved.data(), sizeof(saved)); (void)copy_to(at + 0x88, saved.data(), sizeof(saved)); }
             held = false;
             continue;
@@ -1537,6 +1537,11 @@ struct KinematicSpin {
     std::atomic<std::uintptr_t> core{};
     std::atomic<std::uint64_t> start{}, length{}; // QueryPerformanceCounter
     std::atomic<float> roll{}, yaw{}, pitch{}, top{1.0f}, ease_in{0.08f}, ease_slow{0.3f}, dip{};
+    // A flip grab's lift (the owner, 2026-10-15: "come out and up and a little in front of you and do a flip"): the board
+    // goes up `lift_up` m and out `lift_out` m along its own side row (toward the toes), held over the middle, and back
+    // down on to the base by the end.
+    std::atomic<float> lift_up{}, lift_out{};
+    float last_lift[3]{};
     std::atomic<bool> finish_now{};
     // The base is the game's own board for the clip that plays (the drive's target), step by step, rather than the
     // board at the start levelled: no comply and flick-it flips (their clip's board swung far round, and the board
@@ -1676,6 +1681,7 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
                 k.pelvis_turn = 0;
             }
             k.last_offset = 0;
+            for (auto& v : k.last_lift) v = 0;
             k.finishing = false;
             k.started = true;
         }
@@ -1772,6 +1778,7 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
             }
         }
     blended:
+        const float base_side[3]{side[0], side[1], side[2]};
         if (!last) {
             const float e = kin_ease(q, k.ease_in.load(std::memory_order_relaxed), k.ease_slow.load(std::memory_order_relaxed));
             if (const float a = k.yaw.load(std::memory_order_relaxed) * e; a != 0) kin_turn(fwd, side, a);
@@ -1782,6 +1789,25 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
         const float offset = -k.dip.load(std::memory_order_relaxed) * std::sin(p * 3.14159265358979f);
         centre[1] += offset - k.last_offset;
         k.last_offset = last ? 0.0f : offset;
+        {
+            // Up and out over the first 40%, held to 55%, back down by the end (smooth both ways: no velocity steps).
+            const float lu = k.lift_up.load(std::memory_order_relaxed), lo = k.lift_out.load(std::memory_order_relaxed);
+            float lift[3]{};
+            if ((lu != 0 || lo != 0) && !last) {
+                const auto smooth = [](float x) { x = std::clamp(x, 0.0f, 1.0f); return x * x * (3.0f - 2.0f * x); };
+                const float b = p < 0.4f ? smooth(p / 0.4f) : p < 0.55f ? 1.0f : 1.0f - smooth((p - 0.55f) / 0.45f);
+                const float h = std::sqrt(base_side[0] * base_side[0] + base_side[2] * base_side[2]);
+                if (h > 1e-3f) {
+                    lift[0] = base_side[0] / h * lo * b;
+                    lift[2] = base_side[2] / h * lo * b;
+                }
+                lift[1] = lu * b;
+            }
+            for (int c = 0; c < 3; ++c) {
+                centre[static_cast<std::size_t>(c)] += lift[c] - k.last_lift[c];
+                k.last_lift[c] = lift[c];
+            }
+        }
         const float* desired[3]{side, up, fwd};
         for (int c = 0; c < 3; ++c) k.wrote_up[c] = up[c];
         k.wrote = true;
@@ -2337,12 +2363,18 @@ std::uint32_t take_limb_free_writes() noexcept { return limb_free().writes.excha
 void set_pull_moves_place(bool on) noexcept { pull_moves_place().store(on, std::memory_order_relaxed); }
 void set_kinematic_spin_with_pelvis(bool on) noexcept { kinematic_spin().with_pelvis.store(on, std::memory_order_relaxed); }
 void request_drive_dump(std::uintptr_t core) noexcept { drive_dump_core.store(core, std::memory_order_relaxed); }
+void set_kinematic_spin_lift(float up, float out) noexcept {
+    kinematic_spin().lift_up.store(up, std::memory_order_relaxed);
+    kinematic_spin().lift_out.store(out, std::memory_order_relaxed);
+}
 void set_kinematic_spin_follow(bool follow) noexcept { kinematic_spin().follow.store(follow, std::memory_order_relaxed); }
 void set_kinematic_spin_pose(bool pose, int dir) noexcept {
     kinematic_spin().pose_dir.store(dir, std::memory_order_relaxed);
     kinematic_spin().pose.store(pose, std::memory_order_relaxed);
 }
 void set_kinematic_spin(std::uintptr_t core, std::uint32_t milliseconds, float roll, float yaw, float pitch, float top, float ease_in, float ease_slow, float dip) noexcept {
+    kinematic_spin().lift_up.store(0, std::memory_order_relaxed);
+    kinematic_spin().lift_out.store(0, std::memory_order_relaxed);
     auto& k = kinematic_spin();
     k.follow.store(false, std::memory_order_relaxed);
     k.pose.store(false, std::memory_order_relaxed);

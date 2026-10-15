@@ -99,6 +99,15 @@ struct Runtime {
         std::uint64_t writes{};
     };
     std::vector<Extra> extras;
+    // Watched states: logged with the physics state whenever their value changes (`tricks state watch <name> b|i|f`).
+    struct Watched {
+        std::string name;
+        int kind{};
+        std::uintptr_t at{};
+        double last{-12345.0};
+        bool missing_logged{};
+    };
+    std::vector<Watched> watched;
     // </dev>
     // No comply flips. A no comply is the game's own (a push, then the right stick down). Holding the flip trick the
     // scripts would ask for (EnumGS.Intent.FlipTrick, with Float.Intent.TrickFlipSpeed) through its air makes the game
@@ -158,8 +167,13 @@ struct Runtime {
     bool grab_hand_back{};
     std::uint64_t flip_grab_started{};
     std::uint32_t flip_grab_ms{900}; // slower: the owner could not see the catch at 520; one fluid motion at 900
-    std::uint32_t flip_grab_spin_ms{420}; // the flip into the game's grab (a retail flip's length)
-    float flip_grab_rise{0.55f};  // metres the board rises at the top of a flip grab (from the feet to the waist)
+    bool flip_grab_endflip{true};
+    // The game's own grab states (measured 2026-10-15, a stock RT grab: CanGrab, IsGrabbing, GrabType 2; a stock ground
+    // grab: CanGroundGrab, State.Is.GroundGrab, IsGrabbing, GrabType 2, then IsGroundGrabLoop).
+    std::uintptr_t s_can_grab{}, s_can_ground_grab{}, s_is_ground_grab{}, s_is_grabbing{}, s_grab_type{}, s_ground_grab_loop{};
+    std::uint64_t grind_grab_since{};
+    std::uint32_t flip_grab_spin_ms{650}; // out, flipped, and back into the game's grab
+    float flip_grab_rise{0.35f};  // metres the board rises at the top of a flip grab (from the feet to the waist)
     float flip_grab_reach{0.25f};  // and out in front of the skater (toward the toes, the skater's side row)
     float grab_rigid{40.0f};      // the board's drive strength through a flip grab's path
     float grab_side{0.11f};      // the board's edge the back hand takes, in the deck's side axis (the front hand the other)
@@ -305,6 +319,10 @@ struct Runtime {
     std::uint64_t zone_since{}, shuv_down_at{}, shuv_side_at{};
     bool gs_rim{};           // the ground shuvit's stroke went out to the rim (the game's pop shuvit, not this)
     float gs_peak{}, gs_rim_at{0.88f};
+    float gs_lift{0.08f}; // metres the body rises for a ground shuvit's turn (the pelvis drive raised)
+    float gs_jump{0.4f}, gs_speed{1.6f}; // the ground shuvit as the game's pop shuvit: its pop strength and turn speed
+    bool gs_game{false}; // (the game's ollie asked for never popped from riding: runs r11-r14)   // the ground shuvit as the game's own pop shuvit with a small pop (off: the mod turns the board)
+    float pop_jump{1.0f}, pop_speed{1.0f};
     int shuv_side{};
     bool trace{true};
     std::uint64_t primo_out_at{};
@@ -676,6 +694,18 @@ void air_poke_step() noexcept {
 void announce(std::string_view name);
 void score_trick(std::string_view id, std::string_view name);
 void start_ground_shuv(Runtime &r, std::uint64_t now, bool frontside) {
+    // The game's own pop shuvit with a small pop (the owner, 2026-10-15: the board turned under feet still on it, "the feet
+    // need a clear flick"): the game's legs scoop and lift off and the board turns under them, barely off the ground.
+    if (r.gs_game) {
+        r.pop_flip = frontside ? 7u : 4u;
+        r.pop_until = now + 600;
+        r.pop_started = 0;
+        r.pop_jump = r.gs_jump;
+        r.pop_speed = r.gs_speed;
+        score_trick("groundshuv", frontside ? "FS Ground Shuvit" : "Ground Shuvit");
+        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: ground {} shuvit (the game's, pop {:.2f}).", frontside ? "frontside" : "backside", r.gs_jump);
+        return;
+    }
     std::uint32_t seen{}, turned{};
     board_hook_counts(seen, turned); // counted afresh over the turn
     // Played on the board itself (game time, the clip's board as the base, lifted by the hop): it ends exactly on the
@@ -686,6 +716,11 @@ void start_ground_shuv(Runtime &r, std::uint64_t now, bool frontside) {
     if (core) {
         start_board_spin_kinematic(core, 0, frontside ? -180.0f : 180.0f, 0, r.gs_ms, 1.0f, -r.gs_hop);
         set_kinematic_spin_follow(true);
+        // The feet off the deck for the turn: their drives held them to it and the board twisted them round, then they
+        // jumped back (the owner, 2026-10-15: "the feet need a clear flick"). Freed, and the body lifted a little (the
+        // pelvis drive raised) so the board turns under them.
+        set_feet_free(core, r.gs_ms + 60, r.feet_free);
+        set_limb_free(core, r.gs_ms, 0, 1.0f, -r.gs_lift);
     } else {
         start_board_spin(0, frontside ? -180.0f : 180.0f, 0, r.gs_ms);
         set_board_hop(r.gs_hop);
@@ -1483,6 +1518,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                             r.pop_flip = id == std::string_view("flick_kickflip") ? 2u : id == std::string_view("flick_heelflip") ? 3u : id == std::string_view("flick_shuvit") ? 4u : id == std::string_view("flick_fsshuvit") ? 7u : 11u;
                             r.pop_until = now + 1500;
                             r.pop_started = 0;
+                            r.pop_jump = 1.0f;
+                            r.pop_speed = 1.0f;
                             r.out_roll = r.out_yaw = 0; // the game's own flip: no turn of ours
                             r.out_pose = false;
                             r.out_until = 0;
@@ -1616,9 +1653,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
                 if (!r.s_flip_speed_intent) r.s_flip_speed_intent = find_state(base, "Animation/Dingo/Float.Intent.TrickFlipSpeed");
                 (void)write_state_at(base, r.s_ollie, 0, asking ? 1 : 0);
-                if (asking) (void)write_state_at(base, r.s_jump, 2, 1.0);
+                if (asking) (void)write_state_at(base, r.s_jump, 2, r.pop_jump);
                 (void)write_state_at(base, r.s_flip_intent, 1, r.pop_flip);
-                (void)write_state_at(base, r.s_flip_speed_intent, 2, 1.0);
+                (void)write_state_at(base, r.s_flip_speed_intent, 2, r.pop_speed);
             }
             if (in_air && r.pop_started) {
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flick-out popped as the game's flip trick {} ({} ms after riding).", r.pop_flip, now - r.pop_started);
@@ -1637,7 +1674,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             if (r.flip_grab && trick_enabled(r, "flipgrab") && in_air && (left || right) && !r.flip_grab_on && core) {
                 if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
                 double flip{};
-                if (read_state_at(base, r.s_current_flip, 1, flip) && flip != 0) {
+                // A flip, not the game's ollie (1) or nollie (16): those with a trigger are the game's own grab.
+                if (read_state_at(base, r.s_current_flip, 1, flip) && flip != 0 && flip != 1 && flip != 16) {
                     r.flip_grab_on = true;
                     r.flip_grab_until = now + r.flip_grab_ms;
                     r.flip_grab_started = now;
@@ -1650,10 +1688,16 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     // hand comes in, dipped under the tucked feet, and is done when the hand has it.
                     const int f = static_cast<int>(flip);
                     const float roll = f == 3 ? -360.0f : f == 4 || f == 7 ? 0.0f : 360.0f, yaw = f == 4 ? 180.0f : f == 7 ? -180.0f : f == 11 ? 360.0f : 0.0f;
-                    start_board_spin_kinematic(core, roll, yaw, 0, r.flip_grab_spin_ms, 1.0f, r.flip_dip);
+                    // Out and up in front (the owner, 2026-10-15: under the feet it "didn't flip"), turned by the top, and
+                    // back down on to the game's grab board, where its hand is.
+                    start_board_spin_kinematic(core, roll, yaw, 0, r.flip_grab_spin_ms, 0.5f, 0.0f);
                     set_kinematic_spin_follow(true);
+                    set_kinematic_spin_lift(r.flip_grab_rise, r.flip_grab_reach);
                     if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
                     (void)write_state_at(base, r.s_flip_intent, 1, 0);
+                    // The game's flip ended too, so its grab can start (with the flip still current the hand never came:
+                    // stills r10).
+                    if (r.flip_grab_endflip) (void)write_state_at(base, r.s_current_flip, 1, 0);
                     set_feet_free(core, r.flip_grab_spin_ms + 60, r.feet_free);
                     // The vert tuck: the pelvis drive lowered toward the board, the knees come up (the arms stay the
                     // game's grab).
@@ -1667,6 +1711,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 // once the flip has turned.
                 const bool holding = r.grab_hand_back ? right : left;
                 if (in_air && holding && core) set_limb_free(core, 80, 0, 1.0f, r.grab_tuck);
+                // The game's grab gate held open (it is shut through a flip: the trigger never brought its grab, and with
+                // the gate open the game's own grab plays, its hand to the board: run r13).
+                if (in_air && holding) {
+                    if (!r.s_can_grab) r.s_can_grab = find_state(base, "Animation/Dingo/Bool.GP.CanGrab");
+                    (void)write_state_at(base, r.s_can_grab, 0, 1);
+                }
                 if (!in_air) {
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab landed {} ms after the catch (the flip {}).", now - r.flip_grab_started,
                                  kinematic_spin_running() ? "still turning" : "done");
@@ -1684,13 +1734,24 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             // never grab: its reach states did nothing).
             std::uintptr_t core{};
             if (r.rig) (void)copy_rows(r.rig + 0x4630, reinterpret_cast<float *>(&core), 2);
-            if (want && core)
-            {
-                set_hand_pull(core, 80, right ? 11 : 15, right ? 12 : 16, right ? r.grab_side : -r.grab_side, 0.03f, 0.0f, r.grab_gain, 0.0f);
-                // The arm's motors let go and the pelvis drive lowered to the board: the knees bend under it (no grind clip
-                // grabs: the crouch and reach are the mod's).
-                set_limb_free(core, 120, right ? 1 : 2, r.grab_limbs, r.grab_crouch);
-            }
+            // The game's own ground grab played on the rail (the owner, 2026-10-15: it scored but "no grab happens"; the
+            // mod's pulls never moved the hand). Its states, as a stock ground grab sets them, held while grinding with
+            // the trigger: the game crouches and puts the hand on the board itself.
+            const auto ground_grab = [&](bool on) {
+                const auto put = [&](std::uintptr_t &at, const char *name, int kind, double value) {
+                    if (!at) at = find_state(base, name);
+                    (void)write_state_at(base, at, kind, value);
+                };
+                put(r.s_can_ground_grab, "Animation/Dingo/Bool.GP.CanGroundGrab", 0, on);
+                put(r.s_is_ground_grab, "Animation/Dingo/Bool.State.Is.GroundGrab", 0, on);
+                put(r.s_is_grabbing, "Animation/Dingo/Bool.Anim.IsGrabbing", 0, on);
+                put(r.s_grab_type, "Animation/Dingo/EnumGS.GrabType", 1, on ? (right ? 2 : 1) : 0);
+                put(r.s_ground_grab_loop, "Animation/Dingo/Bool.Anim.IsGroundGrabLoop", 0, on && now - r.grind_grab_since > 600);
+            };
+            if (want && !r.grind_grab_on) r.grind_grab_since = now;
+            if (want) ground_grab(true);
+            else if (r.grind_grab_on) ground_grab(false);
+            (void)core;
             if (want && !r.grind_grab_on) score_trick("grindgrab", right ? "Indy Grind Grab" : "Melon Grind Grab");
             if (want != r.grind_grab_on) {
                 float gap{};
@@ -2165,6 +2226,20 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         if (!extra.at) extra.at = find_anywhere(base, extra.name.c_str());
         if (extra.at && write_state_at(base, extra.at, extra.kind, extra.value)) ++extra.writes;
     }
+    for (auto &w : r.watched) {
+        if (!w.at) w.at = find_state(base, w.name.c_str());
+        if (!w.at) w.at = find_anywhere(base, w.name.c_str());
+        if (!w.at) {
+            if (!w.missing_logged && state_objects_known()) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: state watch: {} not found.", w.name);
+            w.missing_logged = state_objects_known();
+            continue;
+        }
+        double v{};
+        if (!read_state_at(base, w.at, w.kind, v) || v == w.last) continue;
+        w.last = v;
+        const auto ph = watched_physics_state();
+        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: state {} = {} at {} ms (physics {}).", w.name, v, GetTickCount64() % 100000, ph.valid ? static_cast<int>(ph.state) : -1);
+    }
     // </dev>
     if (r.mode_hold) {
         if (!any_hold(r, now)) {
@@ -2387,7 +2462,15 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
                 text += std::format(" {}={} ({}{}, {} writes)", extra.name, extra.value, extra.at ? "found" : "not found", extra.freestyle_only ? ", freestyle only" : "", extra.writes);
             return r.extras.empty() ? "No states held." : text;
         }
+        if (arguments[0] == "watch" && arguments.size() >= 3) {
+            Runtime::Watched w;
+            w.name = full(arguments[1]);
+            w.kind = arguments[2] == "b" ? 0 : arguments[2] == "i" ? 1 : 2;
+            r.watched.push_back(w);
+            return "Watching " + w.name + ".";
+        }
         if (arguments[0] == "clear") {
+            r.watched.clear();
             r.extras.clear();
             return "Held states cleared (their last values stay until the game writes them).";
         }
@@ -2616,6 +2699,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             else if (arguments[0] == "reach") r.flip_grab_reach = std::clamp(v, -0.8f, 0.8f);
             else if (arguments[0] == "rigid") r.grab_rigid = std::clamp(v, 0.0f, 2000.0f);
             else if (arguments[0] == "ms") r.flip_grab_ms = static_cast<std::uint32_t>(std::clamp(v, 150.0f, 1500.0f));
+            else if (arguments[0] == "endflip") r.flip_grab_endflip = v != 0;
             else if (arguments[0] == "spin") r.flip_grab_spin_ms = static_cast<std::uint32_t>(std::clamp(v, 150.0f, 1500.0f));
             else if (arguments[0] == "tuck") r.grab_tuck = std::clamp(v, 0.0f, 0.5f);
         }
@@ -2839,7 +2923,14 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         // tricks groundshuv [fs|bs|on|off|ms <n>]
         if (!arguments.empty() && (arguments[0] == "on" || arguments[0] == "off")) {
             r.ground_shuvs = arguments[0] == "on";
-            return r.ground_shuvs ? "Ground shuvits on: riding, hold the right stick left or right and click the left stick." : "Ground shuvits off.";
+            return r.ground_shuvs ? "Ground shuvits on: riding, the right stick part way down, rolled to a side and let go." : "Ground shuvits off.";
+        }
+        if (arguments.size() == 2 && (arguments[0] == "jump" || arguments[0] == "speed" || arguments[0] == "game")) { // <dev>
+            const float v = static_cast<float>(std::atof(arguments[1].c_str()));
+            if (arguments[0] == "jump") r.gs_jump = std::clamp(v, 0.0f, 1.0f);
+            else if (arguments[0] == "speed") r.gs_speed = std::clamp(v, 0.5f, 3.0f);
+            else r.gs_game = arguments[1] == "on";
+            return std::format("Ground shuvit: the game's {} (pop {:.2f}, turn speed {:.2f}).", r.gs_game ? "on" : "off", r.gs_jump, r.gs_speed);
         }
         std::uint32_t ms{};
         if (arguments.size() == 2 && arguments[0] == "ms" && number(arguments[1], ms) && ms >= 100 && ms <= 2000) {
