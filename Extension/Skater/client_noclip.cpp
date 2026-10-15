@@ -933,6 +933,7 @@ struct PullState {
     std::array<ULONGLONG, 32> seen{};
 };
 PullState& pull_state() { static auto* value = new PullState; return *value; }
+std::atomic<bool>& pull_moves_place() { static std::atomic<bool> value{true}; return value; }
 float pull_part(std::size_t index, std::uintptr_t part, const float* target, const std::array<float, 3>& ref, float gain, float dt, float weight) noexcept {
     if (index >= 32) return 0;
     SourceReader r;
@@ -964,7 +965,13 @@ float pull_part(std::size_t index, std::uintptr_t part, const float* target, con
     std::array<float, 3> out{};
     for (int i = 0; i < 3; ++i) out[i] = v[i] + (ref[i] + cmd[i] - v[i]) * w;
     body_write(part + 0x70, out);
-    body_write(part + 0x60, flags | 8u);
+    // The place moved on by that velocity too: the drawn parts' velocity alone changed nothing (2026-10-15).
+    if (pull_moves_place().load(std::memory_order_relaxed)) {
+        std::array<float, 3> place{};
+        for (int i = 0; i < 3; ++i) place[i] = at[i] + (ref[i] + cmd[i] - v[i]) * w * dt;
+        body_write(part + 0x50, place);
+        body_write(part + 0x60, flags | 4u | 8u);
+    } else body_write(part + 0x60, flags | 8u);
     return std::sqrt(gap2);
 }
 // A hand brought to the board (the mod's grind grab, and a flip grab held to the landing): the hand, its forearm and
@@ -2327,6 +2334,7 @@ void set_limb_free(std::uintptr_t core, std::uint32_t milliseconds, int mask, fl
     f.until.store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_relaxed);
 }
 std::uint32_t take_limb_free_writes() noexcept { return limb_free().writes.exchange(0, std::memory_order_relaxed); }
+void set_pull_moves_place(bool on) noexcept { pull_moves_place().store(on, std::memory_order_relaxed); }
 void set_kinematic_spin_with_pelvis(bool on) noexcept { kinematic_spin().with_pelvis.store(on, std::memory_order_relaxed); }
 void request_drive_dump(std::uintptr_t core) noexcept { drive_dump_core.store(core, std::memory_order_relaxed); }
 void set_kinematic_spin_follow(bool follow) noexcept { kinematic_spin().follow.store(follow, std::memory_order_relaxed); }

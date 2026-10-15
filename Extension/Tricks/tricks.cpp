@@ -2598,6 +2598,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             else if (arguments[0] == "crouch") r.grab_crouch = std::clamp(v, 0.0f, 0.5f);
             else if (arguments[0] == "tuck") r.grab_tuck = std::clamp(v, 0.0f, 0.5f);
             else if (arguments[0] == "armmask") r.grab_arm_mask = static_cast<int>(v);
+            else if (arguments[0] == "place") set_pull_moves_place(v != 0);
             else if (arguments[0] == "limbs") r.grab_limbs = std::clamp(v, 0.0f, 1.0f);
             else if (arguments[0] == "rise") r.flip_grab_rise = std::clamp(v, 0.0f, 1.2f);
             else if (arguments[0] == "reach") r.flip_grab_reach = std::clamp(v, -0.8f, 0.8f);

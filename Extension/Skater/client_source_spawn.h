@@ -85,6 +85,7 @@ void request_drive_dump(std::uintptr_t core) noexcept;
 void set_limb_free(std::uintptr_t core, std::uint32_t milliseconds, int mask, float scale, float drop) noexcept;
 std::uint32_t take_limb_free_writes() noexcept;
 void set_kinematic_spin_with_pelvis(bool on) noexcept;
+void set_pull_moves_place(bool on) noexcept;
 void set_kinematic_spin_pose(bool pose, int dir) noexcept;
 // The board's drive target (rows side, up, forward at 0, 4, 8 of a 4x4 frame), from the board hook every step.
 void set_board_target_rows(const float* rows) noexcept;
