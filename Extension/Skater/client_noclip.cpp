@@ -954,7 +954,12 @@ struct BoardCarry {
     std::atomic<float> hand_x{}; // where on the deck's side row the hand holds it
     // Physics thread only: the deck's place in the root frame at the start.
     bool started{}, logged{};
+    std::uint64_t seen{};
+    double elapsed{}; // game seconds since the start
     float side0{}, up0{}, forward0{};
+    // The path's frame, fixed at the start: the skater's side and forward rows laid flat, and the world's up. The root
+    // itself is built from the board, so a path in it moved with the board and asked for nothing (2026-10-14).
+    float s_axis[3]{}, f_axis[3]{};
     std::atomic<std::uint32_t> steps{};
     std::atomic<float> gap{};
 };
@@ -963,17 +968,38 @@ float carry_smooth(float x) noexcept {
     x = std::clamp(x, 0.0f, 1.0f);
     return x * x * (3.0f - 2.0f * x);
 }
+// The game's own time for one physics step of this skater (context + 0x17ec): the mod's board moves count in it, so
+// they keep pace with slow motion (the wall clock ran on through a slowed game and ended them early: 2026-10-14).
+float step_seconds(std::uintptr_t core) noexcept {
+    std::uintptr_t context{};
+    float seconds{};
+    if (!peek_at(core + 0x3c0, context) || !context || !peek_at(context + 0x17ec, seconds) || !(seconds > 0.0f && seconds < 0.1f)) return 1.0f / 60.0f;
+    return seconds;
+}
+double qpc_seconds(std::uint64_t ticks) noexcept {
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    return static_cast<double>(ticks) / static_cast<double>(frequency.QuadPart);
+}
 void tricks_board_carry(std::uintptr_t core) noexcept {
     auto& c = board_carry();
-    LARGE_INTEGER now{};
-    QueryPerformanceCounter(&now);
     const auto start = c.start.load(std::memory_order_acquire), length = c.length.load(std::memory_order_relaxed);
-    if (!core || core != c.core.load(std::memory_order_relaxed) || !start || !length || static_cast<std::uint64_t>(now.QuadPart) >= start + length) {
+    if (!core || core != c.core.load(std::memory_order_relaxed) || !start || !length) {
         c.started = false;
         c.logged = false;
         return;
     }
-    const float p = static_cast<float>(static_cast<double>(static_cast<std::uint64_t>(now.QuadPart) - start) / static_cast<double>(length));
+    if (start != c.seen) {
+        c.seen = start;
+        c.elapsed = 0;
+    } else c.elapsed += step_seconds(core);
+    const float p = static_cast<float>(c.elapsed / qpc_seconds(length));
+    if (p >= 1.0f) {
+        c.start.store(0, std::memory_order_release);
+        c.started = false;
+        c.logged = false;
+        return;
+    }
     SourceLastError error;
     auto& state = source_state();
     if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
@@ -987,13 +1013,22 @@ void tricks_board_carry(std::uintptr_t core) noexcept {
                    forward = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4740), place = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4750);
         const auto deck_at = reader.value<std::array<float, 3>>(bodies.parts[8], 0x50);
         const auto travel = reader.value<std::array<float, 3>>(bodies.parts[31], 0x70); // the pelvis: the skater's own travel
+        const auto pelvis = reader.value<std::array<float, 3>>(bodies.parts[31], 0x50);
         reader.verify();
         const auto dot = [](const float* a, const std::array<float, 4>& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
         if (!c.started) {
-            const float d[3]{deck_at[0] - place[0], deck_at[1] - place[1], deck_at[2] - place[2]};
-            c.side0 = dot(d, side);
-            c.up0 = dot(d, up);
-            c.forward0 = dot(d, forward);
+            const auto flat = [](const std::array<float, 4>& row, float* out) {
+                const float run = std::sqrt(row[0] * row[0] + row[2] * row[2]);
+                out[0] = run > 1e-3f ? row[0] / run : 1.0f;
+                out[1] = 0.0f;
+                out[2] = run > 1e-3f ? row[2] / run : 0.0f;
+            };
+            flat(side, c.s_axis);
+            flat(forward, c.f_axis);
+            const float d[3]{deck_at[0] - pelvis[0], deck_at[1] - pelvis[1], deck_at[2] - pelvis[2]};
+            c.side0 = d[0] * c.s_axis[0] + d[2] * c.s_axis[2];
+            c.up0 = d[1];
+            c.forward0 = d[0] * c.f_axis[0] + d[2] * c.f_axis[2];
             c.started = true;
         }
         const float top = std::clamp(c.top.load(std::memory_order_relaxed), 0.1f, 0.9f), hold = std::clamp(c.hold.load(std::memory_order_relaxed), top, 0.95f);
@@ -1008,13 +1043,14 @@ void tricks_board_carry(std::uintptr_t core) noexcept {
             const auto at = r4.value<std::array<float, 3>>(bodies.parts[static_cast<std::size_t>(hand)], 0x50);
             r4.verify();
             const float x = c.hand_x.load(std::memory_order_relaxed);
-            for (int i = 0; i < 3; ++i) held[i] = at[i] - side[i] * x;
+            for (int i = 0; i < 3; ++i) held[i] = at[i] - c.s_axis[i] * x;
             const float distance = std::sqrt((held[0] - deck_at[0]) * (held[0] - deck_at[0]) + (held[1] - deck_at[1]) * (held[1] - deck_at[1]) + (held[2] - deck_at[2]) * (held[2] - deck_at[2]));
-            // Only a hand that has come near (an arm flung out is not a catch); full while held, gone by the end.
-            if (distance < 0.5f) with_hand = p < hold ? carry_smooth((p - top * 0.8f) / (top * 0.2f + 1e-3f)) : 1.0f - carry_smooth((p - hold) / (1.0f - hold));
+            // Board and hand meet: the hand is pulled to the board and the board goes to the hand (a hand within 0.7 m;
+            // an arm flung far out is not a catch); full while held, gone by the end.
+            if (distance < 0.7f) with_hand = p < hold ? carry_smooth((p - top * 0.8f) / (top * 0.2f + 1e-3f)) : 1.0f - carry_smooth((p - hold) / (1.0f - hold));
         }
         for (int i = 0; i < 3; ++i) {
-            const float path = place[i] + side[i] * s + up[i] * u + forward[i] * f;
+            const float path = pelvis[i] + c.s_axis[i] * s + (i == 1 ? u : 0.0f) + c.f_axis[i] * f;
             const float target = path + (held[i] - path) * with_hand;
             const float d = target - deck_at[i];
             gap += d * d;
@@ -1072,7 +1108,8 @@ struct KinematicSpin {
     // Physics thread only: a landing before the end finishes the turn quickly instead of at once.
     bool finishing{};
     float finish_from{};
-    std::uint64_t finish_start{};
+    double finish_elapsed{}, elapsed{}; // game seconds
+    std::uint64_t seen{};
     std::atomic<std::uint32_t> steps{}, failures{}, skipped{};
     // Physics thread only.
     bool started{};
@@ -1116,19 +1153,19 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
         k.started = false;
         return;
     }
-    LARGE_INTEGER now{};
-    QueryPerformanceCounter(&now);
-    float p = static_cast<float>(static_cast<double>(static_cast<std::uint64_t>(now.QuadPart) - start) / static_cast<double>(length));
+    if (start != k.seen) {
+        k.seen = start;
+        k.elapsed = 0;
+    } else k.elapsed += step_seconds(core);
+    float p = static_cast<float>(k.elapsed / qpc_seconds(length));
     // Asked to finish early (a landing): the rest of the turn over 90 ms, not in one step (it jumped, 2026-10-14).
     if (k.finish_now.load(std::memory_order_relaxed) && p < 1.0f) {
-        LARGE_INTEGER frequency{};
-        QueryPerformanceFrequency(&frequency);
         if (!k.finishing) {
             k.finishing = true;
             k.finish_from = p;
-            k.finish_start = static_cast<std::uint64_t>(now.QuadPart);
+            k.finish_elapsed = k.elapsed;
         }
-        const float t = static_cast<float>(static_cast<double>(static_cast<std::uint64_t>(now.QuadPart) - k.finish_start) / (static_cast<double>(frequency.QuadPart) * 0.09));
+        const float t = static_cast<float>((k.elapsed - k.finish_elapsed) / 0.09);
         p = k.finish_from + (1.0f - k.finish_from) * std::min(1.0f, t);
     }
     const bool last = p >= 1.0f;
@@ -1193,7 +1230,7 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
                 fwd[c] = bt_follow.rows[static_cast<std::size_t>(6 + c)].load(std::memory_order_relaxed);
             }
         } else {
-            float axis_raw[3]{up[2], 0.0f, -up[0]}; // up x (0,1,0)
+            float axis_raw[3]{-up[2], 0.0f, up[0]}; // up x (0,1,0): the turn that brings the up row to the world's up
             float s = std::sqrt(axis_raw[0] * axis_raw[0] + axis_raw[2] * axis_raw[2]);
             // Upside down (a pose's flick-out): no tilt to take out, so the board rolls back over along its length.
             if (s <= 1e-3f && up[1] < 0) {
@@ -1293,7 +1330,7 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
         }
         k.steps.fetch_add(1, std::memory_order_relaxed);
         if (last) {
-            k.ended_at.store(static_cast<float>(static_cast<double>(static_cast<std::uint64_t>(now.QuadPart) - start) / static_cast<double>(length)), std::memory_order_relaxed);
+            k.ended_at.store(static_cast<float>(k.elapsed / qpc_seconds(length)), std::memory_order_relaxed);
             k.ended_early.store(k.finish_now.load(std::memory_order_relaxed), std::memory_order_relaxed);
             k.start.store(0, std::memory_order_release);
             k.started = false;

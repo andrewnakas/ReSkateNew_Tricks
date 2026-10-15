@@ -155,6 +155,7 @@ struct Runtime {
     // trigger is pressed in a flip's air, to see what the game's own grab does from there.
     bool flip_grab{true}, flip_grab_on{};
     bool grab_hand_back{};
+    std::uint64_t flip_grab_started{};
     std::uint32_t flip_grab_ms{760}; // slower: the owner could not see the catch at 520
     float flip_grab_rise{0.75f};  // metres the board rises at the top of a flip grab (from the feet to the waist)
     float flip_grab_reach{0.3f};  // and out in front of the skater (toward the toes, the skater's side row)
@@ -1550,6 +1551,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 if (read_state_at(base, r.s_current_flip, 1, flip) && flip != 0) {
                     r.flip_grab_on = true;
                     r.flip_grab_until = now + r.flip_grab_ms;
+                    r.flip_grab_started = now;
                     r.grab_hand_back = right;
                     // The flip is the mod's from here (the clip's board would turn it twice): one turn of it on the way up.
                     const int f = static_cast<int>(flip);
@@ -1566,6 +1568,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 }
             }
             if (r.flip_grab_on) {
+                // The path is timed in the game's time (the board's own play), not the wall clock.
+                if (r.flip_grab_until < now + 20000 && !kinematic_spin_running() && now > r.flip_grab_started + 50) r.flip_grab_until = std::min(r.flip_grab_until, now);
+                else if (r.flip_grab_until < now + 20000 && kinematic_spin_running()) r.flip_grab_until = std::max(r.flip_grab_until, now + 20);
                 // Held to the landing while the trigger is: the hand stays on the board at the feet (the grab held).
                 if (in_air && now >= r.flip_grab_until && (r.grab_hand_back ? right : left)) {
                     if (r.flip_grab_until + 30000 > now) { // the path is over: the board is the clip's again, the hand stays
@@ -1584,8 +1589,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     stop_board_spin();
                     if (core) set_hand_pull(core, 0, -1, -1, 0, 0, 0, 0, 0);
                 } else if (core) {
-                    // The hand goes for the board from a third of the way up, and holds it from there.
-                    if (r.flip_grab_until > now + 20000 || now + r.flip_grab_ms * 2 / 3 >= r.flip_grab_until)
+                    // The hand goes out for the board at once (the owner, 2026-10-14: "the hand needs to move out faster"),
+                    // meets it level at the top and brings it down to the feet.
+                    if (true)
                         set_hand_pull(core, 80, r.grab_hand_back ? 11 : 15, r.grab_hand_back ? 12 : 16, r.grab_hand_back ? r.grab_side : -r.grab_side, 0.03f, 0.0f, r.grab_gain, 0.0f);
                 }
             }
