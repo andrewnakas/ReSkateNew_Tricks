@@ -79,6 +79,12 @@ void set_kinematic_spin(std::uintptr_t core, std::uint32_t milliseconds, float r
 void finish_kinematic_spin() noexcept;
 // For the spin just set: turned on top of the game's own board for its clip (the drive's target) each step.
 void set_kinematic_spin_follow(bool follow) noexcept;
+void request_drive_dump(std::uintptr_t core) noexcept;
+// The rider's limbs let go of the clip's pose (mask 1 back arm, 2 front arm, 4 back leg, 8 front leg; motors at `scale`)
+// and the pelvis drive lowered by `drop` metres, for `milliseconds` (renewed by calling again), eased in and out.
+void set_limb_free(std::uintptr_t core, std::uint32_t milliseconds, int mask, float scale, float drop) noexcept;
+std::uint32_t take_limb_free_writes() noexcept;
+void set_kinematic_spin_with_pelvis(bool on) noexcept;
 void set_kinematic_spin_pose(bool pose, int dir) noexcept;
 // The board's drive target (rows side, up, forward at 0, 4, 8 of a 4x4 frame), from the board hook every step.
 void set_board_target_rows(const float* rows) noexcept;

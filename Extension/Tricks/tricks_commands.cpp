@@ -33,6 +33,8 @@ void register_tricks_commands(Commands &registry) {
         {"balance", "The casper's balance blend", "<0 to 1> | stick | off"},
         {"rootup", "Hold the skater upright in a held pose", "on|off|watch"},
         {"anti", "The anti-casper (the casper mirrored and turned), caught with the right stick resting up", "on|off | steady <ms> | turn on|off"},
+        {"outlegs", "Flick-outs play the game's own flip legs (the board stays the mod's)", "on|off"},
+        {"drives", "Dev: log every drive row of the deck's solver world once", nullptr},
         {"flipgrab", "Experiment: allow the game's grab during a flip trick", "on|off"},
         {"turnback", "Turn a board spun round under the feet back to the skater's heading on landing", "[off]"},
         {"kinematic", "Play the mod's flips on the board itself (smooth) or through its drive", "on|off"},

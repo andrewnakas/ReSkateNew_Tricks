@@ -699,6 +699,40 @@ void tricks_feet_free(std::uintptr_t core) noexcept {
         }
     }
 }
+// <dev> Every drive row of the deck's solver world, once (`tricks drives`): which rows hold the rider's arms, and the
+// body numbers of the rider-to-deck rows to map solver bodies onto the skater's parts.
+std::atomic<std::uintptr_t> drive_dump_core{};
+void tricks_drive_dump(std::uintptr_t core) noexcept {
+    if (!core || drive_dump_core.load(std::memory_order_relaxed) != core) return;
+    drive_dump_core.store(0, std::memory_order_relaxed);
+    std::uintptr_t a{}, b{}, c{}, w{};
+    if (!peek_at(core + 0x430, a) || !peek_at(a + 0x718, b) || !peek_at(b + 0x80, c) || !peek_at(c + 0x28, w) || !w) return;
+    std::uint32_t count{};
+    std::uintptr_t pairs{}, records{};
+    if (!peek_at(w + 0x90 + 0x1c, count) || !peek_at(w + 0x90 + 0x50, pairs) || !peek_at(w + 0xe68, records) || !pairs || !records || count > 4096) return;
+    static RiderDrives probe;
+    probe.w = w;
+    probe.deck = -1;
+    probe.count = 0;
+    std::string riders;
+    if (find_rider_rows(probe))
+        for (int k = 0; k < probe.count; ++k) riders += std::format(" r{}:a{}", probe.rows[k], probe.bodies[k]);
+    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: drives: {} rows, deck body {}, pelvis row {}, rider rows{}.", count, probe.deck, probe.pelvis, riders);
+    for (std::uint32_t row = 0; row < count && row < 600; ++row) {
+        std::uint32_t ra{}, rb{};
+        const auto at = pairs + 4 * ((row & ~3u) + row);
+        if (!peek_at(at, ra) || !peek_at(at + 0x10, rb)) continue;
+        std::array<float, 12> f{};
+        std::array<float, 3> pb{};
+        std::array<float, 4> qb{};
+        const auto rec = records + static_cast<std::uintptr_t>(row) * 0xc0;
+        (void)peek_at(rec, f);
+        (void)peek_at(rec + 0x30, pb);
+        (void)peek_at(rec + 0x6c, qb);
+        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: drive r{} {}-{}: {:.1f} {:.1f} {:.1f} {:.1f} | {:.1f} {:.1f} {:.1f} {:.1f} {:.1f} | a({:.2f},{:.2f},{:.2f}) b({:.2f},{:.2f},{:.2f}) q({:.2f},{:.2f},{:.2f},{:.2f})", row, ra, rb,
+                     f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], pb[0], pb[1], pb[2], qb[0], qb[1], qb[2], qb[3]);
+    }
+}
 void tricks_rider_drives(std::uintptr_t core) noexcept {
     auto& d = rider_drives();
     if (!core || core != d.core.load(std::memory_order_relaxed)) return;
@@ -863,22 +897,98 @@ struct BoardTurnBack {
     std::atomic<float> watch_angle{}, watch_up{}, watch_spin{};
 };
 BoardTurnBack& board_turn_back() { static auto* value = new BoardTurnBack; return *value; }
-// A hand brought to the board (the mod's grabs): the rider is the drawn body, so one of its physics parts (a hand) is
-// given, every step, the velocity that takes it a share of the way to a point on the deck (in the deck's frame),
-// on top of the deck's own; the arm follows through its joints.
+// A body part moved smoothly toward a place: a critically damped spring on its velocity about a reference velocity (the
+// skater's or the deck's own travel), the change per step and the speed against the reference both limited, so a part
+// never jumps (the owner, 2026-10-14: "the body and board moving too fast and jumping around, think fluid motions").
+// `weight` eases the pull in and out. Returns the distance left.
+float spring_part(std::uintptr_t part, const float* target, const std::array<float, 3>& ref, float omega, float dt, float weight) noexcept {
+    SourceReader r;
+    const auto at = r.value<std::array<float, 3>>(part, 0x50), v = r.value<std::array<float, 3>>(part, 0x70);
+    const auto flags = r.value<std::uint32_t>(part, 0x60);
+    r.verify();
+    float gap2 = 0, dv[3]{};
+    for (int i = 0; i < 3; ++i) {
+        const float d = target[i] - at[i];
+        gap2 += d * d;
+        dv[i] = (omega * omega * d - 2.0f * omega * (v[i] - ref[i])) * dt * std::clamp(weight, 0.0f, 1.0f);
+    }
+    const float step = std::sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]), most = 0.6f; // m/s per step (36 m/s2 at 60 Hz)
+    if (step > most)
+        for (auto& c : dv) c *= most / step;
+    std::array<float, 3> out{v[0] + dv[0], v[1] + dv[1], v[2] + dv[2]};
+    float rel[3]{out[0] - ref[0], out[1] - ref[1], out[2] - ref[2]};
+    const float speed = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]), fastest = 5.0f;
+    if (speed > fastest)
+        for (int i = 0; i < 3; ++i) out[i] = ref[i] + rel[i] * fastest / speed;
+    body_write(part + 0x70, out);
+    body_write(part + 0x60, flags | 8u);
+    return std::sqrt(gap2);
+}
+// A rider part (the skater's 23 drawn parts are given their clip's motion every step, so a velocity added to theirs
+// was gone the next step: the hand never came to the board, 2026-10-15) is given the whole velocity it moves at: the
+// reference (the skater's or the deck's travel) plus a command toward the target that changes smoothly from step to
+// step (at most `0.5 m/s` a step) and never exceeds 4.5 m/s. `weight` eases it in and out.
+struct PullState {
+    std::array<std::array<float, 3>, 32> command{};
+    std::array<ULONGLONG, 32> seen{};
+};
+PullState& pull_state() { static auto* value = new PullState; return *value; }
+float pull_part(std::size_t index, std::uintptr_t part, const float* target, const std::array<float, 3>& ref, float gain, float dt, float weight) noexcept {
+    if (index >= 32) return 0;
+    SourceReader r;
+    const auto at = r.value<std::array<float, 3>>(part, 0x50), v = r.value<std::array<float, 3>>(part, 0x70);
+    const auto flags = r.value<std::uint32_t>(part, 0x60);
+    r.verify();
+    auto& st = pull_state();
+    const auto now = GetTickCount64();
+    auto& cmd = st.command[index];
+    if (now - st.seen[index] > 100) // a new pull: from the part's own motion
+        for (int i = 0; i < 3; ++i) cmd[i] = v[i] - ref[i];
+    st.seen[index] = now;
+    float gap2 = 0, want[3]{};
+    for (int i = 0; i < 3; ++i) {
+        const float d = target[i] - at[i];
+        gap2 += d * d;
+        want[i] = d * gain;
+    }
+    const float speed = std::sqrt(want[0] * want[0] + want[1] * want[1] + want[2] * want[2]);
+    if (speed > 4.5f)
+        for (auto& c : want) c *= 4.5f / speed;
+    float change[3]{want[0] - cmd[0], want[1] - cmd[1], want[2] - cmd[2]};
+    const float step = std::sqrt(change[0] * change[0] + change[1] * change[1] + change[2] * change[2]), most = 0.5f * dt * 60.0f;
+    if (step > most)
+        for (auto& c : change) c *= most / step;
+    for (int i = 0; i < 3; ++i) cmd[i] += change[i];
+    const float w = std::clamp(weight, 0.0f, 1.0f);
+    if (w <= 0) return std::sqrt(gap2);
+    std::array<float, 3> out{};
+    for (int i = 0; i < 3; ++i) out[i] = v[i] + (ref[i] + cmd[i] - v[i]) * w;
+    body_write(part + 0x70, out);
+    body_write(part + 0x60, flags | 8u);
+    return std::sqrt(gap2);
+}
+// A hand brought to the board (the mod's grind grab, and a flip grab held to the landing): the hand, its forearm and
+// upper arm moved on springs toward a point on the deck (in the deck's frame), about the deck's own travel; a crouch
+// lowers the pelvis and chest toward the board by `crouch` metres. Eased in over 120 ms and out over 120 ms.
 struct HandPull {
     std::atomic<std::uintptr_t> core{};
     std::atomic<ULONGLONG> until{};
     std::atomic<int> part{}, part2{-1};
-    std::atomic<float> x{}, y{}, z{}, gain{0.35f}, crouch{};
+    std::atomic<float> x{}, y{}, z{}, gain{0.6f}, crouch{};
     std::atomic<std::uint32_t> steps{};
     std::atomic<float> gap{};
+    // Physics thread only.
+    float weight{};
+    int last_part{-1}, last_part2{-1};
+    float last_target[3]{}, last_crouch{};
 };
 HandPull& hand_pull() { static auto* value = new HandPull; return *value; }
 BoardTurnBack& board_turn_back();
 void tricks_hand_pull(std::uintptr_t core) noexcept {
     auto& h = hand_pull();
-    if (!core || core != h.core.load(std::memory_order_relaxed) || GetTickCount64() >= h.until.load(std::memory_order_relaxed)) return;
+    if (!core || core != h.core.load(std::memory_order_relaxed)) return;
+    const bool wanted = GetTickCount64() < h.until.load(std::memory_order_relaxed);
+    if (!wanted && h.weight <= 0) return;
     SourceLastError error;
     auto& state = source_state();
     if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
@@ -886,80 +996,81 @@ void tricks_hand_pull(std::uintptr_t core) noexcept {
     try {
         auto& t = board_turn_back();
         const auto bodies = debug_noclip_bodies(state.trial.base, t.client.load(std::memory_order_relaxed), t.entity.load(std::memory_order_relaxed));
-        if (bodies.core != core || bodies.offboard || bodies.wipeout || bodies.parts.size() < 32 || !(bodies.seconds > 0)) return;
+        if (bodies.core != core || bodies.offboard || bodies.wipeout || bodies.parts.size() < 32 || !(bodies.seconds > 0)) {
+            h.weight = 0;
+            return;
+        }
+        const float dt = bodies.seconds;
+        h.weight = std::clamp(h.weight + (wanted ? dt : -dt) / 0.12f, 0.0f, 1.0f);
         SourceReader reader;
         const auto deck = bodies.parts[8];
         const auto right = reader.value<std::array<float, 4>>(deck, 0x20), up = reader.value<std::array<float, 4>>(deck, 0x30),
                    forward = reader.value<std::array<float, 4>>(deck, 0x40);
         const auto centre = reader.value<std::array<float, 3>>(deck, 0x50), deck_speed = reader.value<std::array<float, 3>>(deck, 0x70);
         reader.verify();
-        const float x = h.x.load(std::memory_order_relaxed), y = h.y.load(std::memory_order_relaxed), z = h.z.load(std::memory_order_relaxed);
+        if (wanted) {
+            const float x = h.x.load(std::memory_order_relaxed), y = h.y.load(std::memory_order_relaxed), z = h.z.load(std::memory_order_relaxed);
+            for (int i = 0; i < 3; ++i) h.last_target[i] = x * right[i] + y * up[i] + z * forward[i]; // from the deck's centre
+            h.last_part = h.part.load(std::memory_order_relaxed);
+            h.last_part2 = h.part2.load(std::memory_order_relaxed);
+            h.last_crouch = h.crouch.load(std::memory_order_relaxed);
+        }
         float target[3];
-        for (int i = 0; i < 3; ++i) target[i] = centre[i] + right[i] * x + up[i] * y + forward[i] * z;
-        const float share = std::clamp(h.gain.load(std::memory_order_relaxed), 0.0f, 1.0f) / bodies.seconds;
-        const auto pull = [&](int index, float weight) {
-            if (index < 0 || static_cast<std::size_t>(index) >= bodies.parts.size()) return;
-            const auto part = bodies.parts[static_cast<std::size_t>(index)];
+        for (int i = 0; i < 3; ++i) target[i] = centre[i] + h.last_target[i];
+        const float omega = 8.0f + 16.0f * std::clamp(h.gain.load(std::memory_order_relaxed), 0.0f, 1.0f);
+        const auto valid = [&](int index) { return index >= 0 && static_cast<std::size_t>(index) < bodies.parts.size(); };
+        if (valid(h.last_part)) {
+            const float gap = pull_part(static_cast<std::size_t>(h.last_part), bodies.parts[static_cast<std::size_t>(h.last_part)], target, deck_speed, omega * 0.5f, dt, h.weight);
+            h.gap.store(gap, std::memory_order_relaxed);
+        }
+        // The arm follows on its own joints, helped part of the way (the whole arm at once held the hand far out less).
+        if (valid(h.last_part2)) {
             SourceReader r2;
-            const auto at = r2.value<std::array<float, 3>>(part, 0x50);
-            const auto flags = r2.value<std::uint32_t>(part, 0x60);
+            const auto hand = r2.value<std::array<float, 3>>(bodies.parts[static_cast<std::size_t>(h.last_part)], 0x50);
+            const auto fore = r2.value<std::array<float, 3>>(bodies.parts[static_cast<std::size_t>(h.last_part2)], 0x50);
             r2.verify();
-            std::array<float, 3> v{};
-            float gap = 0;
-            for (int i = 0; i < 3; ++i) {
-                const float d = target[i] - at[i];
-                gap += d * d;
-                v[i] = d * share * weight;
-            }
-            // At most 15 m/s toward the board (the flip clips fling the arms out; a slower pull lost to the arm's drives).
-            const float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-            if (speed > 15.0f)
-                for (auto& c : v) c *= 15.0f / speed;
-            for (int i = 0; i < 3; ++i) v[i] += deck_speed[i];
-            body_write(part + 0x70, v);
-            body_write(part + 0x60, flags | 8u);
-            if (weight == 1.0f) h.gap.store(std::sqrt(gap), std::memory_order_relaxed);
-        };
-        // The whole arm: the hand, its forearm (part - 1... given as part2) and the upper arm (part2 + 1), all at full pull:
-        // the hand alone stayed 0.8 m off, held out by the arm's own drives (measured 2026-10-14).
-        pull(h.part.load(std::memory_order_relaxed), 1.0f);
-        const int forearm = h.part2.load(std::memory_order_relaxed);
-        pull(forearm, 1.0f);
-        if (forearm >= 0) pull(forearm + 1, 0.8f);
-        // A crouch: the pelvis (part 31) and the chest (part 10) pulled down toward the board, so a short arm reaches it.
-        if (const float crouch = h.crouch.load(std::memory_order_relaxed); crouch > 0)
+            float fore_target[3];
+            for (int i = 0; i < 3; ++i) fore_target[i] = fore[i] + (target[i] - hand[i]);
+            (void)pull_part(static_cast<std::size_t>(h.last_part2), bodies.parts[static_cast<std::size_t>(h.last_part2)], fore_target, deck_speed, omega * 0.4f, dt, h.weight);
+            if (valid(h.last_part2 + 1)) (void)pull_part(static_cast<std::size_t>(h.last_part2 + 1), bodies.parts[static_cast<std::size_t>(h.last_part2 + 1)], fore_target, deck_speed, omega * 0.25f, dt, h.weight * 0.6f);
+        }
+        // The crouch: the pelvis (part 31) and chest (10) lowered toward the board, so a short arm reaches it.
+        if (h.last_crouch > 0)
             for (const int index : {31, 10}) {
-                const auto part = bodies.parts[static_cast<std::size_t>(index)];
                 SourceReader r3;
-                auto v = r3.value<std::array<float, 3>>(part, 0x70);
-                const auto flags = r3.value<std::uint32_t>(part, 0x60);
+                const auto at = r3.value<std::array<float, 3>>(bodies.parts[static_cast<std::size_t>(index)], 0x50);
                 r3.verify();
-                for (int i = 0; i < 3; ++i) v[i] -= up[i] * crouch;
-                body_write(part + 0x70, v);
-                body_write(part + 0x60, flags | 8u);
+                float low[3];
+                for (int i = 0; i < 3; ++i) low[i] = at[i] - up[i] * std::min(h.last_crouch, 0.4f) * 0.25f; // a short way down each step: the spring eases it
+                (void)pull_part(static_cast<std::size_t>(index), bodies.parts[static_cast<std::size_t>(index)], low, deck_speed, 6.0f, dt, h.weight);
             }
         h.steps.fetch_add(1, std::memory_order_relaxed);
     } catch (...) {}
 }
-// A flip grab's board carried on its path: the board's target frame only turns it (its place in the air is not
-// driven: a lift through the target did nothing, 2026-10-14), so its nine parts are given, every step, the skater's
-// own travel plus the velocity that takes the deck most of the way to its place on the path. The path is in the
-// skater's root frame (+0x4720 side, +0x4730 up, +0x4750 place): from where the deck was at the start (under the feet)
-// up by `rise` and out along the side row by `reach`, there from `top` to `hold` of the time, back by the end.
+// A flip grab (the owner's kickflip indy, 2026-10-14): one smooth path for the board, the hand and the feet. The board
+// rises from the feet to the catch point in front of the waist while it flips; the hand goes out to it and takes it by
+// the toe edge; from then on the board is in the hand, and hand and board come down together while the feet tuck up
+// onto it (the board placed under the feet); at the end the board goes back to its riding place with the feet on it.
+// The path's frame is the skater's start heading laid flat, turned on with the pelvis (a skater spinning with the left
+// stick took the hand away from a path fixed at the start: "the board would be out of position if the player is
+// rotating"). The kinematic spin turns the board; this moves it, the hand and the feet, all on springs.
 struct BoardCarry {
     std::atomic<std::uintptr_t> core{};
     std::atomic<std::uint64_t> start{}, length{}; // QueryPerformanceCounter
-    std::atomic<float> rise{}, reach{}, top{0.42f}, hold{0.58f}, gain{0.5f};
-    std::atomic<int> hand{-1};   // the grabbing hand's part: the board goes to it at the top, and leaves it on the way down
+    std::atomic<float> rise{}, reach{}, top{0.42f}, hold{0.62f}, gain{0.5f};
+    std::atomic<int> hand{-1};   // the grabbing hand's part (its forearm and upper arm follow it: hand + 1, hand + 2)
     std::atomic<float> hand_x{}; // where on the deck's side row the hand holds it
-    // Physics thread only: the deck's place in the root frame at the start.
-    bool started{}, logged{};
+    // Physics thread only.
+    bool started{}, logged{}, caught{};
     std::uint64_t seen{};
-    double elapsed{}; // game seconds since the start
+    double elapsed{};            // game seconds since the start
     float side0{}, up0{}, forward0{};
-    // The path's frame, fixed at the start: the skater's side and forward rows laid flat, and the world's up. The root
-    // itself is built from the board, so a path in it moved with the board and asked for nothing (2026-10-14).
+    float s0[3]{}, f0[3]{};      // the start heading's side and forward rows, laid flat
     float s_axis[3]{}, f_axis[3]{};
+    float yaw0{}, turn{};        // the pelvis' heading at the start, and how far it has turned since (smoothed)
+    float limbs[4][3]{};         // feet (23, 27) and knees (25, 29) from the deck at the start, in the path frame
+    float catch_p{};
+    int next_log{};
     std::atomic<std::uint32_t> steps{};
     std::atomic<float> gap{};
 };
@@ -981,6 +1092,7 @@ double qpc_seconds(std::uint64_t ticks) noexcept {
     QueryPerformanceFrequency(&frequency);
     return static_cast<double>(ticks) / static_cast<double>(frequency.QuadPart);
 }
+constexpr int carry_limbs[4]{23, 27, 25, 29};
 void tricks_board_carry(std::uintptr_t core) noexcept {
     auto& c = board_carry();
     const auto start = c.start.load(std::memory_order_acquire), length = c.length.load(std::memory_order_relaxed);
@@ -993,7 +1105,8 @@ void tricks_board_carry(std::uintptr_t core) noexcept {
         c.seen = start;
         c.elapsed = 0;
     } else c.elapsed += step_seconds(core);
-    const float p = static_cast<float>(c.elapsed / qpc_seconds(length));
+    const double total = qpc_seconds(length);
+    const float p = static_cast<float>(c.elapsed / total);
     if (p >= 1.0f) {
         c.start.store(0, std::memory_order_release);
         c.started = false;
@@ -1008,14 +1121,17 @@ void tricks_board_carry(std::uintptr_t core) noexcept {
         auto& t = board_turn_back();
         const auto bodies = debug_noclip_bodies(state.trial.base, t.client.load(std::memory_order_relaxed), t.entity.load(std::memory_order_relaxed));
         if (bodies.core != core || bodies.offboard || bodies.wipeout || bodies.parts.size() < 32 || !(bodies.seconds > 0)) return;
+        const float dt = bodies.seconds;
         SourceReader reader;
         const auto side = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4720), up = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4730),
                    forward = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4740), place = reader.value<std::array<float, 4>>(bodies.rig_wrapper, 0x4750);
         const auto deck_at = reader.value<std::array<float, 3>>(bodies.parts[8], 0x50);
         const auto travel = reader.value<std::array<float, 3>>(bodies.parts[31], 0x70); // the pelvis: the skater's own travel
         const auto pelvis = reader.value<std::array<float, 3>>(bodies.parts[31], 0x50);
+        const auto pelvis_fwd = reader.value<std::array<float, 4>>(bodies.parts[31], 0x40);
         reader.verify();
-        const auto dot = [](const float* a, const std::array<float, 4>& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+        const float pelvis_run = std::sqrt(pelvis_fwd[0] * pelvis_fwd[0] + pelvis_fwd[2] * pelvis_fwd[2]);
+        const float pelvis_yaw = pelvis_run > 0.3f ? std::atan2(pelvis_fwd[0], pelvis_fwd[2]) : c.yaw0 + c.turn;
         if (!c.started) {
             const auto flat = [](const std::array<float, 4>& row, float* out) {
                 const float run = std::sqrt(row[0] * row[0] + row[2] * row[2]);
@@ -1023,66 +1139,380 @@ void tricks_board_carry(std::uintptr_t core) noexcept {
                 out[1] = 0.0f;
                 out[2] = run > 1e-3f ? row[2] / run : 0.0f;
             };
-            flat(side, c.s_axis);
-            flat(forward, c.f_axis);
+            flat(side, c.s0);
+            flat(forward, c.f0);
+            for (int i = 0; i < 3; ++i) c.s_axis[i] = c.s0[i], c.f_axis[i] = c.f0[i];
             const float d[3]{deck_at[0] - pelvis[0], deck_at[1] - pelvis[1], deck_at[2] - pelvis[2]};
             c.side0 = d[0] * c.s_axis[0] + d[2] * c.s_axis[2];
             c.up0 = d[1];
             c.forward0 = d[0] * c.f_axis[0] + d[2] * c.f_axis[2];
+            for (int k = 0; k < 4; ++k) {
+                SourceReader r2;
+                const auto at = r2.value<std::array<float, 3>>(bodies.parts[carry_limbs[k]], 0x50);
+                r2.verify();
+                const float e[3]{at[0] - deck_at[0], at[1] - deck_at[1], at[2] - deck_at[2]};
+                c.limbs[k][0] = e[0] * c.s_axis[0] + e[2] * c.s_axis[2];
+                c.limbs[k][1] = e[1];
+                c.limbs[k][2] = e[0] * c.f_axis[0] + e[2] * c.f_axis[2];
+            }
+            c.yaw0 = pelvis_yaw;
+            c.turn = 0;
+            c.caught = false;
+            c.catch_p = 0;
+            c.next_log = 0;
             c.started = true;
         }
-        const float top = std::clamp(c.top.load(std::memory_order_relaxed), 0.1f, 0.9f), hold = std::clamp(c.hold.load(std::memory_order_relaxed), top, 0.95f);
-        const float out = p < top ? carry_smooth(p / top) : p < hold ? 1.0f : 1.0f - carry_smooth((p - hold) / (1.0f - hold));
-        const float s = c.side0 + c.reach.load(std::memory_order_relaxed) * out, u = c.up0 + c.rise.load(std::memory_order_relaxed) * out, f = c.forward0;
-        float push[3], gap = 0;
-        const float share = std::clamp(c.gain.load(std::memory_order_relaxed), 0.0f, 1.0f) / bodies.seconds;
-        // Caught: from the top the board is where the hand holds it, then eased back onto the way down to the feet.
-        float held[3]{}, with_hand = 0;
-        if (const int hand = c.hand.load(std::memory_order_relaxed); hand >= 0 && static_cast<std::size_t>(hand) < bodies.parts.size() && p >= top * 0.8f) {
+        // The heading turned on with the pelvis (smoothed: the pelvis sways in a flip).
+        {
+            float want = pelvis_yaw - c.yaw0;
+            while (want - c.turn > 3.14159265f) want -= 6.2831853f;
+            while (want - c.turn < -3.14159265f) want += 6.2831853f;
+            c.turn += (want - c.turn) * std::min(1.0f, dt * 12.0f);
+            const float cs = std::cos(c.turn), sn = std::sin(c.turn);
+            c.s_axis[0] = c.s0[0] * cs + c.s0[2] * sn;
+            c.s_axis[2] = -c.s0[0] * sn + c.s0[2] * cs;
+            c.f_axis[0] = c.f0[0] * cs + c.f0[2] * sn;
+            c.f_axis[2] = -c.f0[0] * sn + c.f0[2] * cs;
+        }
+        const auto world = [&](float s, float u, float f, float* out) {
+            for (int i = 0; i < 3; ++i) out[i] = pelvis[i] + c.s_axis[i] * s + (i == 1 ? u : 0.0f) + c.f_axis[i] * f;
+        };
+        const float top = std::clamp(c.top.load(std::memory_order_relaxed), 0.1f, 0.9f), hold = std::clamp(c.hold.load(std::memory_order_relaxed), top + 0.05f, 0.95f);
+        const float rise = c.rise.load(std::memory_order_relaxed), reach = c.reach.load(std::memory_order_relaxed);
+        const float hx = c.hand_x.load(std::memory_order_relaxed);
+        // Places on the path (side, up, forward from the pelvis): the catch point in front of the waist, and where hand
+        // and board come down to with the knees tucked.
+        const float cs_ = c.side0 + reach, cu = c.up0 + rise, ls = c.side0 + reach * 0.5f, lu = c.up0 + rise * 0.4f;
+        const int hand = c.hand.load(std::memory_order_relaxed);
+        const bool has_hand = hand >= 0 && hand + 2 < static_cast<int>(bodies.parts.size());
+        std::array<float, 3> hand_at{};
+        if (has_hand) {
             SourceReader r4;
-            const auto at = r4.value<std::array<float, 3>>(bodies.parts[static_cast<std::size_t>(hand)], 0x50);
+            hand_at = r4.value<std::array<float, 3>>(bodies.parts[static_cast<std::size_t>(hand)], 0x50);
             r4.verify();
-            const float x = c.hand_x.load(std::memory_order_relaxed);
-            for (int i = 0; i < 3; ++i) held[i] = at[i] - c.s_axis[i] * x;
-            const float distance = std::sqrt((held[0] - deck_at[0]) * (held[0] - deck_at[0]) + (held[1] - deck_at[1]) * (held[1] - deck_at[1]) + (held[2] - deck_at[2]) * (held[2] - deck_at[2]));
-            // Board and hand meet: the hand is pulled to the board and the board goes to the hand (a hand within 0.7 m;
-            // an arm flung far out is not a catch); full while held, gone by the end.
-            if (distance < 0.7f) with_hand = p < hold ? carry_smooth((p - top * 0.8f) / (top * 0.2f + 1e-3f)) : 1.0f - carry_smooth((p - hold) / (1.0f - hold));
         }
-        for (int i = 0; i < 3; ++i) {
-            const float path = pelvis[i] + c.s_axis[i] * s + (i == 1 ? u : 0.0f) + c.f_axis[i] * f;
-            const float target = path + (held[i] - path) * with_hand;
-            const float d = target - deck_at[i];
-            gap += d * d;
-            push[i] = travel[i] + d * share;
+        float grip[3]; // the toe edge of the deck where it is now
+        for (int i = 0; i < 3; ++i) grip[i] = deck_at[i] + c.s_axis[i] * hx;
+        const float hand_gap = has_hand ? std::sqrt((hand_at[0] - grip[0]) * (hand_at[0] - grip[0]) + (hand_at[1] - grip[1]) * (hand_at[1] - grip[1]) + (hand_at[2] - grip[2]) * (hand_at[2] - grip[2])) : 9.0f;
+        if (!c.caught && (p >= top || (p > top * 0.6f && hand_gap < 0.15f))) {
+            c.caught = true;
+            c.catch_p = p;
         }
-        for (std::size_t i = 0; i < 9; ++i) {
-            SourceReader r2;
-            const auto flags = r2.value<std::uint32_t>(bodies.parts[i], 0x60);
-            r2.verify();
-            const std::array<float, 3> v{push[0], push[1], push[2]};
-            body_write(bodies.parts[i] + 0x70, v);
-            body_write(bodies.parts[i] + 0x60, flags | 8u);
+        // The hand's way: out to the board's grip until the catch, then down from the catch point to the tucked place.
+        const float down = c.caught ? carry_smooth((p - c.catch_p) / std::max(0.05f, hold - c.catch_p)) : 0.0f;
+        float hand_target[3];
+        if (!c.caught) {
+            float out[3];
+            world(c.side0 + reach * carry_smooth(p / top) + hx, c.up0 + rise * carry_smooth(p / top), c.forward0, out);
+            for (int i = 0; i < 3; ++i) hand_target[i] = out[i];
+        } else world(cs_ + (ls - cs_) * down + hx, cu + (lu - cu) * down, c.forward0, hand_target);
+        // The board's way: up its path to the catch, then in the hand (eased on over 80 ms), then from the tucked place
+        // back to its riding place under the extended legs.
+        float board_target[3];
+        {
+            const float rise_out = carry_smooth(p / top);
+            float path[3];
+            world(c.side0 + reach * rise_out, c.up0 + rise * rise_out, c.forward0, path);
+            float in_hand[3];
+            // The hand as it is when it follows its way, its way when it lags (a board on a lagging hand fell behind).
+            const float lag = has_hand ? std::sqrt((hand_at[0] - hand_target[0]) * (hand_at[0] - hand_target[0]) + (hand_at[1] - hand_target[1]) * (hand_at[1] - hand_target[1]) +
+                                                   (hand_at[2] - hand_target[2]) * (hand_at[2] - hand_target[2]))
+                                       : 9.0f;
+            const float trust = 1.0f - carry_smooth((lag - 0.1f) / 0.2f);
+            for (int i = 0; i < 3; ++i) in_hand[i] = (hand_target[i] + (hand_at[i] - hand_target[i]) * trust) - c.s_axis[i] * hx;
+            const float on = c.caught ? carry_smooth(static_cast<float>((p - c.catch_p) * total / 0.08)) : 0.0f;
+            float riding[3];
+            world(c.side0, c.up0, c.forward0, riding);
+            const float back = p > hold ? carry_smooth((p - hold) / (1.0f - hold)) : 0.0f;
+            for (int i = 0; i < 3; ++i) {
+                const float held = path[i] + (in_hand[i] - path[i]) * on;
+                board_target[i] = held + (riding[i] - held) * back;
+            }
         }
-        c.gap.store(std::sqrt(gap), std::memory_order_relaxed);
+        // The board: every part the deck's velocity (the kinematic spin keeps them on the deck).
+        float gap{};
+        {
+            const float omega = 10.0f + 10.0f * std::clamp(c.gain.load(std::memory_order_relaxed), 0.0f, 1.0f);
+            gap = spring_part(bodies.parts[8], board_target, travel, omega, dt, 1.0f);
+            SourceReader r5;
+            const auto v = r5.value<std::array<float, 3>>(bodies.parts[8], 0x70);
+            r5.verify();
+            for (std::size_t i = 0; i < 8; ++i) {
+                SourceReader r2;
+                const auto flags = r2.value<std::uint32_t>(bodies.parts[i], 0x60);
+                r2.verify();
+                body_write(bodies.parts[i] + 0x70, v);
+                body_write(bodies.parts[i] + 0x60, flags | 8u);
+            }
+        }
+        // The hand (and its arm) on its way, let go of over the way back.
+        if (has_hand) {
+            const float weight = p > hold ? 1.0f - carry_smooth((p - hold) / (1.0f - hold)) : 1.0f;
+            (void)pull_part(static_cast<std::size_t>(hand), bodies.parts[static_cast<std::size_t>(hand)], hand_target, travel, 9.0f, dt, weight);
+            float arm_target[3];
+            for (int k = 1; k <= 2; ++k) {
+                SourceReader r6;
+                const auto at = r6.value<std::array<float, 3>>(bodies.parts[static_cast<std::size_t>(hand + k)], 0x50);
+                r6.verify();
+                for (int i = 0; i < 3; ++i) arm_target[i] = at[i] + (hand_target[i] - hand_at[i]) * (k == 1 ? 0.7f : 0.4f);
+                (void)pull_part(static_cast<std::size_t>(hand + k), bodies.parts[static_cast<std::size_t>(hand + k)], arm_target, travel, k == 1 ? 7.0f : 5.0f, dt, weight);
+            }
+        }
+        // The feet and knees tuck up onto the board from the catch (their places on the deck as at the start): the board
+        // is put under the feet, not the feet left hanging while it comes back.
+        if (c.caught) {
+            const float weight = carry_smooth(static_cast<float>((p - c.catch_p) * total / 0.12));
+            SourceReader r7;
+            const auto deck_now = r7.value<std::array<float, 3>>(bodies.parts[8], 0x50);
+            r7.verify();
+            for (int k = 0; k < 4; ++k) {
+                float target[3];
+                for (int i = 0; i < 3; ++i) target[i] = deck_now[i] + c.s_axis[i] * c.limbs[k][0] + (i == 1 ? c.limbs[k][1] : 0.0f) + c.f_axis[i] * c.limbs[k][2];
+                (void)pull_part(static_cast<std::size_t>(carry_limbs[k]), bodies.parts[static_cast<std::size_t>(carry_limbs[k])], target, travel, k < 2 ? 8.0f : 6.0f, dt, weight);
+            }
+        }
+        c.gap.store(has_hand && c.caught ? hand_gap : gap, std::memory_order_relaxed);
         c.steps.fetch_add(1, std::memory_order_relaxed);
-        if (p > 0.5f && !c.logged) { // <dev> the axes: the deck's rows and the back hand's place, in the root frame
+        // <dev> Board and hand against their targets, in the path frame from the pelvis (side, up, forward), at five points.
+        if (c.next_log < 5 && p >= 0.1f + 0.2f * static_cast<float>(c.next_log)) {
+            ++c.next_log;
+            SourceReader r8;
+            const auto deck_now = r8.value<std::array<float, 3>>(bodies.parts[8], 0x50), deck_v = r8.value<std::array<float, 3>>(bodies.parts[8], 0x70);
+            r8.verify();
+            const auto rel = [&](const float* at) {
+                const float d[3]{at[0] - pelvis[0], at[1] - pelvis[1], at[2] - pelvis[2]};
+                return std::format("({:.2f},{:.2f},{:.2f})", d[0] * c.s_axis[0] + d[2] * c.s_axis[2], d[1], d[0] * c.f_axis[0] + d[2] * c.f_axis[2]);
+            };
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: carry {:.2f}: deck {} target {} (v up {:.2f} rel {:.2f}); hand {} target {}; caught {}.", p, rel(deck_now.data()), rel(board_target),
+                         deck_v[1], deck_v[1] - travel[1], rel(hand_at.data()), rel(hand_target), c.caught);
+        }
+        if (p > 0.5f && !c.logged) { // <dev> the board and hands in the root frame, mid-way
             c.logged = true;
+            const auto dot = [](const float* a, const std::array<float, 4>& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
             SourceReader r3;
-            const auto dr = r3.value<std::array<float, 4>>(bodies.parts[8], 0x20), du = r3.value<std::array<float, 4>>(bodies.parts[8], 0x30),
-                       df = r3.value<std::array<float, 4>>(bodies.parts[8], 0x40);
-            const auto hand = r3.value<std::array<float, 3>>(bodies.parts[11], 0x50), hand2 = r3.value<std::array<float, 3>>(bodies.parts[15], 0x50),
-                       head = r3.value<std::array<float, 3>>(bodies.parts[9], 0x50), feet = r3.value<std::array<float, 3>>(bodies.parts[23], 0x50);
+            const auto hand1 = r3.value<std::array<float, 3>>(bodies.parts[11], 0x50), hand2 = r3.value<std::array<float, 3>>(bodies.parts[15], 0x50),
+                       feet = r3.value<std::array<float, 3>>(bodies.parts[23], 0x50);
             r3.verify();
             const auto rel = [&](const std::array<float, 3>& at) {
                 const float d[3]{at[0] - place[0], at[1] - place[1], at[2] - place[2]};
                 return std::format("({:.2f},{:.2f},{:.2f})", dot(d, side), dot(d, up), dot(d, forward));
             };
-            const auto axis = [&](const std::array<float, 4>& a) { return std::format("({:.2f},{:.2f},{:.2f})", dot(a.data(), side), dot(a.data(), up), dot(a.data(), forward)); };
-            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: carry at {:.2f}: deck right {} up {} forward {}; deck {} back hand {} front hand {} head {} back foot {} (root frame side,up,forward).", p,
-                         axis(dr), axis(du), axis(df), rel(deck_at), rel(hand), rel(hand2), rel(head), rel(feet));
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: carry at {:.2f}: caught {} at {:.2f}, hand off the grip {:.2f} m, turned {:.0f} deg; deck {} back hand {} front hand {} back foot {} (root frame).", p,
+                         c.caught, c.catch_p, hand_gap, c.turn * 57.2958f, rel(deck_at), rel(hand1), rel(hand2), rel(feet));
         }
     } catch (...) {}
+}
+// The rider's own joints (measured 2026-10-15 with `tricks drives`): the deck's solver world holds, besides the rider-to-
+// deck drives, a joint row for each rider body to its parent (child A, parent B; record +0x00 10000 1000 10000 1000,
+// then the joint's motor strengths at +0x10: hip 90, knee 70, ankle 40, spine 80/150, clavicle 100, upper arm 80,
+// forearm 60, hand 100). Those motors hold every limb to the clip's pose, and beat any velocity the mod gives a hand
+// (it stayed 0.6 to 1.3 m off the board). For a grab the arm's motors (and for a tuck the legs') are eased down; the
+// pelvis drive's point (0.905 m up the deck) is lowered for a crouch. Limbs: 0 back arm, 1 front arm, 2 back leg,
+// 3 front leg (the back side is the back foot's: its drive point lies behind the deck's middle).
+struct LimbRows {
+    std::uintptr_t w{};
+    bool found{};
+    int pelvis_body{-1};
+    std::array<std::array<int, 4>, 4> rows{}; // joint rows of each limb, from the body end (hand / foot) inward
+    std::array<int, 4> counts{};
+    std::array<int, 2> pelvis_rows{-1, -1};
+};
+bool find_limb_rows(LimbRows& L) noexcept {
+    L.found = false;
+    L.counts.fill(0);
+    L.pelvis_rows = {-1, -1};
+    std::uint32_t count{};
+    std::uintptr_t pairs{}, records{};
+    if (!peek_at(L.w + 0x90 + 0x1c, count) || !peek_at(L.w + 0x90 + 0x50, pairs) || !peek_at(L.w + 0xe68, records) || !pairs || !records || count > 4096) return false;
+    auto pair = [&](std::uint32_t row, std::uint32_t& a, std::uint32_t& b) {
+        const auto at = pairs + 4 * ((row & ~3u) + row);
+        return peek_at(at, a) && peek_at(at + 0x10, b);
+    };
+    static RiderDrives probe;
+    probe.w = L.w;
+    probe.deck = -1;
+    probe.count = 0;
+    if (!find_rider_rows(probe)) return false;
+    std::uint32_t pa{}, pb{};
+    if (!pair(static_cast<std::uint32_t>(probe.pelvis), pa, pb)) return false;
+    L.pelvis_body = static_cast<int>(pa);
+    // The pelvis rows (the drive and its live twin) and the feet: back = drive point behind the deck's middle.
+    int back_foot = -1, front_foot = -1;
+    float back_z = 0, front_z = 0;
+    for (int k = 0; k < probe.count; ++k) {
+        std::array<float, 3> point{};
+        if (!peek_at(records + static_cast<std::uintptr_t>(probe.rows[k]) * 0xc0 + 0x30, point)) continue;
+        if (probe.bodies[k] == L.pelvis_body) {
+            if (L.pelvis_rows[0] < 0) L.pelvis_rows[0] = probe.rows[k];
+            else if (L.pelvis_rows[1] < 0) L.pelvis_rows[1] = probe.rows[k];
+            continue;
+        }
+        if (point[2] < back_z) { back_z = point[2]; back_foot = probe.bodies[k]; }
+        if (point[2] > front_z) { front_z = point[2]; front_foot = probe.bodies[k]; }
+    }
+    // The joint rows among the rider's bodies: parent of each child, and the row.
+    std::array<int, 64> parent{}, joint{};
+    parent.fill(-1);
+    joint.fill(-1);
+    const int base = L.pelvis_body - 2;
+    std::array<int, 64> child_count{};
+    for (std::uint32_t row = 0; row < count && row < 64; ++row) {
+        std::uint32_t a{}, b{};
+        std::array<float, 2> head{};
+        if (!pair(row, a, b) || !peek_at(records + static_cast<std::uintptr_t>(row) * 0xc0, head)) continue;
+        // Both ends the rider's (the deck and its parts come after the rider's last body; the world is 0).
+        if (static_cast<int>(a) < L.pelvis_body - 1 || static_cast<int>(a) >= probe.deck || static_cast<int>(b) < L.pelvis_body - 1 || static_cast<int>(b) >= probe.deck) continue;
+        const int ia = static_cast<int>(a) - base, ib = static_cast<int>(b) - base;
+        if (ia < 0 || ia >= 64 || ib < 0 || ib >= 64) continue;
+        parent[static_cast<std::size_t>(ia)] = ib;
+        joint[static_cast<std::size_t>(ia)] = static_cast<int>(row);
+        ++child_count[static_cast<std::size_t>(ib)];
+    }
+    const auto chain = [&](int leaf, std::array<int, 4>& rows, int& n) {
+        n = 0;
+        for (int body = leaf - base; body >= 0 && body < 64 && n < 4 && body != L.pelvis_body - base; body = parent[static_cast<std::size_t>(body)]) {
+            if (joint[static_cast<std::size_t>(body)] < 0) break;
+            if (n > 0 && child_count[static_cast<std::size_t>(body)] > 1) break; // the chest: the arm ends there
+            rows[static_cast<std::size_t>(n++)] = joint[static_cast<std::size_t>(body)];
+        }
+    };
+    if (back_foot < 0 || front_foot < 0) return false;
+    // The feet's rows name the toe and the ankle; the leaf of each leg is the one with no child.
+    const auto leaf_of = [&](int body) {
+        for (int i = 0; i < 64; ++i)
+            if (parent[static_cast<std::size_t>(i)] == body - base) return i + base;
+        return body;
+    };
+    chain(leaf_of(back_foot), L.rows[2], L.counts[2]);
+    chain(leaf_of(front_foot), L.rows[3], L.counts[3]);
+    // The arms: leaves (no child) that are not in a leg and not the head (a chain of two: neck, head), four long.
+    std::array<int, 2> arms{-1, -1};
+    std::array<float, 2> arm_z{};
+    for (int i = 0; i < 64; ++i) {
+        if (parent[static_cast<std::size_t>(i)] < 0 || child_count[static_cast<std::size_t>(i)] != 0) continue;
+        std::array<int, 4> rows{};
+        int n = 0;
+        chain(i + base, rows, n);
+        if (n != 4) continue;
+        bool leg = false;
+        for (int k = 2; k < 4; ++k)
+            for (int j = 0; j < L.counts[static_cast<std::size_t>(k)]; ++j)
+                for (int m = 0; m < 4; ++m) leg = leg || L.rows[static_cast<std::size_t>(k)][static_cast<std::size_t>(j)] == rows[static_cast<std::size_t>(m)];
+        if (leg) continue;
+        // The clavicle's pivot on the chest: its side (z) tells the back arm from the front, as the hips' do the legs.
+        std::array<float, 3> pivot{};
+        (void)peek_at(records + static_cast<std::uintptr_t>(rows[3]) * 0xc0 + 0x30, pivot);
+        const int slot = arms[0] < 0 ? 0 : arms[1] < 0 ? 1 : -1;
+        if (slot < 0) break;
+        arms[static_cast<std::size_t>(slot)] = i;
+        arm_z[static_cast<std::size_t>(slot)] = pivot[2];
+        if (slot == 0) L.rows[0] = rows; else L.rows[1] = rows;
+        L.counts[static_cast<std::size_t>(slot)] = 4;
+    }
+    if (arms[1] < 0 || L.counts[2] == 0) return false;
+    // The back leg's hip pivot side on the pelvis: the back arm's clavicle sits on the same side.
+    std::array<float, 3> hip{};
+    (void)peek_at(records + static_cast<std::uintptr_t>(L.rows[2][static_cast<std::size_t>(L.counts[2] - 1)]) * 0xc0 + 0x30, hip);
+    const bool first_is_back = (arm_z[0] > 0) == (hip[2] > 0);
+    if (!first_is_back) std::swap(L.rows[0], L.rows[1]);
+    L.found = true;
+    return true;
+}
+struct LimbFree {
+    std::atomic<std::uintptr_t> core{};
+    std::atomic<std::uint64_t> until{};       // GetTickCount64
+    std::atomic<int> mask{};                  // 1 back arm, 2 front arm, 4 back leg, 8 front leg
+    std::atomic<float> scale{0.1f}, drop{};   // the motors' share; the pelvis drive lowered by `drop` metres
+    std::atomic<std::uint32_t> writes{};
+    std::atomic<bool> logged{};
+    // Physics thread only.
+    LimbRows rows;
+    float weight{};                           // eased in and out over 150 ms
+    int last_mask{};
+    float last_scale{1.0f}, last_drop{};
+    std::array<std::array<float, 5>, 24> saved{}, wrote{};
+    std::array<int, 24> saved_row{};
+    std::array<bool, 24> held{};
+    std::array<std::array<float, 3>, 2> pelvis_saved{}, pelvis_wrote{};
+    std::array<bool, 2> pelvis_held{};
+};
+LimbFree& limb_free() { static auto* value = new LimbFree; return *value; }
+void tricks_limb_free(std::uintptr_t core) noexcept {
+    auto& f = limb_free();
+    if (!core || core != f.core.load(std::memory_order_relaxed)) return;
+    const bool wanted = GetTickCount64() < f.until.load(std::memory_order_relaxed);
+    if (!wanted && f.weight <= 0) return;
+    std::uintptr_t a{}, b{}, c{}, w{};
+    if (!peek_at(core + 0x430, a) || !peek_at(a + 0x718, b) || !peek_at(b + 0x80, c) || !peek_at(c + 0x28, w) || !w) return;
+    if (w != f.rows.w) {
+        f.held.fill(false);
+        f.pelvis_held = {false, false};
+        f.rows = {};
+        f.rows.w = w;
+    }
+    if (!f.rows.found && !find_limb_rows(f.rows)) return;
+    if (!f.logged.exchange(true))
+        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: limbs: back arm rows {} {} {} {}, front arm {} {} {} {}, back leg {} rows, front leg {}, pelvis rows {} {}.", f.rows.rows[0][0], f.rows.rows[0][1],
+                     f.rows.rows[0][2], f.rows.rows[0][3], f.rows.rows[1][0], f.rows.rows[1][1], f.rows.rows[1][2], f.rows.rows[1][3], f.rows.counts[2], f.rows.counts[3], f.rows.pelvis_rows[0], f.rows.pelvis_rows[1]);
+    std::uintptr_t records{};
+    if (!peek_at(w + 0xe68, records) || !records) return;
+    const float dt = step_seconds(core);
+    f.weight = std::clamp(f.weight + (wanted ? dt : -dt) / 0.15f, 0.0f, 1.0f);
+    if (wanted) {
+        f.last_mask = f.mask.load(std::memory_order_relaxed);
+        f.last_scale = std::clamp(f.scale.load(std::memory_order_relaxed), 0.0f, 1.0f);
+        f.last_drop = std::clamp(f.drop.load(std::memory_order_relaxed), 0.0f, 0.5f);
+    }
+    const float share = 1.0f - (1.0f - f.last_scale) * carry_smooth(f.weight);
+    int slot = 0;
+    for (int limb = 0; limb < 4; ++limb)
+        for (int j = 0; j < f.rows.counts[static_cast<std::size_t>(limb)]; ++j, ++slot) {
+            const auto s = static_cast<std::size_t>(slot);
+            const int row = f.rows.rows[static_cast<std::size_t>(limb)][static_cast<std::size_t>(j)];
+            const auto at = records + static_cast<std::uintptr_t>(row) * 0xc0 + 0x10;
+            std::array<float, 5> now{};
+            if (!peek_at(at, now)) continue;
+            if (!f.held[s] || now != f.wrote[s] || f.saved_row[s] != row) {
+                f.saved[s] = now; // the game's own (first, or set again by the game)
+                f.saved_row[s] = row;
+            }
+            const bool mine = (f.last_mask >> limb) & 1;
+            if (!mine || f.weight <= 0) {
+                if (f.held[s] && now == f.wrote[s]) (void)copy_to(at, f.saved[s].data(), sizeof(f.saved[s]));
+                f.held[s] = false;
+                continue;
+            }
+            std::array<float, 5> scaled{};
+            for (std::size_t i = 0; i < 5; ++i) scaled[i] = f.saved[s][i] * share;
+            if (copy_to(at, scaled.data(), sizeof(scaled))) {
+                f.wrote[s] = scaled;
+                f.held[s] = true;
+                f.writes.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    // The crouch: the pelvis drive's point (on the deck, its up axis) lowered.
+    for (int k = 0; k < 2; ++k) {
+        const int row = f.rows.pelvis_rows[static_cast<std::size_t>(k)];
+        if (row < 0) continue;
+        const auto at = records + static_cast<std::uintptr_t>(row) * 0xc0;
+        std::array<float, 3> point{};
+        if (!peek_at(at + 0x30, point)) continue;
+        auto& saved = f.pelvis_saved[static_cast<std::size_t>(k)];
+        auto& wrote = f.pelvis_wrote[static_cast<std::size_t>(k)];
+        auto& held = f.pelvis_held[static_cast<std::size_t>(k)];
+        if (!held || point != wrote) saved = point;
+        const float drop = f.last_drop * carry_smooth(f.weight);
+        if (drop <= 0) {
+            if (held && point == wrote) { (void)copy_to(at + 0x30, saved.data(), sizeof(saved)); (void)copy_to(at + 0x88, saved.data(), sizeof(saved)); }
+            held = false;
+            continue;
+        }
+        std::array<float, 3> low{saved[0], saved[1] - drop, saved[2]};
+        if (copy_to(at + 0x30, low.data(), sizeof(low)) && copy_to(at + 0x88, low.data(), sizeof(low))) {
+            (void)peek_at(at + 0x30, wrote);
+            held = true;
+        }
+    }
 }
 // The mod's flips played on the board itself (the owner, 2026-10-14: the flips "flash around and do too much"). They
 // used to turn the board's drive target and leave the board to chase it on the drive's spring: half a turn behind at
@@ -1108,6 +1538,10 @@ struct KinematicSpin {
     // The base is the board as it was at the start, not levelled: a pose's flick-out (its roll already brings the
     // board right side up: the levelling's half turn came on top of it, the owner 2026-10-14 "does way too much").
     std::atomic<bool> pose{};
+    // The base turned about the world's up with the skater's pelvis (a flip grab while the left stick spins the skater:
+    // the board stayed on the start heading, "out of position", the owner 2026-10-14).
+    std::atomic<bool> with_pelvis{};
+    float pelvis_yaw0{}, pelvis_turn{}; // physics thread
     std::atomic<int> pose_dir{}; // the roll back over: 1 the roll's positive way, -1 the other, 0 the shorter
     float pose_roll{};           // physics thread: the roll back over plus the asked roll (`roll`), degrees
     // Physics thread only: a landing before the end finishes the turn quickly instead of at once.
@@ -1227,6 +1661,13 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
                 if (dir < 0 && back > 0) back -= 360.0f;
                 k.pose_roll = back + k.roll.load(std::memory_order_relaxed);
             }
+            {
+                SourceReader r3;
+                const auto pf = r3.value<std::array<float, 4>>(bodies.parts[31], 0x40);
+                r3.verify();
+                k.pelvis_yaw0 = std::atan2(pf[0], pf[2]);
+                k.pelvis_turn = 0;
+            }
             k.last_offset = 0;
             k.finishing = false;
             k.started = true;
@@ -1262,6 +1703,21 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
                 kin_rotate(up, axis, angle);
                 kin_rotate(fwd, axis, angle);
             }
+        }
+        if (k.with_pelvis.load(std::memory_order_relaxed)) {
+            SourceReader r3;
+            const auto pf = r3.value<std::array<float, 4>>(bodies.parts[31], 0x40);
+            r3.verify();
+            if (std::sqrt(pf[0] * pf[0] + pf[2] * pf[2]) > 0.3f) {
+                float want = std::atan2(pf[0], pf[2]) - k.pelvis_yaw0;
+                while (want - k.pelvis_turn > 3.14159265f) want -= 6.2831853f;
+                while (want - k.pelvis_turn < -3.14159265f) want += 6.2831853f;
+                k.pelvis_turn += (want - k.pelvis_turn) * std::min(1.0f, step_seconds(core) * 12.0f);
+            }
+            const float axis[3]{0.0f, 1.0f, 0.0f};
+            kin_rotate(side, axis, k.pelvis_turn);
+            kin_rotate(up, axis, k.pelvis_turn);
+            kin_rotate(fwd, axis, k.pelvis_turn);
         }
         // Over the last quarter the base goes on to the board the game's clip wants (the drive's target), so the hand back
         // to the drive at the end moves nothing (it snapped there, 2026-10-14: "the board teleports around").
@@ -1588,7 +2044,9 @@ void noclip_physics_update(std::uintptr_t core) {
     tricks_feet_free(core);
     tricks_kinematic_spin(core);
     tricks_board_carry(core);
+    tricks_limb_free(core);
     tricks_hand_pull(core);
+    tricks_drive_dump(core);
     tricks_freestyle_slide(core);
     tricks_rider_drives(core);
     if (const auto step = tricks_step().load(std::memory_order_acquire)) step();
@@ -1860,6 +2318,17 @@ void set_board_target_rows(const float* rows) noexcept {
         for (std::size_t c = 0; c < 3; ++c) bt.rows[r * 3 + c].store(rows[r * 4 + c], std::memory_order_relaxed);
     bt.at.store(GetTickCount64(), std::memory_order_relaxed);
 }
+void set_limb_free(std::uintptr_t core, std::uint32_t milliseconds, int mask, float scale, float drop) noexcept {
+    auto& f = limb_free();
+    f.core.store(core, std::memory_order_relaxed);
+    f.mask.store(mask, std::memory_order_relaxed);
+    f.scale.store(scale, std::memory_order_relaxed);
+    f.drop.store(drop, std::memory_order_relaxed);
+    f.until.store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_relaxed);
+}
+std::uint32_t take_limb_free_writes() noexcept { return limb_free().writes.exchange(0, std::memory_order_relaxed); }
+void set_kinematic_spin_with_pelvis(bool on) noexcept { kinematic_spin().with_pelvis.store(on, std::memory_order_relaxed); }
+void request_drive_dump(std::uintptr_t core) noexcept { drive_dump_core.store(core, std::memory_order_relaxed); }
 void set_kinematic_spin_follow(bool follow) noexcept { kinematic_spin().follow.store(follow, std::memory_order_relaxed); }
 void set_kinematic_spin_pose(bool pose, int dir) noexcept {
     kinematic_spin().pose_dir.store(dir, std::memory_order_relaxed);
@@ -1869,6 +2338,7 @@ void set_kinematic_spin(std::uintptr_t core, std::uint32_t milliseconds, float r
     auto& k = kinematic_spin();
     k.follow.store(false, std::memory_order_relaxed);
     k.pose.store(false, std::memory_order_relaxed);
+    k.with_pelvis.store(false, std::memory_order_relaxed);
     k.start.store(0, std::memory_order_release);
     k.finish_now.store(false, std::memory_order_relaxed);
     if (!milliseconds) return;

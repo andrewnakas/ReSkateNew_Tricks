@@ -28,6 +28,8 @@ $macros = @{
     NOLLIEDRAGON = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:700 ry=1:150 ry=-1:120 rx=0.75+ry=0.7:150 n:3500;wait 9'
     NOLLIE = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:700 ry=1:150 ry=-1:150 n:3500;wait 9'
     GOFAKIE = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:700 ry=-1:150 lx=-1+ry=1:120 lx=-1:700 n:2500;wait 5'
+    GSHUV = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:700 ls:200 ls+ry=-1:200 ls+rx=0.7+ry=-0.7:150 ls:300 n:3000;wait 8'
+    GSHUVL = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:700 ls:200 ls+ry=-1:200 ls+rx=-0.7+ry=-0.7:150 ls:300 n:3000;wait 8'
     KICKPRIMO  ='tricks pad ls:500 ls+a:200 ls:300 ls+ry=-1:250 ls+rx=0.7+ry=0.7:100 ls+rx=0.85+ry=-0.5:2400 n:2000;wait 7'
 }
 $all = @($Setup)
