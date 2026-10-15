@@ -138,7 +138,8 @@ struct Runtime {
     bool watch_air{}, watch_fine{};
     float flip_dip{0.2f};
     float feet_free{0.05f};
-    int legs_flip{11}; // the game's flip clip played for the legs of a dolphin or dragon (11: 360 flip; 0: none) // the feet's hold on the deck through a flip of the mod's (1: the game's own) // metres the board drops under the feet at the middle of an air flip of the mod's
+    bool kinematic{true}; // the mod's air flips played on the board itself (smooth), not through the board's drive
+    int legs_flip{0}; // off: its clip's board kept turning after the mod's flip and the board followed it (2026-10-14) // the game's flip clip played for the legs of a dolphin or dragon (11: 360 flip; 0: none) // the feet's hold on the deck through a flip of the mod's (1: the game's own) // metres the board drops under the feet at the middle of an air flip of the mod's
     // <dev> tricks spinshot: the game nearly stopped at a point of a spin (or of any air) and a still asked for
     float shot_progress{-1}; std::uint32_t shot_air_ms{}, shot_hold_ms{6000}, shot_count{};
     bool shot_taken{}; std::uint64_t shot_until{}, shot_air_since{};
@@ -154,7 +155,7 @@ struct Runtime {
     // trigger is pressed in a flip's air, to see what the game's own grab does from there.
     bool flip_grab{true}, flip_grab_on{};
     bool grab_hand_back{};
-    std::uint32_t flip_grab_ms{520};
+    std::uint32_t flip_grab_ms{760}; // slower: the owner could not see the catch at 520
     float flip_grab_rise{0.75f};  // metres the board rises at the top of a flip grab (from the feet to the waist)
     float flip_grab_reach{0.3f};  // and out in front of the skater (toward the toes, the skater's side row)
     float grab_rigid{40.0f};      // the board's drive strength through a flip grab's path
@@ -377,7 +378,16 @@ bool board_backwards_state(std::uintptr_t rig, int &flag, float &offset) noexcep
 // A flip in the air: the board drops under the feet as it turns and comes back up to them for the catch (the stock
 // flips' board turns well below the lifted feet; the mod's turned at the feet and went through the shoes: stills
 // 2026-10-14). A flat turn (a shuvit) drops half as far.
-void start_air_spin(const Runtime &r, float roll, float yaw, float pitch, std::uint32_t ms, bool near_ground = false) noexcept {
+void start_air_spin(const Runtime &r, float roll, float yaw, float pitch, std::uint32_t ms, bool near_ground = false, bool follow_clip = false) noexcept {
+    std::uintptr_t kin_core{};
+    if (r.kinematic && r.rig) (void)copy_rows(r.rig + 0x4630, reinterpret_cast<float *>(&kin_core), 2);
+    if (kin_core) {
+        const float kdip = near_ground ? 0.0f : pitch != 0 ? r.flip_dip * 1.5f : roll != 0 ? r.flip_dip : r.flip_dip * 0.5f;
+        start_board_spin_kinematic(kin_core, roll, yaw, pitch, ms, 1.0f, kdip);
+        set_kinematic_spin_follow(follow_clip);
+        if (r.feet_free < 1.0f) set_feet_free(kin_core, ms + 60, r.feet_free);
+        return;
+    }
     start_board_spin(roll, yaw, pitch, ms);
     // An end-over-end turn stands the board up: half a board's length more to clear (stills 2026-10-14: a dolphin's
     // upper end reached the soles at 0.2 m).
@@ -449,8 +459,8 @@ int forward_flick(const Runtime &r, std::uint64_t now, std::uint64_t window, int
     int stage = 0; // 0 looking for down, 1 for up, 2 for the second down
     for (const auto &s : v) {
         if (stage == 0 && s.ry < -0.6f) stage = 1;
-        else if (stage == 1 && s.ry > 0.6f) stage = 2;
-        else if (stage == 2 && s.ry < -0.5f && std::sqrt(s.rx * s.rx + s.ry * s.ry) > 0.75f) {
+        else if (stage == 1 && s.ry > 0.75f && std::abs(s.rx) < 0.4f) stage = 2; // straight up: a kickflip's flick is diagonal
+        else if (stage == 2 && s.ry < -0.8f && std::sqrt(s.rx * s.rx + s.ry * s.ry) > 0.85f) { // pushed down, not the spring-back
             side = s.rx < 0 ? -1 : 1;
             return std::abs(s.rx) > 0.45f ? 2 : 1;
         }
@@ -1544,12 +1554,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     // The flip is the mod's from here (the clip's board would turn it twice): one turn of it on the way up.
                     const int f = static_cast<int>(flip);
                     const float roll = f == 3 ? -360.0f : f == 4 || f == 7 ? 0.0f : 360.0f, yaw = f == 4 ? 180.0f : f == 7 ? -180.0f : f == 11 ? 360.0f : 0.0f;
-                    start_board_spin(roll, yaw, 0, r.flip_grab_ms);
-                    set_board_spin_base(r.rig, true);
-                    set_board_carry(core, r.flip_grab_ms, r.flip_grab_rise, r.flip_grab_reach, 0.42f, 0.58f);
-                    // The roll done by a quarter of the way (the board's drive lags it by about half a turn): right side up
-                    // when it reaches the hand at the top.
-                    set_board_spin_path(0, 0, 0.25f, 0.58f);
+                    start_board_spin_kinematic(core, roll, yaw, 0, r.flip_grab_ms, 0.42f, 0.0f);
+                    set_board_carry(core, r.flip_grab_ms, r.flip_grab_rise, r.flip_grab_reach, 0.42f, 0.62f);
+                    set_board_carry_hand(right ? 11 : 15, right ? r.grab_side : -r.grab_side);
+                    // (The turn is done by the top: right side up when the hand takes it.)
                     if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
                     (void)write_state_at(base, r.s_flip_intent, 1, 0);
                     set_feet_free(core, r.flip_grab_ms + 60, r.feet_free);
@@ -1799,7 +1807,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 case 9: roll = 360; yaw = -180; break;   // hardflip (as a turn: a flip with a front side half turn)
                 default: roll = 360; break;
                 }
-                start_air_spin(r, roll, yaw, 0, r.nc_spin_ms, true);
+                start_air_spin(r, roll, yaw, 0, r.nc_spin_ms, true, true);
                 const char *nc_id = r.nc_trick == 2 ? "nc_kickflip" : r.nc_trick == 3 ? "nc_heelflip" : r.nc_trick == 4 ? "nc_shuvit" : r.nc_trick == 7 ? "nc_fsshuvit" : "nc_kickflip";
                 score_trick(nc_id, std::format("{} {}", r.plant_flip ? "Boneless" : "No Comply", flip_name(r.nc_trick)));
             }
@@ -1850,6 +1858,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         (void)read_state_at(base, r.s_riding_fakie, 0, fakie);
         const auto ph = watched_physics_state();
         float turned_by = 0;
+        if (!kinematic_spin_running())
+            if (const auto check = take_kinematic_spin_check(); !check.empty())
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: watch: board play {}.", check);
+        std::uint32_t kin_failures{}, kin_skipped{};
+        if (const auto kin = take_kinematic_spin_steps(kin_failures, kin_skipped); kin || kin_failures || kin_skipped)
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: watch: board played {} steps ({} failed, {} skipped).", kin, kin_failures, kin_skipped);
         if (const auto feet = take_feet_free_writes())
             logging::log(logging::Level::info, logging::Channel::skater, "Tricks: watch: feet rows loosened {} times.", feet);
         if (const auto turns = take_board_turn_backs(turned_by))
@@ -1896,7 +1910,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             // and played a 360 flip first (the owner, 2026-10-14). Hidden from the game while it could still come.
             {
                 bool up_seen = false;
-                for (const auto &sample : recent_sticks(r, now, 500)) up_seen = up_seen || sample.ry > 0.6f;
+                for (const auto &sample : recent_sticks(r, now, 500)) up_seen = up_seen || (sample.ry > 0.75f && std::abs(sample.rx) < 0.4f);
                 if (up_seen && (trick_enabled(r, "dolphin") || trick_enabled(r, "dragon"))) DingoSDKOverlayTricksMask();
             }
             int side = 0;
@@ -1915,12 +1929,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             // the dragon a forward 360 (one front flip and a full turn of the board: the nose goes all the way round in
             // both).
             if (forward == 1 && trick_enabled(r, "dolphin")) {
-                start_air_spin(r, 0, side > 0 ? -180.0f : 180.0f, 360, r.flickit_spin_ms);
+                start_air_spin(r, 0, side > 0 ? -180.0f : 180.0f, 360, r.flickit_spin_ms, false, true);
                 flip_legs(r, base);
                 id = "dolphin";
                 name = "Dolphin Flip";
             } else if (forward == 2 && trick_enabled(r, "dragon")) {
-                start_air_spin(r, 0, side > 0 ? -360.0f : 360.0f, 360, r.flickit_spin_ms);
+                start_air_spin(r, 0, side > 0 ? -360.0f : 360.0f, 360, r.flickit_spin_ms, false, true);
                 flip_legs(r, base);
                 id = "dragon";
                 name = "Dragon Flip";
@@ -2471,6 +2485,10 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         const auto steps = take_hand_pull(gap);
         return std::format("Grabs: side {:.2f}, gain {:.2f}, crouch {:.1f}, flip grab rise {:.2f} m over {} ms; {} steps pulled, the hand {:.2f} m from the board.", r.grab_side, r.grab_gain,
                            r.grab_crouch, r.flip_grab_rise, r.flip_grab_ms, steps, gap);
+    }
+    if (verb == "kinematic") {
+        r.kinematic = arguments.empty() || arguments[0] != "off";
+        return r.kinematic ? "The mod's flips are played on the board itself." : "The mod's flips go through the board's drive.";
     }
     if (verb == "dip") { // dip <metres> | ease <in> <slow>
         if (arguments.size() == 3 && arguments[0] == "ease") {

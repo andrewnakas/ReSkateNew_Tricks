@@ -35,6 +35,7 @@ void register_tricks_commands(Commands &registry) {
         {"anti", "The anti-casper (the casper mirrored and turned), caught with the right stick resting up", "on|off | steady <ms> | turn on|off"},
         {"flipgrab", "Experiment: allow the game's grab during a flip trick", "on|off"},
         {"turnback", "Turn a board spun round under the feet back to the skater's heading on landing", "[off]"},
+        {"kinematic", "Play the mod's flips on the board itself (smooth) or through its drive", "on|off"},
         {"dip", "How far the board drops under the feet in an air flip; or the flips' turn rate curve", "<metres>|ease <in> <slow>"},
         {"spinshot", "Dev: slow the game to a stop at a point of a spin and take a still", "<tag> <progress>|<tag> air <ms>|off"},
         {"grab", "The mod's grabs (grind and flip): the hand's edge, pull, crouch, the flip grab's rise and length", "side|gain|crouch|rise|ms <value> | status"},

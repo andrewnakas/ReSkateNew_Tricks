@@ -950,6 +950,8 @@ struct BoardCarry {
     std::atomic<std::uintptr_t> core{};
     std::atomic<std::uint64_t> start{}, length{}; // QueryPerformanceCounter
     std::atomic<float> rise{}, reach{}, top{0.42f}, hold{0.58f}, gain{0.5f};
+    std::atomic<int> hand{-1};   // the grabbing hand's part: the board goes to it at the top, and leaves it on the way down
+    std::atomic<float> hand_x{}; // where on the deck's side row the hand holds it
     // Physics thread only: the deck's place in the root frame at the start.
     bool started{}, logged{};
     float side0{}, up0{}, forward0{};
@@ -999,8 +1001,21 @@ void tricks_board_carry(std::uintptr_t core) noexcept {
         const float s = c.side0 + c.reach.load(std::memory_order_relaxed) * out, u = c.up0 + c.rise.load(std::memory_order_relaxed) * out, f = c.forward0;
         float push[3], gap = 0;
         const float share = std::clamp(c.gain.load(std::memory_order_relaxed), 0.0f, 1.0f) / bodies.seconds;
+        // Caught: from the top the board is where the hand holds it, then eased back onto the way down to the feet.
+        float held[3]{}, with_hand = 0;
+        if (const int hand = c.hand.load(std::memory_order_relaxed); hand >= 0 && static_cast<std::size_t>(hand) < bodies.parts.size() && p >= top * 0.8f) {
+            SourceReader r4;
+            const auto at = r4.value<std::array<float, 3>>(bodies.parts[static_cast<std::size_t>(hand)], 0x50);
+            r4.verify();
+            const float x = c.hand_x.load(std::memory_order_relaxed);
+            for (int i = 0; i < 3; ++i) held[i] = at[i] - side[i] * x;
+            const float distance = std::sqrt((held[0] - deck_at[0]) * (held[0] - deck_at[0]) + (held[1] - deck_at[1]) * (held[1] - deck_at[1]) + (held[2] - deck_at[2]) * (held[2] - deck_at[2]));
+            // Only a hand that has come near (an arm flung out is not a catch); full while held, gone by the end.
+            if (distance < 0.5f) with_hand = p < hold ? carry_smooth((p - top * 0.8f) / (top * 0.2f + 1e-3f)) : 1.0f - carry_smooth((p - hold) / (1.0f - hold));
+        }
         for (int i = 0; i < 3; ++i) {
-            const float target = place[i] + side[i] * s + up[i] * u + forward[i] * f;
+            const float path = place[i] + side[i] * s + up[i] * u + forward[i] * f;
+            const float target = path + (held[i] - path) * with_hand;
             const float d = target - deck_at[i];
             gap += d * d;
             push[i] = travel[i] + d * share;
@@ -1032,6 +1047,258 @@ void tricks_board_carry(std::uintptr_t core) noexcept {
                          axis(dr), axis(du), axis(df), rel(deck_at), rel(hand), rel(hand2), rel(head), rel(feet));
         }
     } catch (...) {}
+}
+// The mod's flips played on the board itself (the owner, 2026-10-14: the flips "flash around and do too much"). They
+// used to turn the board's drive target and leave the board to chase it on the drive's spring: half a turn behind at
+// the top of a flip grab, over-shooting, and snapped round at the end. Now the board's nine parts are set every step:
+// the deck where physics has it, turned from its pose at the start (levelled on the way) by the flip's angles on the
+// retail turn-rate curve, the other parts kept where they sit on the deck. At the end the deck is exactly level and on
+// its starting heading (whole turns and half turns about the up axis look the same), so nothing snaps.
+// The board's drive target as the board hook last had it (the clip's board, levelled): rows side, up, forward.
+struct BoardTarget {
+    std::array<std::atomic<float>, 9> rows{};
+    std::atomic<ULONGLONG> at{};
+};
+BoardTarget& board_target() { static auto* value = new BoardTarget; return *value; }
+struct KinematicSpin {
+    std::atomic<std::uintptr_t> core{};
+    std::atomic<std::uint64_t> start{}, length{}; // QueryPerformanceCounter
+    std::atomic<float> roll{}, yaw{}, pitch{}, top{1.0f}, ease_in{0.08f}, ease_slow{0.3f}, dip{};
+    std::atomic<bool> finish_now{};
+    // The base is the game's own board for the clip that plays (the drive's target), step by step, rather than the
+    // board at the start levelled: no comply and flick-it flips (their clip's board swung far round, and the board
+    // snapped on to it when let go: 2026-10-14).
+    std::atomic<bool> follow{};
+    // Physics thread only: a landing before the end finishes the turn quickly instead of at once.
+    bool finishing{};
+    float finish_from{};
+    std::uint64_t finish_start{};
+    std::atomic<std::uint32_t> steps{}, failures{}, skipped{};
+    // Physics thread only.
+    bool started{};
+    float rows0[3][3]{};       // the deck's rows at the start: side, up, forward
+    float local_rows[9][3][3]{}, local_at[9][3]{};
+    float last_offset{};
+    float wrote_up[3]{};      // <dev> the deck's up row written last step
+    bool wrote{};
+    std::atomic<float> drift{}, low_read{2.0f}, low_wrote{2.0f}, ended_at{-1.0f};
+    std::atomic<bool> ended_early{}; // <dev> largest angle (deg) between written and read back
+};
+KinematicSpin& kinematic_spin() { static auto* value = new KinematicSpin; return *value; }
+float kin_ease(float p, float a, float k) noexcept {
+    a = std::clamp(a, 0.0f, 0.5f);
+    k = std::clamp(k, 0.0f, 0.9f);
+    const auto area = [&](float x) {
+        if (x <= a) return a > 0 ? x * x / (2.0f * a) : 0.0f;
+        const float t = x - a;
+        return a / 2.0f + t - k * t * t / (2.0f * (1.0f - a));
+    };
+    const float total = area(1.0f);
+    return total > 0 ? std::clamp(area(std::clamp(p, 0.0f, 1.0f)) / total, 0.0f, 1.0f) : p;
+}
+void kin_turn(float* a, float* b, float degrees) noexcept { // as the board hook's turn(): rows a and b toward each other
+    const float r = degrees * 3.14159265358979f / 180.0f, c = std::cos(r), s = std::sin(r);
+    for (int i = 0; i < 3; ++i) {
+        const float x = a[i], y = b[i];
+        a[i] = c * x + s * y;
+        b[i] = -s * x + c * y;
+    }
+}
+void kin_rotate(float* v, const float* axis, float angle) noexcept { // Rodrigues
+    const float c = std::cos(angle), s = std::sin(angle), d = axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
+    const float cross[3]{axis[1] * v[2] - axis[2] * v[1], axis[2] * v[0] - axis[0] * v[2], axis[0] * v[1] - axis[1] * v[0]};
+    for (int i = 0; i < 3; ++i) v[i] = v[i] * c + cross[i] * s + axis[i] * d * (1.0f - c);
+}
+void tricks_kinematic_spin(std::uintptr_t core) noexcept {
+    auto& k = kinematic_spin();
+    const auto start = k.start.load(std::memory_order_acquire), length = k.length.load(std::memory_order_relaxed);
+    if (!core || core != k.core.load(std::memory_order_relaxed) || !start || !length) {
+        k.started = false;
+        return;
+    }
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    float p = static_cast<float>(static_cast<double>(static_cast<std::uint64_t>(now.QuadPart) - start) / static_cast<double>(length));
+    // Asked to finish early (a landing): the rest of the turn over 90 ms, not in one step (it jumped, 2026-10-14).
+    if (k.finish_now.load(std::memory_order_relaxed) && p < 1.0f) {
+        LARGE_INTEGER frequency{};
+        QueryPerformanceFrequency(&frequency);
+        if (!k.finishing) {
+            k.finishing = true;
+            k.finish_from = p;
+            k.finish_start = static_cast<std::uint64_t>(now.QuadPart);
+        }
+        const float t = static_cast<float>(static_cast<double>(static_cast<std::uint64_t>(now.QuadPart) - k.finish_start) / (static_cast<double>(frequency.QuadPart) * 0.09));
+        p = k.finish_from + (1.0f - k.finish_from) * std::min(1.0f, t);
+    }
+    const bool last = p >= 1.0f;
+    if (last) p = 1.0f;
+    SourceLastError error;
+    auto& state = source_state();
+    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
+    SourceBusyScope scope{state.busy};
+    try {
+        auto& t = board_turn_back();
+        const auto bodies = debug_noclip_bodies(state.trial.base, t.client.load(std::memory_order_relaxed), t.entity.load(std::memory_order_relaxed));
+        if (bodies.core != core) return;
+        if (bodies.offboard || bodies.wipeout || bodies.parts.size() < 9) {
+            k.skipped.fetch_add(1, std::memory_order_relaxed);
+            k.start.store(0, std::memory_order_release);
+            k.started = false;
+            return;
+        }
+        SourceReader reader;
+        const auto deck = bodies.parts[8];
+        const std::array<std::array<float, 4>, 3> deck_rows{reader.value<std::array<float, 4>>(deck, 0x20), reader.value<std::array<float, 4>>(deck, 0x30),
+                                                            reader.value<std::array<float, 4>>(deck, 0x40)};
+        auto centre = reader.value<std::array<float, 3>>(deck, 0x50);
+        const auto travel = reader.value<std::array<float, 3>>(deck, 0x70);
+        reader.verify();
+        if (k.started && k.wrote) { // <dev> what the step made of the last write
+            const float d = std::clamp(deck_rows[1][0] * k.wrote_up[0] + deck_rows[1][1] * k.wrote_up[1] + deck_rows[1][2] * k.wrote_up[2], -1.0f, 1.0f);
+            k.drift.store(std::max(k.drift.load(std::memory_order_relaxed), std::acos(d) * 57.2958f), std::memory_order_relaxed);
+            k.low_read.store(std::min(k.low_read.load(std::memory_order_relaxed), deck_rows[1][1]), std::memory_order_relaxed);
+            k.low_wrote.store(std::min(k.low_wrote.load(std::memory_order_relaxed), k.wrote_up[1]), std::memory_order_relaxed);
+        }
+        if (!k.started) {
+            k.wrote = false;
+            for (int r = 0; r < 3; ++r)
+                for (int j = 0; j < 3; ++j) k.rows0[r][j] = deck_rows[r][j];
+            for (std::size_t i = 0; i < 9; ++i) {
+                SourceReader r2;
+                const std::array<std::array<float, 4>, 3> rows{r2.value<std::array<float, 4>>(bodies.parts[i], 0x20), r2.value<std::array<float, 4>>(bodies.parts[i], 0x30),
+                                                               r2.value<std::array<float, 4>>(bodies.parts[i], 0x40)};
+                const auto at = r2.value<std::array<float, 3>>(bodies.parts[i], 0x50);
+                r2.verify();
+                for (int r = 0; r < 3; ++r)
+                    for (int j = 0; j < 3; ++j)
+                        k.local_rows[i][r][j] = rows[r][0] * k.rows0[j][0] + rows[r][1] * k.rows0[j][1] + rows[r][2] * k.rows0[j][2];
+                const float d[3]{at[0] - centre[0], at[1] - centre[1], at[2] - centre[2]};
+                for (int j = 0; j < 3; ++j) k.local_at[i][j] = d[0] * k.rows0[j][0] + d[1] * k.rows0[j][1] + d[2] * k.rows0[j][2];
+            }
+            k.last_offset = 0;
+            k.finishing = false;
+            k.started = true;
+        }
+        const float top = std::clamp(k.top.load(std::memory_order_relaxed), 0.1f, 1.0f);
+        const float q = std::min(1.0f, p / top);
+        // The start levelled over the flip (the pop's tilt goes as it turns): the up row brought to the world's up.
+        float side[3]{k.rows0[0][0], k.rows0[0][1], k.rows0[0][2]}, up[3]{k.rows0[1][0], k.rows0[1][1], k.rows0[1][2]}, fwd[3]{k.rows0[2][0], k.rows0[2][1], k.rows0[2][2]};
+        auto& bt_follow = board_target();
+        const bool following = k.follow.load(std::memory_order_relaxed) && GetTickCount64() - bt_follow.at.load(std::memory_order_relaxed) < 200;
+        if (following) {
+            for (int c = 0; c < 3; ++c) {
+                side[c] = bt_follow.rows[static_cast<std::size_t>(c)].load(std::memory_order_relaxed);
+                up[c] = bt_follow.rows[static_cast<std::size_t>(3 + c)].load(std::memory_order_relaxed);
+                fwd[c] = bt_follow.rows[static_cast<std::size_t>(6 + c)].load(std::memory_order_relaxed);
+            }
+        } else {
+            float axis_raw[3]{up[2], 0.0f, -up[0]}; // up x (0,1,0)
+            float s = std::sqrt(axis_raw[0] * axis_raw[0] + axis_raw[2] * axis_raw[2]);
+            // Upside down (a pose's flick-out): no tilt to take out, so the board rolls back over along its length.
+            if (s <= 1e-3f && up[1] < 0) {
+                const float run = std::sqrt(fwd[0] * fwd[0] + fwd[2] * fwd[2]);
+                if (run > 1e-3f) {
+                    axis_raw[0] = fwd[0] / run;
+                    axis_raw[2] = fwd[2] / run;
+                    s = 1.0f;
+                }
+            }
+            if (s > 1e-4f) {
+                const float axis[3]{axis_raw[0] / s, 0.0f, axis_raw[2] / s};
+                const float angle = std::atan2(s, up[1]) * (q * q * (3.0f - 2.0f * q));
+                kin_rotate(side, axis, angle);
+                kin_rotate(up, axis, angle);
+                kin_rotate(fwd, axis, angle);
+            }
+        }
+        // Over the last quarter the base goes on to the board the game's clip wants (the drive's target), so the hand back
+        // to the drive at the end moves nothing (it snapped there, 2026-10-14: "the board teleports around").
+        {
+            auto& bt = board_target();
+            const float w = following ? 0.0f : p < 0.75f ? 0.0f : (p - 0.75f) / 0.25f;
+            if (w > 0 && GetTickCount64() - bt.at.load(std::memory_order_relaxed) < 200) {
+                float target[3][3];
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c) target[r][c] = bt.rows[static_cast<std::size_t>(r * 3 + c)].load(std::memory_order_relaxed);
+                if (last) {
+                    // The end: exactly the target (turned half round from the way blended to, if it was: a deck looks the
+                    // same either way round, and the drive then has nothing to swing).
+                    for (int c = 0; c < 3; ++c) {
+                        side[c] = target[0][c];
+                        up[c] = target[1][c];
+                        fwd[c] = target[2][c];
+                    }
+                    goto blended;
+                }
+                // Toward the nearer of the target's two headings: a no comply's board is swung far round, and turning
+                // the board on to it looked like a varial (the owner, 2026-10-14).
+                if (target[2][0] * fwd[0] + target[2][1] * fwd[1] + target[2][2] * fwd[2] < 0)
+                    for (int c = 0; c < 3; ++c) {
+                        target[0][c] = -target[0][c];
+                        target[2][c] = -target[2][c];
+                    }
+                // The turn taking the base to the target: M = sum over rows of target (x) base.
+                const float* base_rows[3]{side, up, fwd};
+                float m[3][3]{};
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j)
+                        for (int r = 0; r < 3; ++r) m[i][j] += target[r][i] * base_rows[r][j];
+                const auto qt = quat_of(m); // w, x, y, z
+                const float half = std::acos(std::clamp(std::abs(qt[0]), 0.0f, 1.0f));
+                const float sine = std::sin(half);
+                if (sine > 1e-4f) {
+                    const float sign = qt[0] < 0 ? -1.0f : 1.0f;
+                    const float axis[3]{sign * qt[1] / sine, sign * qt[2] / sine, sign * qt[3] / sine};
+                    const float angle = 2.0f * half * (w * w * (3.0f - 2.0f * w));
+                    kin_rotate(side, axis, angle);
+                    kin_rotate(up, axis, angle);
+                    kin_rotate(fwd, axis, angle);
+                }
+            }
+        }
+    blended:
+        if (!last) {
+            const float e = kin_ease(q, k.ease_in.load(std::memory_order_relaxed), k.ease_slow.load(std::memory_order_relaxed));
+            if (const float a = k.yaw.load(std::memory_order_relaxed) * e; a != 0) kin_turn(fwd, side, a);
+            if (const float a = k.pitch.load(std::memory_order_relaxed) * e; a != 0) kin_turn(up, fwd, a);
+            if (const float a = k.roll.load(std::memory_order_relaxed) * e; a != 0) kin_turn(side, up, a);
+        }
+        // Under the feet as it turns: down and back up again (the place is the physics', moved by the change).
+        const float offset = -k.dip.load(std::memory_order_relaxed) * std::sin(p * 3.14159265358979f);
+        centre[1] += offset - k.last_offset;
+        k.last_offset = last ? 0.0f : offset;
+        const float* desired[3]{side, up, fwd};
+        for (int c = 0; c < 3; ++c) k.wrote_up[c] = up[c];
+        k.wrote = true;
+        for (std::size_t i = 0; i < 9; ++i) {
+            std::array<std::array<float, 4>, 3> rows{};
+            std::array<float, 3> at{centre[0], centre[1], centre[2]};
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) rows[r][c] = k.local_rows[i][r][0] * desired[0][c] + k.local_rows[i][r][1] * desired[1][c] + k.local_rows[i][r][2] * desired[2][c];
+            for (int c = 0; c < 3; ++c) at[c] += k.local_at[i][0] * desired[0][c] + k.local_at[i][1] * desired[1][c] + k.local_at[i][2] * desired[2][c];
+            SourceReader r2;
+            const std::array<std::array<float, 4>, 3> keep{r2.value<std::array<float, 4>>(bodies.parts[i], 0x20), r2.value<std::array<float, 4>>(bodies.parts[i], 0x30),
+                                                           r2.value<std::array<float, 4>>(bodies.parts[i], 0x40)};
+            const auto flags = r2.value<std::uint32_t>(bodies.parts[i], 0x60);
+            r2.verify();
+            for (int r = 0; r < 3; ++r) {
+                rows[r][3] = keep[static_cast<std::size_t>(r)][3];
+                body_write(bodies.parts[i] + 0x20 + static_cast<std::uintptr_t>(r) * 0x10, rows[r]);
+            }
+            body_write(bodies.parts[i] + 0x50, at);
+            body_write(bodies.parts[i] + 0x70, travel);
+            body_write(bodies.parts[i] + 0x90, std::array<float, 3>{});
+            body_write(bodies.parts[i] + 0x60, flags | 1u | 4u | 8u | 0x20u);
+        }
+        k.steps.fetch_add(1, std::memory_order_relaxed);
+        if (last) {
+            k.ended_at.store(static_cast<float>(static_cast<double>(static_cast<std::uint64_t>(now.QuadPart) - start) / static_cast<double>(length)), std::memory_order_relaxed);
+            k.ended_early.store(k.finish_now.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            k.start.store(0, std::memory_order_release);
+            k.started = false;
+        }
+    } catch (...) { k.failures.fetch_add(1, std::memory_order_relaxed); }
 }
 void tricks_board_turn_back(std::uintptr_t core) noexcept {
     auto& t = board_turn_back();
@@ -1268,6 +1535,7 @@ void noclip_physics_update(std::uintptr_t core) {
     trainer_push_speed(core);
     tricks_board_turn_back(core);
     tricks_feet_free(core);
+    tricks_kinematic_spin(core);
     tricks_board_carry(core);
     tricks_hand_pull(core);
     tricks_freestyle_slide(core);
@@ -1520,6 +1788,10 @@ void set_board_carry(std::uintptr_t core, std::uint32_t milliseconds, float rise
     c.length.store(static_cast<std::uint64_t>(frequency.QuadPart) * milliseconds / 1000, std::memory_order_relaxed);
     c.start.store(static_cast<std::uint64_t>(now.QuadPart), std::memory_order_release);
 }
+void set_board_carry_hand(int part, float x) noexcept {
+    board_carry().hand.store(part, std::memory_order_relaxed);
+    board_carry().hand_x.store(x, std::memory_order_relaxed);
+}
 std::uint32_t take_board_carry(float& gap) noexcept {
     gap = board_carry().gap.load(std::memory_order_relaxed);
     return board_carry().steps.exchange(0, std::memory_order_relaxed);
@@ -1531,6 +1803,47 @@ void set_feet_free(std::uintptr_t core, std::uint32_t milliseconds, float scale)
     f.until.store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_relaxed);
 }
 std::uint32_t take_feet_free_writes() noexcept { return feet_free().writes.exchange(0, std::memory_order_relaxed); }
+void set_board_target_rows(const float* rows) noexcept {
+    auto& bt = board_target();
+    for (std::size_t r = 0; r < 3; ++r)
+        for (std::size_t c = 0; c < 3; ++c) bt.rows[r * 3 + c].store(rows[r * 4 + c], std::memory_order_relaxed);
+    bt.at.store(GetTickCount64(), std::memory_order_relaxed);
+}
+void set_kinematic_spin_follow(bool follow) noexcept { kinematic_spin().follow.store(follow, std::memory_order_relaxed); }
+void set_kinematic_spin(std::uintptr_t core, std::uint32_t milliseconds, float roll, float yaw, float pitch, float top, float ease_in, float ease_slow, float dip) noexcept {
+    auto& k = kinematic_spin();
+    k.follow.store(false, std::memory_order_relaxed);
+    k.start.store(0, std::memory_order_release);
+    k.finish_now.store(false, std::memory_order_relaxed);
+    if (!milliseconds) return;
+    LARGE_INTEGER now{}, frequency{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    k.core.store(core, std::memory_order_relaxed);
+    k.roll.store(roll, std::memory_order_relaxed);
+    k.yaw.store(yaw, std::memory_order_relaxed);
+    k.pitch.store(pitch, std::memory_order_relaxed);
+    k.top.store(top, std::memory_order_relaxed);
+    k.ease_in.store(ease_in, std::memory_order_relaxed);
+    k.ease_slow.store(ease_slow, std::memory_order_relaxed);
+    k.dip.store(dip, std::memory_order_relaxed);
+    k.length.store(static_cast<std::uint64_t>(frequency.QuadPart) * milliseconds / 1000, std::memory_order_relaxed);
+    k.start.store(static_cast<std::uint64_t>(now.QuadPart), std::memory_order_release);
+}
+void finish_kinematic_spin() noexcept { kinematic_spin().finish_now.store(true, std::memory_order_relaxed); }
+bool kinematic_spin_running() noexcept { return kinematic_spin().start.load(std::memory_order_acquire) != 0; }
+std::string take_kinematic_spin_check() {
+    auto& k = kinematic_spin();
+    const float drift = k.drift.exchange(0), low_read = k.low_read.exchange(2.0f), low_wrote = k.low_wrote.exchange(2.0f);
+    if (low_read > 1.5f) return {};
+    return std::format("written vs read back: largest drift {:.0f} deg; lowest up row height written {:.2f}, read {:.2f}; ended at {:.2f} of its time{}", drift, low_wrote, low_read,
+                       k.ended_at.exchange(-1.0f), k.ended_early.exchange(false) ? " (stopped early)" : "");
+}
+std::uint32_t take_kinematic_spin_steps(std::uint32_t& failures, std::uint32_t& skipped) noexcept {
+    failures = kinematic_spin().failures.exchange(0, std::memory_order_relaxed);
+    skipped = kinematic_spin().skipped.exchange(0, std::memory_order_relaxed);
+    return kinematic_spin().steps.exchange(0, std::memory_order_relaxed);
+}
 bool request_board_turn_back(void (*after)() noexcept) noexcept {
     auto& t = board_turn_back();
     if (!after || !t.client.load(std::memory_order_relaxed) || !t.entity.load(std::memory_order_relaxed)) return false;

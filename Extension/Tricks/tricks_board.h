@@ -17,6 +17,9 @@ void set_board_context(std::uintptr_t context) noexcept;
 // over `milliseconds`, starting now. A new spin replaces the one running.
 void start_board_spin(float roll, float yaw, float pitch, std::uint32_t milliseconds) noexcept;
 void stop_board_spin() noexcept;
+// A spin played on the board itself (smooth, no chase of the drive): `top` the share of the time the turn takes, `dip`
+// metres under the feet at the middle. Stopped like any spin.
+void start_board_spin_kinematic(std::uintptr_t core, float roll, float yaw, float pitch, std::uint32_t milliseconds, float top, float dip) noexcept;
 // A released spin that turned the board about its up axis turns the board back to the skater's heading (on by default).
 void set_board_turn_back(bool on) noexcept;
 // For the spin just started: the board turned from the skater's root frame (`rig`, + 0x4720) instead of the clip's

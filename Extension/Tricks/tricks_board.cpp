@@ -52,9 +52,11 @@ struct Spin {
     std::atomic<std::uint64_t> start{}; // QueryPerformanceCounter
     std::atomic<std::uint64_t> length{};
     std::atomic<bool> turned_back{}; // the turn back was asked for (once per spin)
+    std::atomic<bool> kinematic{};   // played on the board's parts (client_noclip): the target is left alone
 };
 Spin spin;
 std::atomic<bool> turn_back_on{true};
+std::atomic<std::uint32_t> stop_calls{};
 // The spin's own board: the clip's turn of the board is replaced by the skater's root frame (level, the skater's
 // heading), so the game can play a flip clip for the legs while the mod alone turns the board.
 std::atomic<std::uintptr_t> base_rig{};
@@ -226,6 +228,15 @@ bool turn_frame(std::uintptr_t board) noexcept {
         }
         level_frame(frame);
         if (!spin.on.load(std::memory_order_acquire)) return false;
+        set_board_target_rows(frame);
+        if (spin.kinematic.load(std::memory_order_relaxed)) {
+            // The board is set step by step; its drive to the clip's board is let go meanwhile (put back to 1 after).
+            if (kinematic_spin_running()) {
+                for (const auto at : drive_strengths) *reinterpret_cast<volatile float *>(board + at) = 0.02f;
+                rigid_restore.store(true, std::memory_order_relaxed);
+            }
+            return false;
+        }
         if (base_root.load(std::memory_order_relaxed)) {
             float root[12]{};
             const auto rig = base_rig.load(std::memory_order_relaxed);
@@ -329,7 +340,13 @@ void set_board_spin_base(std::uintptr_t rig, bool own) noexcept {
     base_rig.store(rig, std::memory_order_relaxed);
     base_root.store(own && rig, std::memory_order_relaxed);
 }
+void start_board_spin_kinematic(std::uintptr_t core, float roll, float yaw, float pitch, std::uint32_t milliseconds, float top, float dip) noexcept {
+    start_board_spin(roll, yaw, pitch, milliseconds);
+    spin.kinematic.store(true, std::memory_order_relaxed);
+    set_kinematic_spin(core, milliseconds, roll, yaw, pitch, top, ease_in.load(std::memory_order_relaxed), ease_slow.load(std::memory_order_relaxed), dip);
+}
 void start_board_spin(float roll, float yaw, float pitch, std::uint32_t milliseconds) noexcept {
+    spin.kinematic.store(false, std::memory_order_relaxed);
     base_root.store(false, std::memory_order_relaxed);
     path_rise.store(0, std::memory_order_relaxed);
     path_reach.store(0, std::memory_order_relaxed);
@@ -351,6 +368,13 @@ void release_board_spin() noexcept {
     spin.drop.store(0, std::memory_order_relaxed);
 }
 void stop_board_spin() noexcept {
+    if (spin.kinematic.exchange(false, std::memory_order_relaxed)) {
+        stop_calls.fetch_add(1, std::memory_order_relaxed);
+        // Ends level and straight at the next step (no turn back: it never left the skater's heading).
+        finish_kinematic_spin();
+        release_board_spin();
+        return;
+    }
     // A spin with a turn about the board's up axis left the deck heading another way than the clip's board: let go of
     // it there and the board's drive swings it back round under the feet, and the game takes the skater off the board
     // (measured 2026-10-14: a no comply pop shuvit landed at 180 degrees, then physics 504). The board is turned back

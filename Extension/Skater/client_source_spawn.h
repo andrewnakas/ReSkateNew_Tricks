@@ -71,6 +71,21 @@ void set_board_turn_owner(std::uintptr_t client, std::uintptr_t entity) noexcept
 // looks the same either way round), when they are more than 60 degrees apart; then `after` is called (in the same
 // step, or once the request times out). False when no owner is known (then `after` is not called).
 bool request_board_turn_back(void (*after)() noexcept) noexcept;
+// A flip of the mod's played on the board itself for `milliseconds` (its parts set every step): degrees of roll, yaw
+// and pitch on the retail turn-rate curve (ease_in, ease_slow), done by `top` of the time; the board levelled on the way
+// and ending level on its starting heading; `dip` m under the feet at the middle. 0 ms stops at once.
+void set_kinematic_spin(std::uintptr_t core, std::uint32_t milliseconds, float roll, float yaw, float pitch, float top, float ease_in, float ease_slow, float dip) noexcept;
+// The running one ends at its next step, level and straight (a landing before its end).
+void finish_kinematic_spin() noexcept;
+// For the spin just set: turned on top of the game's own board for its clip (the drive's target) each step.
+void set_kinematic_spin_follow(bool follow) noexcept;
+// The board's drive target (rows side, up, forward at 0, 4, 8 of a 4x4 frame), from the board hook every step.
+void set_board_target_rows(const float* rows) noexcept;
+bool kinematic_spin_running() noexcept;
+// <dev> Steps played since the last call.
+std::uint32_t take_kinematic_spin_steps(std::uint32_t& failures, std::uint32_t& skipped) noexcept;
+// <dev> Over the spins since the last call: how far the step moved the deck from what was written.
+std::string take_kinematic_spin_check();
 // The local skater's feet (skater core `core`) let go of the deck for the next `milliseconds`: their rider-to-deck
 // drives' force limits times `scale`; put back after. 0 ms puts them back at the next step.
 void set_feet_free(std::uintptr_t core, std::uint32_t milliseconds, float scale) noexcept;
@@ -79,6 +94,8 @@ void set_feet_free(std::uintptr_t core, std::uint32_t milliseconds, float scale)
 void set_board_carry(std::uintptr_t core, std::uint32_t milliseconds, float rise, float reach, float top, float hold) noexcept;
 // <dev> Steps carried since the last call and the deck's last distance from its place on the path (m).
 std::uint32_t take_board_carry(float& gap) noexcept;
+// The carried board goes to this hand (a rider part, -1 none) at the top, held at `x` on the deck's side row.
+void set_board_carry_hand(int part, float x) noexcept;
 // For the next `milliseconds`: the rider's physics part `part` (and `part2` half as hard, -1 none) pulled each step a
 // `gain` share of the way to (x side, y up, z forward) in the deck's frame; `crouch` m/s pulls the pelvis and chest
 // down toward the deck. The rider's parts (index into the skater's 35 parts): 11 back hand, 12 its forearm, 15 front

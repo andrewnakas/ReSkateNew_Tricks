@@ -20,6 +20,8 @@ $macros = @{
     CASPERSHUV = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:500 a:200 n:600 ls:300 ls+ry=-1:250 ls+rx=0.7+ry=0.7:100 ls+rx=0.2+ry=-1:2500 ls+rx=-1+ry=0.25:120 n:3500;wait 10'
     CASPERTRE = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:500 a:200 n:600 ls:300 ls+ry=-1:250 ls+rx=0.7+ry=0.7:100 ls+rx=0.2+ry=-1:2500 ls+rx=0+ry=1:120 n:3500;wait 10'
     KICK = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:700 ry=-1:150 rx=-0.7+ry=0.7:150 n:3500;wait 9'
+    SHUVR = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:700 ry=-1:150 rx=1:150 n:3500;wait 9'
+    KICKR = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:700 ry=-1:150 rx=0.7+ry=0.7:150 n:3500;wait 9'
     SHUV = 'tricks pad a:200 n:500 a:200 n:500 a:200 n:700 ry=-1:150 rx=-1:150 n:3500;wait 9'
     KICKPRIMO  ='tricks pad ls:500 ls+a:200 ls:300 ls+ry=-1:250 ls+rx=0.7+ry=0.7:100 ls+rx=0.85+ry=-0.5:2400 n:2000;wait 7'
 }
