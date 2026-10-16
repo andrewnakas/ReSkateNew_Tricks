@@ -1962,7 +1962,15 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 put(r.s_ground_grab_loop, "Animation/Dingo/Bool.Anim.IsGroundGrabLoop", 0, on && now - r.grind_grab_since > 600);
             };
             if (want && !r.grind_grab_on) r.grind_grab_since = now;
-            if (want) ground_grab(true);
+            // Family 2 (air): the game's own in-air grab with its tweaks (the right stick), its gate held open; the
+            // ground grab's states are not written.
+            const bool air_grab = r.grind_family == 2;
+            if (air_grab) {
+                if (want || r.grind_grab_on) {
+                    if (!r.s_can_grab) r.s_can_grab = find_state(base, "Animation/Dingo/Bool.GP.CanGrab");
+                    (void)write_state_at(base, r.s_can_grab, 0, want);
+                }
+            } else if (want) ground_grab(true);
             else if (r.grind_grab_on) ground_grab(false);
             // The hand on the board through the game's own hand IK (the grind clip ignores the grab states), and the
             // body crouched to it.
