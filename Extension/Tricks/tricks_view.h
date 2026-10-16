@@ -52,7 +52,8 @@ inline constexpr TrickInfo trick_catalog[]{
     {"air_extraflip", Family::air, "Extra flip", "Tap L3 in the air, stick at rest: double flip, nightmare, daydream", 300},
     {"air_lateshuv", Family::air, "Late Shuvit", "Tap L3 in the air with the stick left or right", 250},
     {"flipgrab", Family::air, "Flip Grab", "A trigger during a flip: the flip turns into the game's grab with the knees tucked up (RT indy, LT melon)", 400},
-    {"grindgrab", Family::air, "Grind Grab", "Hold a trigger while grinding: the hand reaches down to the board (RT indy, LT melon)", 200},
+    {"grindgrab", Family::air, "Grind Grab", "Press a trigger while grinding: RT indy, LT melon, both a double grab, on any grind", 200},
+    {"fandango", Family::air, "Fandango", "Hold A in a crooked grind: the back foot comes off the board", 300},
     {"dolphin", Family::flickit, "Dolphin Flip", "Flick down, up and straight back down: a forward varial (one front flip, half a turn)", 500},
     {"dragon", Family::flickit, "Dragon Flip", "Flick down, up and back down to a lower diagonal: a forward 360 (one front flip, a full turn)", 650},
 };

@@ -173,6 +173,12 @@ struct Runtime {
     // grab: CanGroundGrab, State.Is.GroundGrab, IsGrabbing, GrabType 2, then IsGroundGrabLoop).
     std::uintptr_t s_can_grab{}, s_can_ground_grab{}, s_is_ground_grab{}, s_is_grabbing{}, s_grab_type{}, s_ground_grab_loop{};
     std::uint64_t grind_grab_since{};
+    int grind_grab_kind{};             // the grab grind's grab, taken at the press: 1 melon (LT), 2 indy (RT), 3 double (both)
+    int grind_grab_scored_grind{-1};   // the grind (Enum.GS.SkateGrindType) the grab grind was scored on
+    std::uintptr_t s_skate_grind_type{};
+    std::uintptr_t s_grab_left_hand{}, s_grab_right_hand{};
+    bool fandango{false}, fandango_on{}, fandango_any{}, fandango_north{};
+    std::uintptr_t s_ollie_south{};
     std::uint32_t flip_grab_spin_ms{650}; // out, flipped, and back into the game's grab
     float flip_grab_rise{0.35f};  // metres the board rises at the top of a flip grab (from the feet to the waist)
     float flip_grab_reach{0.25f};  // and out in front of the skater (toward the toes, the skater's side row)
@@ -855,6 +861,22 @@ void score_trick(std::string_view id, std::string_view name) {
     announce(points > 0 && runtime().score_feed ? std::format("{}  +{}", name, points) : std::string(name));
     if (runtime().score_feed) queue_trick_entry(std::string(name), points);
     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: scored {} ({}, {} points).", name, id, points);
+}
+// The game's grind names (Enum.SkateSlappyGrindType, the values of Enum.GS.SkateGrindType).
+std::string_view grind_name(int grind) {
+    static constexpr std::string_view names[]{"",          "FS Lipslide", "FS Boardslide", "FS 50-50",    "FS Noseslide", "FS Tailslide", "FS Nosegrind", "FS 5-0",
+                                              "FS Salad",  "FS Smith",    "FS Feeble",     "FS Willy",    "FS Overwilly", "FS Noseblunt", "FS Bluntslide",
+                                              "FS Crooked", "FS Overcrook", "FS Darkslide", "BS Lipslide", "BS Boardslide", "BS 50-50", "BS Noseslide",
+                                              "BS Tailslide", "BS Nosegrind", "BS 5-0", "BS Salad", "BS Smith", "BS Feeble", "BS Willy", "BS Overwilly",
+                                              "BS Noseblunt", "BS Bluntslide", "BS Crooked", "BS Overcrook", "BS Darkslide"};
+    if (grind >= 0 && grind < static_cast<int>(std::size(names))) return names[grind];
+    // 35.. the bigflip ones (BF_), the curb hops: their base name.
+    static constexpr std::string_view bf[]{"FS 50-50", "FS Nosegrind", "FS 5-0", "FS Salad", "FS Smith", "FS Feeble", "FS Willy", "FS Overwilly", "FS Crooked", "FS Overcrook",
+                                           "BS 50-50", "BS Nosegrind", "BS 5-0", "BS Salad", "BS Smith", "BS Feeble", "BS Willy", "BS Overwilly", "BS Crooked", "BS Overcrook",
+                                           "BS Boardslide", "FS Boardslide", "BS Noseslide", "FS Noseslide", "BS Tailslide", "FS Tailslide", "BS Lipslide", "FS Lipslide",
+                                           "BS Bluntslide", "FS Bluntslide", "BS Noseblunt", "FS Noseblunt"};
+    if (grind >= 35 && grind < 35 + static_cast<int>(std::size(bf))) return bf[grind - 35];
+    return {};
 }
 std::string_view flip_name(std::uint32_t trick) {
     switch (trick) {
@@ -1958,10 +1980,18 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 put(r.s_can_ground_grab, "Animation/Dingo/Bool.GP.CanGroundGrab", 0, on);
                 put(r.s_is_ground_grab, "Animation/Dingo/Bool.State.Is.GroundGrab", 0, on);
                 put(r.s_is_grabbing, "Animation/Dingo/Bool.Anim.IsGrabbing", 0, on);
-                put(r.s_grab_type, "Animation/Dingo/EnumGS.GrabType", 1, on ? (right ? 2 : 1) : 0);
+                put(r.s_grab_type, "Animation/Dingo/EnumGS.GrabType", 1, on ? (r.grind_grab_kind == 3 ? 9 : r.grind_grab_kind) : 0); // the game's: 1 LT, 2 RT, 9 both
+                put(r.s_grab_left_hand, "Animation/Dingo/Bool.GP.Grab.LeftHand", 0, on && (r.grind_grab_kind & 1));
+                put(r.s_grab_right_hand, "Animation/Dingo/Bool.GP.Grab.RightHand", 0, on && (r.grind_grab_kind & 2));
                 put(r.s_ground_grab_loop, "Animation/Dingo/Bool.Anim.IsGroundGrabLoop", 0, on && now - r.grind_grab_since > 600);
             };
-            if (want && !r.grind_grab_on) r.grind_grab_since = now;
+            // The grab is the one pressed for (the standard grabs only: once the board is held, no tweak changes it).
+            if (want && !r.grind_grab_on) {
+                r.grind_grab_since = now;
+                r.grind_grab_kind = left && right ? 3 : right ? 2 : 1;
+                r.grind_grab_scored_grind = -1;
+            } else if (want && left && right && r.grind_grab_kind != 3 && now - r.grind_grab_since < 150)
+                r.grind_grab_kind = 3; // both triggers pressed a moment apart
             // Family 2 (air): the game's own in-air grab with its tweaks (the right stick), its gate held open; the
             // ground grab's states are not written.
             const bool air_grab = r.grind_family == 2;
@@ -1998,13 +2028,64 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 hold_object(0, 0, 0);
                 air_poke.until.store(0, std::memory_order_relaxed);
             }
-            if (want && !r.grind_grab_on) score_trick("grindgrab", right ? "Indy Grind Grab" : "Melon Grind Grab");
+            // Scored with the grind it is on, as the game names it (once the grind is known; again if it changes to another).
+            if (want) {
+                if (!r.s_skate_grind_type) r.s_skate_grind_type = find_state(base, "Animation/Dingo/Enum.GS.SkateGrindType");
+                double grind{};
+                if (r.s_skate_grind_type && read_state_at(base, r.s_skate_grind_type, 1, grind) && grind > 0 && static_cast<int>(grind) != r.grind_grab_scored_grind &&
+                    (r.grind_grab_scored_grind < 0 || now - r.grind_grab_since > 300)) {
+                    const bool first = r.grind_grab_scored_grind < 0;
+                    r.grind_grab_scored_grind = static_cast<int>(grind);
+                    if (first || grind_name(r.grind_grab_scored_grind) != std::string_view{})
+                        score_trick("grindgrab", std::format("{} {}", r.grind_grab_kind == 3 ? "Double Grab" : r.grind_grab_kind == 2 ? "Indy" : "Melon", grind_name(r.grind_grab_scored_grind)));
+                } else if (now - r.grind_grab_since > 400 && r.grind_grab_scored_grind < 0) {
+                    r.grind_grab_scored_grind = 0;
+                    score_trick("grindgrab", r.grind_grab_kind == 3 ? "Double Grab Grind" : r.grind_grab_kind == 2 ? "Indy Grind" : "Melon Grind");
+                }
+            }
             if (want != r.grind_grab_on) {
                 float gap{};
                 const auto steps = take_hand_pull(gap);
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: grind grab {} ({} hand; {} steps pulled, the hand {:.2f} m from the board).", want ? "on" : "off", right ? "back" : "front", steps, gap);
             }
             r.grind_grab_on = want;
+        }
+        // The fandango: a crooked grind with the back foot off the board, held with A (the owner, 2026-10-16). The graph is
+        // held in its air family with the game's own one-foot air (Ollie South: the back foot kicked off) while the board
+        // stays in its crook on the rail.
+        if (r.fandango || r.fandango_on) {
+            if (!r.s_skate_grind_type) r.s_skate_grind_type = find_state(base, "Animation/Dingo/Enum.GS.SkateGrindType");
+            double grind{};
+            const bool grinding = physics.valid && physics.state >= 400 && physics.state <= 406 && r.s_skate_grind_type &&
+                                  read_state_at(base, r.s_skate_grind_type, 1, grind);
+            const int g = static_cast<int>(grind);
+            const bool crooked = g == 15 || g == 32 || g == 43 || g == 53;
+            std::uint16_t face{};
+            std::memcpy(&face, pad.data(), 2);
+            const bool a_held = (face & 0x1000) != 0; // XINPUT_GAMEPAD_A
+            const bool want = r.fandango && trick_enabled(r, "fandango") && grinding && (crooked || r.fandango_any) && a_held;
+            if (!r.s_ollie_south) r.s_ollie_south = find_state(base, r.fandango_north ? "Animation/Dingo/Bool.Intent.OllieNorth" : "Animation/Dingo/Bool.Intent.OllieSouth");
+            if (want || r.fandango_on) (void)write_state_at(base, r.s_ollie_south, 0, want);
+            if (want) {
+                if (!r.hooks) r.hooks = start_holds(base);
+                if (!r.s_filtered) r.s_filtered = find_state(base, "Animation/Dingo/EnumGS.FilteredPhysicsState");
+                hold_object(r.s_filtered, 2, 120);
+                (void)write_state_at(base, r.s_filtered, 1, 2);
+                air_poke.base.store(base, std::memory_order_relaxed);
+                air_poke.entity.store(r.entity, std::memory_order_relaxed);
+                air_poke.state.store(r.s_filtered, std::memory_order_relaxed);
+                air_poke.last.store(0, std::memory_order_relaxed);
+                air_poke.value.store(2, std::memory_order_relaxed);
+                air_poke.until.store(now + 120, std::memory_order_relaxed);
+                set_tricks_step(&air_poke_step);
+                if (!r.fandango_on) score_trick("fandango", crooked ? (g < 18 || (g >= 35 && g < 45) ? "FS Fandango" : "BS Fandango") : std::format("One Foot {}", grind_name(g)));
+            } else if (r.fandango_on) {
+                hold_object(0, 0, 0);
+                air_poke.until.store(0, std::memory_order_relaxed);
+            }
+            if (want != r.fandango_on)
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: fandango {} (grind {}).", want ? "on" : "off", g);
+            r.fandango_on = want;
         }
         // The anti-casper's mirror: on from the catch; after the pose, kept until the way out is in the air (the flip
         // out, or the casper's own exit flip, hides the change), the skater is off the board, or rides again.
@@ -3032,6 +3113,14 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks flipgrab on|off";
         r.flip_grab = arguments[0] == "on";
         return r.flip_grab ? "Flip grab experiment on: press a trigger during a flip." : "Flip grab experiment off.";
+    }
+    if (verb == "fandango") {
+        if (arguments.empty()) return "usage: tricks fandango on|off | any 0|1 | north 0|1";
+        if (arguments[0] == "on" || arguments[0] == "off") r.fandango = arguments[0] == "on";
+        else if (arguments.size() == 2 && arguments[0] == "any") r.fandango_any = arguments[1] == "1"; // <dev> on every grind
+        else if (arguments.size() == 2 && arguments[0] == "north") { r.fandango_north = arguments[1] == "1"; r.s_ollie_south = 0; } // <dev> the front foot
+        else return "usage: tricks fandango on|off | any 0|1 | north 0|1";
+        return std::format("Fandango {} (any grind {}, {} foot).", r.fandango ? "on" : "off", r.fandango_any ? "yes" : "no", r.fandango_north ? "front" : "back");
     }
     if (verb == "grindgrab") {
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks grindgrab on|off";
