@@ -1,5 +1,61 @@
 # ReSkate Tricks: status
 
+## START HERE (2026-10-16 ~03:00): the push on the open items, done headlessly; the owner's playtest is next
+The plan was `C:\Users\andre\.claude\plans\misty-wondering-whistle.md`. The code is committed locally and installed, not launched.
+
+**Grind grab: the hand on the board.**
+- The game's own ground grab is kept playing on the rail. The grab states are held, and the graph's copy of the physics family (`EnumGS.FilteredPhysicsState`) is held at riding (1; the grind's is 3) through `air_poke`. The grind clip had taken the hand off the board 200 ms in.
+- 3/3 on the curb rig: the grabbing hand (part 15) stays 0.04-0.06 m from the deck for the whole grind, in a deep crouch. Still: `dev/shots/GI1a.png`. Option: `tricks grab family <n>` (-1 off).
+
+**Kickflip indy.**
+- The game's own grab hand reaches the deck at about 65% and holds it to the landing: 0.07 m in 12/12 (kickflip and heelflip).
+- New no-teleport guard in the kinematic spin: each step moves at most the board's own travel plus 3 m/s, and turns at most max(1,400 deg/s, 1.6 x the spin's own rate). It found 0.46 m / 42 deg spikes at 35% / 80% of the flip grab; now the largest step is 0.05 m / 23 deg. It applies to every mod board turn.
+- The board path: about 0.3-0.4 m out in front, but the pelvis rises with the board, so it is never above knee height (`grab rise` moves it out, not up). The owner's eyes are needed.
+
+**Hand IK (the RE).**
+- `Set*HandGrabTargetData` writes a script context, type 642d8238 (0x120 bytes):
+  - right hand: place +0xa0, (vec) +0xd0, speed +0x108, +0xe4, flag +0x11e, (vec) +0x70, weight +0xe8, enable +0x11c;
+  - left hand: +0x50 / +0x90 / +0xe0 / +0xf0 / +0x11b / +0x40 / +0x18 / +0x119.
+- The context is `[core + 0x1210 + 0x928]` (the core is `[comp + 0x70]`; header = vtable 0x6182b08, type 0x7287380). It is reset every tick and published by 0x101d0f0; the mod writes it inside a hook there.
+- It works mechanically, but **the board's clips never read it** (only wall-run, climb and mantle clips carry the IK). Off by default: `tricks handik write 1`.
+- TRAP: `[comp + 0x1b38]` points into the game image. Writing it killed the game (run ik1).
+
+**Primo flick-outs.**
+- The game's hop is not always the same. With a 300 ms hold it is a full pop (0.50 s of air foreseen), a short pop (0.26-0.31 s) or no pop (0.09-0.16 s, `100 -> 200` with no 103).
+- The turn now starts only when the game foresees at least 0.25 s of air (`Float.Physics.TimeToLand`), and takes 85% of it.
+- 6/6, on both primo sides (stick right and left): the turn is done before touchdown, and it lands riding.
+- When there is no pop there is no flip; the log says so ("never started").
+- Hold times of 150/250/350/450/700 ms were no better.
+
+**Casper flick-outs.**
+- 9 runs: all landed riding, no fall-through. Stills at 90% of the turn show the legs on the board, with or without `outlegs`. The "sometimes" leg glitch was not reproduced.
+- The pop is the exit clip's: 0.81 s of air, the same as a stock heelflip (air.md: 0.80 s, 0.81 m). Neither the second exit clip (`tricks set casper_exit 16`) nor holding the jump strength changed it.
+
+**First BS ground shuv = flip 5.** Not reproduced: 4/4 fresh starts played 4. When the game answers another trick, the log now has a "mod pop answered otherwise" line with the sides, fakie, physics and the player's right stick over 700 ms. Read it from the owner's next log.
+
+**Regression (all passed):**
+- stock kickflip / heelflip / pop shuv: 0 masked polls, 0 hook turns;
+- dolphin, dragon, nollie dolphin/dragon, fakie dolphin;
+- plain nollie stock;
+- NC shuv and NC kickflip land;
+- FS/BS ground shuv;
+- fast casper and primo;
+- late flip, double kickflip.
+
+**Open:**
+1. Goofy: not run. It needs the profile's `EnableDefaultStanceIsGoofy`; ask before touching the owner's profile.
+2. The owner's feel check:
+   - the indy's board height;
+   - the primo short-hop quick flip;
+   - the casper flick-out pop (game-stock height).
+3. A side camera for stills (freecam needs a pad).
+
+**Rig notes:**
+- The curb rig steer is now `lx=1:500` (350 sometimes missed the curb).
+- A failed boot can leave `ReSkateLauncher` running, and run.ps1 then refuses. Close that one (it is ours) and rerun.
+
+# ReSkate Tricks: status
+
 ## START HERE (2026-10-15 late): the next push
 7fb61eb is installed in the Skate folder but not launched. The full list is in the memory note `project_reskate_tricks.md` ("START HERE"); the plan is `C:\Users\andre\.claude\plans\peppy-baking-eclipse.md`.
 

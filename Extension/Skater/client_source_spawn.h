@@ -115,6 +115,24 @@ void set_board_carry_hand(int part, float x) noexcept;
 void set_hand_pull(std::uintptr_t core, std::uint32_t milliseconds, int part, int part2, float x, float y, float z, float gain, float crouch) noexcept;
 // <dev> Steps pulled since the last call, and the hand's last distance to its point (m).
 std::uint32_t take_hand_pull(float& gap) noexcept;
+// For the next `milliseconds`: the game's own hand grab IK target (its script's Set*HandGrabTargetData context) put on
+// (x side, y up, z forward) from the deck's centre, for the skater's right hand or left, eased in and out over 120 ms.
+// 0 ms lets it go (the flags cleared as the script's OnEnd does).
+void set_hand_ik(std::uintptr_t core, std::uint32_t milliseconds, bool right, float x, float y, float z) noexcept;
+// <dev> The target's other arguments: speed (stock 10 / 5 / 1), the fifth (stock 1) and the sixth flag.
+void set_hand_ik_tuning(float speed, float p5, bool flag6) noexcept;
+// <dev> Steps written since the last call, and the last distance of hand parts 11 and 15 to the target (m).
+std::uint32_t take_hand_ik(float& gap_back, float& gap_front) noexcept;
+// <dev> Where the two hands were in the deck's frame (side, up, forward) at the last step, as text.
+std::string hand_ik_places();
+// <dev> The largest step-to-step move (m) and turn (deg) of the board in the kinematic spins since the last call.
+void take_kinematic_spin_smoothness(float& move, float& turn) noexcept;
+// <dev> Where the worst steps were and how many steps the no-jump guard held back, since the last call.
+std::string take_kinematic_spin_guard();
+// <dev> Write the IK target into the game's context (the board's clips never read it: off by default).
+void set_hand_ik_write(bool on) noexcept;
+// <dev> The hand IK context of this skater entity, as one line.
+std::string dump_hand_ik(std::uintptr_t base, std::uintptr_t entity);
 // <dev> Rows written since the last call.
 std::uint32_t take_feet_free_writes() noexcept;
 // <dev> How many turn-backs were done since the last call, and the last angle turned (degrees).

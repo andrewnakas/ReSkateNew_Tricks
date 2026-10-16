@@ -185,6 +185,18 @@ struct Runtime {
     float grab_limbs{0.1f};      // the share of their motors the grabbing arm and the legs keep through a grab
     std::uintptr_t s_cannot_grab{};
     std::uint64_t flip_grab_until{};  // the legs' scoop (the game's trick-setup crouch) while it turns
+    // The hand on the board through the game's own hand grab IK target (set_hand_ik): in a grind grab, and in a flip
+    // grab from the catch on. The back hand is the IK's right hand for this skater unless `hand_ik_back_right` is off.
+    bool hand_ik{true}, hand_ik_back_right{true};
+    float hand_ik_up{0.02f};        // metres over the deck's centre
+    float hand_ik_catch{0.4f};      // share of the flip grab's turn where the hand takes it
+    // The casper's flick-out exit clip: FreeStyleFlipTrick 9 (exit_flip1) or 16 (exit_flip2). Its pop is the clip's own
+    // (holding the jump strength at 0.35 through physics 103 left the 0.83 s air unchanged, run cd3).
+    std::uint32_t casper_exit{9};
+    float primo_air_need{0.25f}; // s of air the game must foresee before a primo's flip out turns (a bounce foresees less)
+    float out_air_best{};
+    int grind_family{1};            // the graph's physics family held through a grind grab (1 riding; 3 is the grind's; -1 off)
+    std::uint64_t hand_ik_logged{}, hand_ik_watch_until{}; // <dev> `tricks handik hold`: gaps and the context logged
     // The owner's control scheme (2026-10-12): poses are landed into and held on the right stick.
     //   Land a flip trick with the right stick held part of the way left / right: primo / primo2.
     //   Land it with the left stick clicked and the right stick held part of the way out: casper.
@@ -703,14 +715,15 @@ struct AirPoke {
     std::atomic<std::uintptr_t> base{}, entity{}, state{}, last{};
     std::atomic<std::uint64_t> until{};
     std::atomic<std::uint32_t> pokes{}, put_back{};
+    std::atomic<std::uint32_t> value{1}; // the family held (1 the pose in the air; a grind grab holds the ground's)
 };
 AirPoke air_poke;
 void air_poke_step() noexcept {
     if (GetTickCount64() >= air_poke.until.load(std::memory_order_relaxed)) return;
     std::uint32_t before{};
-    if (poke_state_value(air_poke.base.load(std::memory_order_relaxed), air_poke.entity.load(std::memory_order_relaxed), air_poke.state.load(std::memory_order_relaxed), 1, &before)) {
+    if (poke_state_value(air_poke.base.load(std::memory_order_relaxed), air_poke.entity.load(std::memory_order_relaxed), air_poke.state.load(std::memory_order_relaxed), air_poke.value.load(std::memory_order_relaxed), &before)) {
         air_poke.pokes.fetch_add(1, std::memory_order_relaxed);
-        if (before != 1) air_poke.put_back.fetch_add(1, std::memory_order_relaxed);
+        if (before != air_poke.value.load(std::memory_order_relaxed)) air_poke.put_back.fetch_add(1, std::memory_order_relaxed);
     }
     // The family before this one, as the graph's landing rows want it: air (2).
     if (const auto last = air_poke.last.load(std::memory_order_relaxed)) (void)poke_state_value(air_poke.base.load(std::memory_order_relaxed), air_poke.entity.load(std::memory_order_relaxed), last, 2, nullptr);
@@ -756,6 +769,20 @@ void play_pop_stroke(Runtime &r, std::uint32_t flip, float strength) {
     DingoSDKOverlayTricksStroke(xy.data(), ms.data(), n);
     r.pop_asked = flip;
     r.pop_stroke_at = GetTickCount64();
+}
+// The hand of a grab held on the board's edge through the game's own hand IK for the next 120 ms (renewed each tick
+// while the grab lasts): the back hand on the toe edge (+grab_side on the deck's side row), the front on the heel edge.
+// The hands' distances to the target are logged every 100 ms.
+void hold_hand_ik(Runtime &r, std::uintptr_t core, std::uint64_t now, bool back_hand) {
+    const bool ik_right = back_hand == r.hand_ik_back_right;
+    set_hand_ik(core, 120, ik_right, back_hand ? r.grab_side : -r.grab_side, r.hand_ik_up, 0);
+    if (now - r.hand_ik_logged >= 100) {
+        r.hand_ik_logged = now;
+        float back{}, front{};
+        const auto steps = take_hand_ik(back, front);
+        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: hand ik: {} hand, back hand {:.3f} m, front hand {:.3f} m from the deck; {} ({} steps).", back_hand ? "back" : "front",
+                     back, front, hand_ik_places(), steps);
+    }
 }
 void start_ground_shuv(Runtime &r, std::uint64_t now, bool frontside) {
     // The game's own pop shuvit with a small pop (the owner, 2026-10-15: the board turned under feet still on it, "the feet
@@ -1467,6 +1494,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         air_poke.base.store(base, std::memory_order_relaxed);
                         air_poke.entity.store(r.entity, std::memory_order_relaxed);
                         air_poke.state.store(r.s_filtered, std::memory_order_relaxed);
+                        air_poke.value.store(1, std::memory_order_relaxed);
                         if (r.air_last_fps && !r.s_last_filtered) r.s_last_filtered = find_state(base, "Animation/Dingo/EnumGS.LastFilteredPhysicsState");
                         if (r.air_last_fps && r.s_last_filtered) (void)write_state_at(base, r.s_last_filtered, 1, 2);
                         air_poke.last.store(r.air_last_fps ? r.s_last_filtered : 0, std::memory_order_relaxed);
@@ -1578,9 +1606,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         r.out_kind = flick >= 100.0f ? 0 : flick < 80.0f ? 1 : 2;
                         if (casper && !(r.anti && r.anti_nose)) {
                             r.out_until = now + 1500;
-                            leave(9, 2500);
+                            leave(r.casper_exit, 2500);
                         } else if (r.primo_hop_flip && !(r.anti && r.anti_nose)) {
                             r.out_until = now + 1500;
+                            r.out_air_best = 0;
                             leave(0, r.primo_pop_hold_ms);
                         } else if (r.primo_game_pop || (r.anti && r.anti_nose)) {
                             // The primo has no pop of its own. It puts the board down (its own way out) and, the moment the
@@ -1639,7 +1668,19 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             // A primo's flip out waits for the hop's real air (physics 200/201): the way out's clip lifts the board a
             // moment before it, and a turn started there touched down 125 ms in (run n9).
             const auto out_physics = watched_physics_state();
-            if (r.out_until && in_air && (!r.out_follow || (out_physics.valid && out_physics.state >= 200 && out_physics.state < 300))) {
+            // And only once the game predicts the air long enough for the turn: a bounce before the hop (201 for under
+            // 100 ms) started it, and it touched down 93 and 203 ms into its 430 ms turn (run pf, 2 of 4).
+            const auto hop_air_ok = [&] {
+                if (!r.out_follow) return true;
+                if (!r.s_time_to_land) r.s_time_to_land = find_state(base, "Animation/Dingo/Float.Physics.TimeToLand");
+                std::uint32_t bits{};
+                float left{};
+                if (!r.s_time_to_land || !peek_state_value(base, r.entity, r.s_time_to_land, bits)) return true;
+                std::memcpy(&left, &bits, sizeof(left));
+                if (std::isfinite(left) && left > r.out_air_best) r.out_air_best = left;
+                return !std::isfinite(left) || left >= r.primo_air_need;
+            };
+            if (r.out_until && in_air && (!r.out_follow || (out_physics.valid && out_physics.state >= 200 && out_physics.state < 300)) && hop_air_ok()) {
                 r.out_from_primo = r.out_follow;
                 if (r.out_follow) {
                     r.out_follow = false;
@@ -1666,7 +1707,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         r.out_legs_flip = kick ? 2 : 3;
                     }
                     score_trick(id, name);
-                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flip out the way it rolls out: {} (roll back {:.0f} deg at the hop).", name, back);
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flip out the way it rolls out: {} (roll back {:.0f} deg at the hop, {:.2f} s of air foreseen).", name, back, r.out_air_best);
                 }
                 if (r.out_pose) {
                     // Timed by the whole turn (about 180 for the roll back over), so a half flip is not slowed to a
@@ -1676,8 +1717,13 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     // and threw the skater, the owner 2026-10-15), with no dip (the hop is a few centimetres off the
                     // ground: a dipped board went into it, "fall through the map").
                     auto ms = static_cast<std::uint32_t>((180.0f + 0.5f * turn) * static_cast<float>(r.out_spin_ms) / 320.0f);
-                    // A primo's hop is down 560-700 ms after it starts (runs n7, n9): its turn ends well before.
-                    if (r.out_from_primo) ms = std::min<std::uint32_t>(ms, r.primo_flip_ms);
+                    // A primo's hop is down 560-700 ms after it starts (runs n7, n9): its turn ends well before. The game's
+                    // hop is not always the same (0.50 s of air foreseen, or 0.27-0.39 s: runs ph, pk), so the turn takes
+                    // 85% of the air the game foresees.
+                    if (r.out_from_primo) {
+                        ms = std::min<std::uint32_t>(ms, r.primo_flip_ms);
+                        if (r.out_air_best > 0) ms = std::min<std::uint32_t>(ms, static_cast<std::uint32_t>(std::max(200.0f, r.out_air_best * 850.0f)));
+                    }
                     start_air_spin(r, r.out_roll, r.out_yaw, 0, ms, true, false, r.out_dir);
                     r.out_spinning = true;
                     r.out_spin_at = now;
@@ -1692,10 +1738,15 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     r.out_spinning = true;
                 }
                 r.out_until = 0;
-            } else if (r.out_until && now >= r.out_until) r.out_until = 0;
+            } else if (r.out_until && now >= r.out_until) {
+                if (r.out_follow)
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flip out never started: the most air the game foresaw was {:.2f} s (needs {:.2f}).", r.out_air_best, r.primo_air_need);
+                r.out_until = 0;
+            }
             if (r.out_spinning && on_ground) {
                 // <dev> How far the turn was at the touchdown (wall clock: a guide).
-                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flick-out down {} ms into its {} ms turn (still turning: {}).", now - r.out_spin_at, r.out_spin_len, kinematic_spin_running());
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flick-out down {} ms into its {} ms turn (still turning: {}; exit clip {}).", now - r.out_spin_at, r.out_spin_len,
+                             kinematic_spin_running(), r.casper_exit);
                 stop_board_spin();
                 r.out_spinning = false;
             }
@@ -1769,6 +1820,17 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 const auto answer = static_cast<std::uint32_t>(got);
                 if ((r.pop_flip == 2 && answer == 3) || (r.pop_flip == 3 && answer == 2)) r.kick_side = -r.kick_side;
                 if ((r.pop_flip == 4 && answer == 7) || (r.pop_flip == 7 && answer == 4)) r.bs_shuv_side = -r.bs_shuv_side;
+                if (answer != r.pop_flip) {
+                    // The owner's first backside ground shuvit of a session played flip 5 (2026-10-15; three fresh starts
+                    // played 4 headlessly, 2026-10-16): what the player's own sticks and stance were, for the next log.
+                    if (!r.s_riding_fakie) r.s_riding_fakie = find_state(base, "Animation/Dingo/Bool.Physics.RidingFakie");
+                    double fakie{};
+                    (void)read_state_at(base, r.s_riding_fakie, 0, fakie);
+                    std::string seen;
+                    for (const auto &s : recent_sticks(r, now, 700)) seen += std::format(" {}:({:.1f},{:.1f})", now - s.at, s.rx, s.ry);
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: mod pop answered otherwise: asked {}, got {}; sides kick {:+.0f} shuv {:+.0f}, fakie {}, physics {}, the player's right stick over 700 ms:{}",
+                                 r.pop_flip, answer, r.kick_side, r.bs_shuv_side, fakie != 0, physics.valid ? static_cast<int>(physics.state) : -1, seen);
+                }
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: mod pop: asked flip {}, the game played {} ({} ms after the stroke, {} ms after the ask).", r.pop_flip, answer, now - r.pop_started, now + (r.pop_flip == 4 || r.pop_flip == 7 ? 600 : 3500) - r.pop_until);
                 r.pop_flip = 0; // the game's own trick from here: the catch is as after any flip
                 r.leaving_until = std::min(r.leaving_until, now);
@@ -1822,6 +1884,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 // once the flip has turned.
                 const bool holding = r.grab_hand_back ? right : left;
                 if (in_air && holding && core) set_limb_free(core, 80, 0, 1.0f, r.grab_tuck);
+                // The hand on the board's toe edge (the back hand) or heel edge (the front) from the catch on, through
+                // the game's own hand IK: it follows the board down to the feet.
+                if (r.hand_ik && in_air && holding && core)
+                    hold_hand_ik(r, core, now, r.grab_hand_back);
                 // The game's grab gate held open (it is shut through a flip: the trigger never brought its grab, and with
                 // the gate open the game's own grab plays, its hand to the board: run r13).
                 if (in_air && holding) {
@@ -1829,12 +1895,23 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     (void)write_state_at(base, r.s_can_grab, 0, 1);
                 }
                 if (!in_air) {
-                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab landed {} ms after the catch (the flip {}).", now - r.flip_grab_started,
-                                 kinematic_spin_running() ? "still turning" : "done");
+                    float move{}, turn{};
+                    take_kinematic_spin_smoothness(move, turn);
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab landed {} ms after the catch (the flip {}; largest step {:.3f} m past its travel, {:.1f} deg; {}).", now - r.flip_grab_started,
+                                 kinematic_spin_running() ? "still turning" : "done", move, turn, take_kinematic_spin_guard());
                     r.flip_grab_on = false;
                     stop_board_spin();
                 }
             }
+        }
+        // <dev> A console-held hand IK target: the hands' distances to it and the context, every 100 ms.
+        if (r.hand_ik_watch_until && now - r.hand_ik_logged >= 100) {
+            r.hand_ik_logged = now;
+            float back{}, front{};
+            const auto steps = take_hand_ik(back, front);
+            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: hand ik hold: back hand {:.3f} m, front hand {:.3f} m ({} steps, physics {}); {}", back, front, steps,
+                         physics.valid ? static_cast<int>(physics.state) : -1, dump_hand_ik(base, r.entity));
+            if (now >= r.hand_ik_watch_until) r.hand_ik_watch_until = 0;
         }
         // <dev> Grab while grinding (experiment).
         if (r.grind_grab || r.grind_grab_on) {
@@ -1862,7 +1939,32 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             if (want && !r.grind_grab_on) r.grind_grab_since = now;
             if (want) ground_grab(true);
             else if (r.grind_grab_on) ground_grab(false);
-            (void)core;
+            // The hand on the board through the game's own hand IK (the grind clip ignores the grab states), and the
+            // body crouched to it.
+            if (want && r.hand_ik && core) {
+                hold_hand_ik(r, core, now, right);
+                set_limb_free(core, 80, 0, 1.0f, r.grab_crouch);
+            }
+            // The graph kept out of its grind node (its copy of the physics state family held at the ground's), so the
+            // game's own ground grab, which starts with the hand on the board, keeps playing while the board grinds
+            // (the grind clip took the hand off the board 200 ms in: run gg1).
+            if (want && r.grind_family >= 0) {
+                if (!r.hooks) r.hooks = start_holds(base);
+                if (!r.s_filtered) r.s_filtered = find_state(base, "Animation/Dingo/EnumGS.FilteredPhysicsState");
+                const auto family = static_cast<std::uint32_t>(r.grind_family);
+                hold_object(r.s_filtered, family, 120);
+                (void)write_state_at(base, r.s_filtered, 1, family);
+                air_poke.base.store(base, std::memory_order_relaxed);
+                air_poke.entity.store(r.entity, std::memory_order_relaxed);
+                air_poke.state.store(r.s_filtered, std::memory_order_relaxed);
+                air_poke.last.store(0, std::memory_order_relaxed);
+                air_poke.value.store(family, std::memory_order_relaxed);
+                air_poke.until.store(now + 120, std::memory_order_relaxed);
+                set_tricks_step(&air_poke_step);
+            } else if (r.grind_grab_on && !want && r.grind_family >= 0) {
+                hold_object(0, 0, 0);
+                air_poke.until.store(0, std::memory_order_relaxed);
+            }
             if (want && !r.grind_grab_on) score_trick("grindgrab", right ? "Indy Grind Grab" : "Melon Grind Grab");
             if (want != r.grind_grab_on) {
                 float gap{};
@@ -2436,6 +2538,10 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
     if (verb == "set") {
         // tricks set <setting> <value> (the Tricks page's sliders; tricks_view.h lists them)
         if (arguments.size() != 2) return "usage: tricks set <setting> <value>";
+        if (arguments[0] == "casper_exit") { // <dev> not on the page
+            r.casper_exit = std::atof(arguments[1].c_str()) >= 12.0 ? 16u : 9u;
+            return std::format("casper_exit = {}.", r.casper_exit);
+        }
         if (!set_setting(r, arguments[0], std::atof(arguments[1].c_str()))) return "error: no setting " + arguments[0] + ".";
         return std::format("{} = {:.2f}.", arguments[0], setting_value(r, arguments[0]));
     }
@@ -2813,11 +2919,34 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             else if (arguments[0] == "endflip") r.flip_grab_endflip = v != 0;
             else if (arguments[0] == "spin") r.flip_grab_spin_ms = static_cast<std::uint32_t>(std::clamp(v, 150.0f, 1500.0f));
             else if (arguments[0] == "tuck") r.grab_tuck = std::clamp(v, 0.0f, 0.5f);
+            else if (arguments[0] == "family") r.grind_family = static_cast<int>(v);
         }
         float gap{};
         const auto steps = take_hand_pull(gap);
         return std::format("Grabs: side {:.2f}, gain {:.2f}, crouch {:.1f}, flip grab rise {:.2f} m over {} ms; {} steps pulled, the hand {:.2f} m from the board.", r.grab_side, r.grab_gain,
                            r.grab_crouch, r.flip_grab_rise, r.flip_grab_ms, steps, gap);
+    }
+    if (verb == "handik") { // handik on|off | dump | backright 0|1 | up <m> | catch <share> | tune <speed> <p5> <flag6> | hold <ms> <right 0|1> <x> <y> <z>
+        std::string out;
+        if (arguments.size() == 1 && (arguments[0] == "on" || arguments[0] == "off")) r.hand_ik = arguments[0] == "on";
+        else if (arguments.size() == 1 && arguments[0] == "dump") out = dump_hand_ik(r.base, r.entity);
+        else if (arguments.size() == 2 && arguments[0] == "backright") r.hand_ik_back_right = arguments[1] != "0";
+        else if (arguments.size() == 2 && arguments[0] == "write") set_hand_ik_write(arguments[1] != "0");
+        else if (arguments.size() == 2 && arguments[0] == "up") r.hand_ik_up = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), -0.3f, 0.5f);
+        else if (arguments.size() == 2 && arguments[0] == "catch") r.hand_ik_catch = std::clamp(static_cast<float>(std::atof(arguments[1].c_str())), 0.0f, 1.0f);
+        else if (arguments.size() == 4 && arguments[0] == "tune")
+            set_hand_ik_tuning(static_cast<float>(std::atof(arguments[1].c_str())), static_cast<float>(std::atof(arguments[2].c_str())), arguments[3] != "0");
+        else if (arguments.size() == 6 && arguments[0] == "hold") {
+            std::uintptr_t core{};
+            if (r.rig) (void)copy_rows(r.rig + 0x4630, reinterpret_cast<float *>(&core), 2);
+            set_hand_ik(core, static_cast<std::uint32_t>(std::atoi(arguments[1].c_str())), arguments[2] != "0", static_cast<float>(std::atof(arguments[3].c_str())),
+                        static_cast<float>(std::atof(arguments[4].c_str())), static_cast<float>(std::atof(arguments[5].c_str())));
+            r.hand_ik_watch_until = GetTickCount64() + static_cast<std::uint64_t>(std::atoi(arguments[1].c_str()));
+        }
+        if (out.empty()) out = std::format("Hand IK {} (the back hand is IK {}), {:.2f} m up, the flip grab's hand from {:.0f}% of the turn.", r.hand_ik ? "on" : "off", r.hand_ik_back_right ? "right" : "left",
+                                           r.hand_ik_up, r.hand_ik_catch * 100);
+        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: {}", out);
+        return out;
     }
     if (verb == "kinematic") {
         r.kinematic = arguments.empty() || arguments[0] != "off";

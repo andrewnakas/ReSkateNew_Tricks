@@ -45,7 +45,7 @@ $out | Select-Object -Last 2
 $lines = Get-Content $log
 $start = ($lines | Select-String -SimpleMatch "pass-$Tag-0-begin" | Select-Object -Last 1).LineNumber
 if (-not $start) { 'No pass marker in the log.'; exit 1 }
-$mine = $lines[($start - 1)..($lines.Count - 1)] | Where-Object { $_ -match 'pass-|Tricks: (stock|pop read|scored|physics|nodes|caught|catch|slide rocking|pose in|ground|bounce|shuv|board|skater root|rider|anti|manual|primo|let go|flicked|watch|no comply|flick-it|stroke|the )|TRICK|error:|Way-in|osition|speed' } |
+$mine = $lines[($start - 1)..($lines.Count - 1)] | Where-Object { $_ -match 'pass-|Tricks: (stock|pop read|scored|physics|nodes|caught|catch|slide rocking|pose in|ground|bounce|shuv|board|skater root|rider|anti|manual|primo|let go|flicked|watch|no comply|flick-it|stroke|hand|mod pop|flip grab|grind grab|the )|TRICK|error:|Way-in|osition|speed' } |
     ForEach-Object { $_ -replace '^\[[^\]]+\] \[[^\]]+\] ', '' }
 $mine | Set-Content "$PSScriptRoot\last-run.log"
 $mine

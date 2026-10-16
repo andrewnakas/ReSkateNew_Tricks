@@ -9,6 +9,8 @@
 #include "Engine/Game/Build/20260929/offboard_flight.h"
 #include "free_flight.h"
 #include <cmath>
+#include <cstring>
+#include <tuple>
 #include <format>
 #include <mutex>
 #include <string>
@@ -1056,6 +1058,186 @@ void tricks_hand_pull(std::uintptr_t core) noexcept {
         h.steps.fetch_add(1, std::memory_order_relaxed);
     } catch (...) {}
 }
+// The game's own hand grab IK, the target its script gives a hand on a wall run, a climb or a mantle
+// (Set{Right,Left}HandGrabTargetData; decompiled 2026-10-16: OnUpdate 0x103a3f0 / 0x103a120, OnEnd 0x1039510 /
+// 0x10394d0). The target lives in a written script context of type 642d8238 (AnimationSkaterShared, 0x120 bytes) that
+// the skater component makes in 0xfdb360 (sub-object comp+0x1210, the context at its +0x928) and publishes to the
+// animation's readers every tick (0x101d0f0). The board tree never sets it, so the mod writes it: the hand's place,
+// the weight and the enable flag, every physics step while held, the flags cleared at the end as OnEnd does.
+// Fields per hand, in the native's argument order: place, (vec, 0 in every stock use), speed (10/5/1), (1), (bool),
+// (vec: 0, or the wall's normal on a wall run), weight 0..1, enable.
+struct HandIkFields { std::uint32_t place, vec3, speed, p5, flag6, vec7, weight, enable; };
+constexpr HandIkFields hand_ik_right{0xa0, 0xd0, 0x108, 0xe4, 0x11e, 0x70, 0xe8, 0x11c};
+constexpr HandIkFields hand_ik_left{0x50, 0x90, 0xe0, 0xf0, 0x11b, 0x40, 0x18, 0x119};
+// The publisher (sub-object) is the skater core's +0x1210 (the decompile's "component" of 0xfd8f90 is the core,
+// [comp + 0x70]; found 2026-10-16 by a hook on the publisher 0x101d0f0), its written context at +0x928: a heap object
+// whose header is the context class's vtable and type. [comp + 0x1b38] was a pointer into the game image, and writing
+// it killed the game (run ik1); nothing is written unless both header words match.
+constexpr std::uintptr_t hand_ik_master = 0x1210 + 0x928;   // in the core
+constexpr std::uintptr_t hand_ik_vtable = 0x6182b08, hand_ik_type = 0x7287380;
+std::uintptr_t hand_ik_context_of(std::uintptr_t base, std::uintptr_t core) {
+    if (!core) return 0;
+    SourceReader reader;
+    const auto ctx = reader.pointer(core, hand_ik_master) & ~std::uintptr_t{4};
+    reader.verify();
+    if (!ctx || (ctx >= base && ctx < base + 0x10000000) || !source_range(ctx, 0x120)) return 0;
+    std::array<std::uint64_t, 2> head{};
+    if (!memory::peek(ctx, head) || head[0] != base + hand_ik_vtable || head[1] != base + hand_ik_type) return 0;
+    return ctx;
+}
+// The written context is reset every tick (a write from the physics step was gone by the next read, and its
+// read-back failed: run ik8), so the target goes in inside the publisher itself, just before it copies the context to
+// the animation's readers: a hook on 0x101d0f0 (sub = core + 0x1210).
+constexpr std::uintptr_t hand_ik_publish = 0x101d0f0, hand_ik_sub = 0x1210;
+constexpr unsigned char hand_ik_publish_bytes[]{0x40, 0x53, 0x56, 0x57, 0x41, 0x57, 0x48, 0x83, 0xec, 0x28};
+using HandIkPublish = void (*)(std::uintptr_t sub);
+struct HandIkShared {
+    std::atomic<HandIkPublish> next{};
+    std::atomic<std::uintptr_t> base{}, core{}, ctx{};
+    std::atomic<bool> on{}, right{true}, flag6{};
+    std::atomic<float> x{}, y{}, z{}, weight{}, speed{10.0f}, p5{1.0f};
+    std::atomic<std::uint32_t> clears{}, writes{};
+};
+HandIkShared& hand_ik_shared() { static auto* value = new HandIkShared; return *value; }
+void hand_ik_put(std::uintptr_t ctx, const HandIkFields& f, const float* place, float speed, float p5, bool flag6, float weight, bool enable) noexcept {
+    const float at[4]{place[0], place[1], place[2], 0.0f}, zero[4]{};
+    const std::uint8_t six = flag6, on = enable;
+    __try {
+        std::memcpy(reinterpret_cast<void*>(ctx + f.place), at, 16);
+        std::memcpy(reinterpret_cast<void*>(ctx + f.vec7), zero, 16);
+        std::memcpy(reinterpret_cast<void*>(ctx + f.speed), &speed, 4);
+        std::memcpy(reinterpret_cast<void*>(ctx + f.p5), &p5, 4);
+        std::memcpy(reinterpret_cast<void*>(ctx + f.weight), &weight, 4);
+        std::memcpy(reinterpret_cast<void*>(ctx + f.flag6), &six, 1);
+        std::memcpy(reinterpret_cast<void*>(ctx + f.enable), &on, 1);
+    } __except (1) {}
+}
+void hand_ik_publish_hook(std::uintptr_t sub) {
+    auto& p = hand_ik_shared();
+    const auto core = p.core.load(std::memory_order_relaxed), ctx = p.ctx.load(std::memory_order_relaxed);
+    if (core && ctx && sub == core + hand_ik_sub) {
+        std::uintptr_t now_ctx{};
+        __try { now_ctx = *reinterpret_cast<std::uintptr_t*>(sub + 0x928) & ~std::uintptr_t{4}; } __except (1) { now_ctx = 0; }
+        if (now_ctx == ctx) {
+            const bool right = p.right.load(std::memory_order_relaxed);
+            const float place[3]{p.x.load(std::memory_order_relaxed), p.y.load(std::memory_order_relaxed), p.z.load(std::memory_order_relaxed)};
+            if (p.on.load(std::memory_order_relaxed)) {
+                hand_ik_put(ctx, right ? hand_ik_right : hand_ik_left, place, p.speed.load(std::memory_order_relaxed), p.p5.load(std::memory_order_relaxed),
+                            p.flag6.load(std::memory_order_relaxed), p.weight.load(std::memory_order_relaxed), true);
+                p.writes.fetch_add(1, std::memory_order_relaxed);
+            } else if (p.clears.load(std::memory_order_relaxed)) {
+                p.clears.fetch_sub(1, std::memory_order_relaxed);
+                hand_ik_put(ctx, right ? hand_ik_right : hand_ik_left, place, 0.5f, 1.0f, false, 0.0f, false);
+            }
+        }
+    }
+    if (const auto next = p.next.load(std::memory_order_acquire)) next(sub);
+}
+bool start_hand_ik_hook(std::uintptr_t base) noexcept {
+    static std::atomic<int> state{}; // 0 not tried, 1 hooked, 2 failed
+    if (const auto st = state.load(std::memory_order_acquire)) return st == 1;
+    int expected = 0;
+    if (!state.compare_exchange_strong(expected, 2)) return false;
+    auto* target = reinterpret_cast<void*>(base + hand_ik_publish);
+    __try {
+        if (std::memcmp(target, hand_ik_publish_bytes, sizeof(hand_ik_publish_bytes)) != 0) return false;
+    } __except (1) { return false; }
+    void* next{};
+    if (hook_prepare(target, reinterpret_cast<void*>(&hand_ik_publish_hook), &next) != HookOk || !next) return false;
+    hand_ik_shared().next.store(reinterpret_cast<HandIkPublish>(next), std::memory_order_release);
+    if (hook_enable(target) != HookOk) return false;
+    state.store(1, std::memory_order_release);
+    return true;
+}
+struct HandIk {
+    std::atomic<std::uintptr_t> core{};
+    std::atomic<ULONGLONG> until{};
+    std::atomic<bool> right{true};
+    std::atomic<float> x{}, y{}, z{}, speed{10.0f}, p5{1.0f};
+    std::atomic<bool> flag6{};
+    std::atomic<std::uint32_t> steps{};
+    std::atomic<float> gap_back{}, gap_front{}; // hand parts 11 and 15 to the deck (m)
+    std::array<std::atomic<float>, 3> at_back{}, at_front{}; // and where they are in the deck's frame
+    std::atomic<float> deck_up{}, deck_out{};   // the deck's centre from the pelvis: height and level distance
+    std::atomic<bool> write{};                  // <dev> the IK target written (the board's clips never use it: off)
+    std::atomic<std::uintptr_t> context{};      // the last context written (dev dump)
+    std::atomic<int> why{};                     // <dev> why the last step wrote nothing: 1 no context, 2 no bodies, 3 threw, 4 busy
+    // Physics thread only.
+    float weight{};
+    bool on{}, last_right{true};
+};
+HandIk& hand_ik() { static auto* value = new HandIk; return *value; }
+void tricks_hand_ik(std::uintptr_t core) noexcept {
+    auto& h = hand_ik();
+    if (!core || core != h.core.load(std::memory_order_relaxed)) return;
+    const bool wanted = GetTickCount64() < h.until.load(std::memory_order_relaxed);
+    if (!wanted && !h.on) return;
+    SourceLastError error;
+    auto& state = source_state();
+    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) { h.why.store(4, std::memory_order_relaxed); return; }
+    SourceBusyScope scope{state.busy};
+    try {
+        auto& t = board_turn_back();
+        const auto entity = t.entity.load(std::memory_order_relaxed);
+        const auto bodies = debug_noclip_bodies(state.trial.base, t.client.load(std::memory_order_relaxed), entity);
+        SourceReader reader;
+        const auto ctx = hand_ik_context_of(state.trial.base, core);
+        if (!ctx) { h.why.store(1, std::memory_order_relaxed); return; }
+        if (!start_hand_ik_hook(state.trial.base)) { h.why.store(5, std::memory_order_relaxed); return; }
+        auto& p = hand_ik_shared();
+        h.context.store(ctx, std::memory_order_relaxed);
+        if (bodies.core != core || bodies.offboard || bodies.wipeout || bodies.parts.size() < 32 || !(bodies.seconds > 0)) {
+            if (h.on) { p.on.store(false, std::memory_order_relaxed); p.clears.store(3, std::memory_order_relaxed); }
+            h.on = false;
+            h.weight = 0;
+            h.why.store(2, std::memory_order_relaxed);
+            return;
+        }
+        const float dt = bodies.seconds;
+        h.weight = std::clamp(h.weight + (wanted ? dt : -dt) / 0.12f, 0.0f, 1.0f);
+        if (wanted) h.last_right = h.right.load(std::memory_order_relaxed);
+        const auto deck = bodies.parts[8];
+        const auto right = reader.value<std::array<float, 4>>(deck, 0x20), up = reader.value<std::array<float, 4>>(deck, 0x30),
+                   forward = reader.value<std::array<float, 4>>(deck, 0x40);
+        const auto centre = reader.value<std::array<float, 3>>(deck, 0x50);
+        const auto back = reader.value<std::array<float, 3>>(bodies.parts[11], 0x50), front = reader.value<std::array<float, 3>>(bodies.parts[15], 0x50);
+        const auto pelvis = reader.value<std::array<float, 3>>(bodies.parts[31], 0x50);
+        h.deck_up.store(centre[1] - pelvis[1], std::memory_order_relaxed);
+        h.deck_out.store(std::hypot(centre[0] - pelvis[0], centre[2] - pelvis[2]), std::memory_order_relaxed);
+        reader.verify();
+        const float x = h.x.load(std::memory_order_relaxed), y = h.y.load(std::memory_order_relaxed), z = h.z.load(std::memory_order_relaxed);
+        float target[3];
+        for (int i = 0; i < 3; ++i) target[i] = centre[i] + x * right[i] + y * up[i] + z * forward[i];
+        // How far a hand is from the deck itself (its box: 0.11 m to each edge, 0.41 m to each end, 0.04 m through), and
+        // where it is in the deck's frame (side, up, forward).
+        const auto on_deck = [&](const std::array<float, 3>& q, std::array<std::atomic<float>, 3>& at) {
+            const float d[3]{q[0] - centre[0], q[1] - centre[1], q[2] - centre[2]};
+            const float sx = d[0] * right[0] + d[1] * right[1] + d[2] * right[2], sy = d[0] * up[0] + d[1] * up[1] + d[2] * up[2],
+                        sz = d[0] * forward[0] + d[1] * forward[1] + d[2] * forward[2];
+            at[0].store(sx, std::memory_order_relaxed);
+            at[1].store(sy, std::memory_order_relaxed);
+            at[2].store(sz, std::memory_order_relaxed);
+            return std::hypot(std::max(std::abs(sx) - 0.11f, 0.0f), std::max(std::abs(sy) - 0.04f, 0.0f), std::max(std::abs(sz) - 0.41f, 0.0f));
+        };
+        h.gap_back.store(on_deck(back, h.at_back), std::memory_order_relaxed);
+        h.gap_front.store(on_deck(front, h.at_front), std::memory_order_relaxed);
+        const bool enable = h.weight > 0 && h.write.load(std::memory_order_relaxed);
+        p.x.store(target[0], std::memory_order_relaxed);
+        p.y.store(target[1], std::memory_order_relaxed);
+        p.z.store(target[2], std::memory_order_relaxed);
+        p.weight.store(h.weight, std::memory_order_relaxed);
+        p.speed.store(h.speed.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        p.p5.store(h.p5.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        p.flag6.store(h.flag6.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        p.right.store(h.last_right, std::memory_order_relaxed);
+        p.core.store(core, std::memory_order_relaxed);
+        p.ctx.store(ctx, std::memory_order_relaxed);
+        if (h.on && !enable) p.clears.store(3, std::memory_order_relaxed);
+        p.on.store(enable, std::memory_order_release);
+        h.on = enable;
+        h.steps.fetch_add(1, std::memory_order_relaxed);
+    } catch (...) { h.why.store(3, std::memory_order_relaxed); }
+}
 // A flip grab (the owner's kickflip indy, 2026-10-14): one smooth path for the board, the hand and the feet. The board
 // rises from the feet to the catch point in front of the waist while it flips; the hand goes out to it and takes it by
 // the toe edge; from then on the board is in the hand, and hand and board come down together while the feet tuck up
@@ -1544,6 +1726,11 @@ struct KinematicSpin {
     // down on to the base by the end.
     std::atomic<float> lift_up{}, lift_out{};
     float last_lift[3]{};
+    bool prev_valid{};
+    float prev_centre[3]{}, prev_side[3]{}, prev_fwd[3]{}, prev_up[3]{};
+    std::uint32_t guarded_moves{}, guarded_turns{}; // <dev> steps the guard held back
+    float max_move{}, max_turn{}; // <dev> largest step-to-step move (m) and turn (deg) of a spin
+    float max_move_p{}, max_turn_p{}; // and where in the spin (0..1)
     std::atomic<bool> finish_now{};
     // The base is the game's own board for the clip that plays (the drive's target), step by step, rather than the
     // board at the start levelled: no comply and flick-it flips (their clip's board swung far round, and the board
@@ -1687,6 +1874,7 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
             }
             k.last_offset = 0;
             for (auto& v : k.last_lift) v = 0;
+            k.prev_valid = false;
             k.finishing = false;
             k.started = true;
         }
@@ -1833,6 +2021,50 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
             }
         }
         const float* desired[3]{side, up, fwd};
+        // Never a jump (the owner: "smooth, never teleport"): from one step to the next the board moves at most its own
+        // travel plus 3 m/s, and turns at most 1,400 deg/s (a kickflip turns about 1,100). Spikes of 0.46 m and 42 deg
+        // in one step were measured in flip grabs (run fg6: at 35% and 80% of the spin, where the game's grab board moved
+        // under the follow base).
+        if (k.prev_valid) {
+            const float dt = std::clamp(step_seconds(core), 1.0f / 240.0f, 0.05f);
+            float d[3]{centre[0] - k.prev_centre[0] - travel[0] * dt, centre[1] - k.prev_centre[1] - travel[1] * dt, centre[2] - k.prev_centre[2] - travel[2] * dt};
+            const float extra = std::hypot(d[0], d[1], d[2]), most = 3.0f * dt;
+            if (extra > most) {
+                for (int c = 0; c < 3; ++c) centre[static_cast<std::size_t>(c)] -= d[c] * (1.0f - most / extra);
+                k.guarded_moves++;
+            }
+            float m[3][3]{};
+            const float* now_rows[3]{side, up, fwd};
+            const float* was_rows[3]{k.prev_side, k.prev_up, k.prev_fwd};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    for (int r = 0; r < 3; ++r) m[i][j] += now_rows[r][i] * was_rows[r][j];
+            const auto qt = quat_of(m);
+            const float half = std::acos(std::clamp(std::abs(qt[0]), 0.0f, 1.0f)), sine = std::sin(half);
+            // The spin's own rate (a quick turn in a short hop is meant) times 1.6, or 1,400 deg/s if more.
+            const float whole = std::abs(k.pose.load(std::memory_order_relaxed) ? k.pose_roll : k.roll.load(std::memory_order_relaxed)) + std::abs(k.yaw.load(std::memory_order_relaxed)) +
+                                std::abs(k.pitch.load(std::memory_order_relaxed));
+            const float own = whole / std::max(static_cast<float>(qpc_seconds(length)), 0.05f);
+            const float limit = std::max(1400.0f, 1.6f * own) / 57.2957795f * dt;
+            if (2.0f * half > limit && sine > 1e-4f) {
+                const float sign = qt[0] < 0 ? -1.0f : 1.0f;
+                const float axis[3]{sign * qt[1] / sine, sign * qt[2] / sine, sign * qt[3] / sine};
+                for (int c = 0; c < 3; ++c) { side[c] = k.prev_side[c]; up[c] = k.prev_up[c]; fwd[c] = k.prev_fwd[c]; }
+                kin_rotate(side, axis, limit);
+                kin_rotate(up, axis, limit);
+                kin_rotate(fwd, axis, limit);
+                k.guarded_turns++;
+            }
+            // <dev> Smoothness, after the guard: the largest move against the board's own travel and the largest turn.
+            const float move = std::hypot(centre[0] - k.prev_centre[0] - travel[0] * dt, centre[1] - k.prev_centre[1] - travel[1] * dt, centre[2] - k.prev_centre[2] - travel[2] * dt);
+            const float dot = std::clamp(fwd[0] * k.prev_fwd[0] + fwd[1] * k.prev_fwd[1] + fwd[2] * k.prev_fwd[2], -1.0f, 1.0f);
+            const float dot2 = std::clamp(up[0] * k.prev_up[0] + up[1] * k.prev_up[1] + up[2] * k.prev_up[2], -1.0f, 1.0f);
+            const float turn = std::max(std::acos(dot), std::acos(dot2)) * 57.2957795f;
+            if (move > k.max_move) { k.max_move = move; k.max_move_p = last ? 1.0f : p; }
+            if (turn > k.max_turn) { k.max_turn = turn; k.max_turn_p = last ? 1.0f : p; }
+        }
+        for (int c = 0; c < 3; ++c) { k.prev_centre[c] = centre[static_cast<std::size_t>(c)]; k.prev_side[c] = side[c]; k.prev_fwd[c] = fwd[c]; k.prev_up[c] = up[c]; }
+        k.prev_valid = !last;
         for (int c = 0; c < 3; ++c) k.wrote_up[c] = up[c];
         k.wrote = true;
         for (std::size_t i = 0; i < 9; ++i) {
@@ -2103,6 +2335,7 @@ void noclip_physics_update(std::uintptr_t core) {
     tricks_board_carry(core);
     tricks_limb_free(core);
     tricks_hand_pull(core);
+    tricks_hand_ik(core);
     tricks_drive_dump(core);
     tricks_freestyle_slide(core);
     tricks_rider_drives(core);
@@ -2339,6 +2572,56 @@ std::uint32_t take_hand_pull(float& gap) noexcept {
     gap = hand_pull().gap.load(std::memory_order_relaxed);
     return hand_pull().steps.exchange(0, std::memory_order_relaxed);
 }
+void set_hand_ik(std::uintptr_t core, std::uint32_t milliseconds, bool right, float x, float y, float z) noexcept {
+    auto& h = hand_ik();
+    h.core.store(core, std::memory_order_relaxed);
+    h.right.store(right, std::memory_order_relaxed);
+    h.x.store(x, std::memory_order_relaxed);
+    h.y.store(y, std::memory_order_relaxed);
+    h.z.store(z, std::memory_order_relaxed);
+    h.until.store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_relaxed);
+}
+void set_hand_ik_tuning(float speed, float p5, bool flag6) noexcept {
+    auto& h = hand_ik();
+    h.speed.store(speed, std::memory_order_relaxed);
+    h.p5.store(p5, std::memory_order_relaxed);
+    h.flag6.store(flag6, std::memory_order_relaxed);
+}
+std::string hand_ik_places() {
+    const auto& h = hand_ik();
+    return std::format("back ({:.2f} {:.2f} {:.2f}) front ({:.2f} {:.2f} {:.2f}), deck {:.2f} m up {:.2f} m out from the pelvis", h.at_back[0].load(), h.at_back[1].load(),
+                       h.at_back[2].load(), h.at_front[0].load(), h.at_front[1].load(), h.at_front[2].load(), h.deck_up.load(), h.deck_out.load());
+}
+void set_hand_ik_write(bool on) noexcept { hand_ik().write.store(on, std::memory_order_relaxed); }
+std::uint32_t take_hand_ik(float& gap_back, float& gap_front) noexcept {
+    gap_back = hand_ik().gap_back.load(std::memory_order_relaxed);
+    gap_front = hand_ik().gap_front.load(std::memory_order_relaxed);
+    gap_back += 100.0f * static_cast<float>(hand_ik().why.exchange(0, std::memory_order_relaxed)); // <dev> reason, in hundreds of metres
+    return hand_ik().steps.exchange(0, std::memory_order_relaxed);
+}
+std::string dump_hand_ik(std::uintptr_t base, std::uintptr_t entity) {
+    // The context as the game has it: its header and every field the two hands use.
+    std::uintptr_t core{}, ctx{};
+    try {
+        SourceReader reader;
+        core = reader.pointer(reader.pointer(entity, 0x628), 0x70);
+        reader.verify();
+        ctx = hand_ik_context_of(base, core);
+    } catch (...) {}
+    const auto head = std::format("core {:#x}, {} published writes", core, hand_ik_shared().writes.load(std::memory_order_relaxed));
+    if (!ctx) return head + ": no hand IK context";
+    std::array<std::uint8_t, 0x120> b{};
+    if (!memory::peek(ctx, b)) return "hand IK context unreadable";
+    const auto f = [&](std::uint32_t at) { float v; std::memcpy(&v, b.data() + at, 4); return v; };
+    const auto q = [&](std::uint32_t at) { std::uint64_t v; std::memcpy(&v, b.data() + at, 8); return v; };
+    const auto v4 = [&](std::uint32_t at) { return std::format("({:.2f} {:.2f} {:.2f} {:.2f})", f(at), f(at + 4), f(at + 8), f(at + 12)); };
+    const auto hand = [&](const char* name, const HandIkFields& h, std::uint32_t key) {
+        return std::format("{}: place {} vec3 {} speed {:.2f} p5 {:.2f} flag6 {} vec7 {} weight {:.2f} enable {} key {:#x}", name, v4(h.place), v4(h.vec3), f(h.speed), f(h.p5),
+            b[h.flag6], v4(h.vec7), f(h.weight), b[h.enable], q(key) & 0xffffffffu);
+    };
+    return head + std::format("; hand IK {:#x} [+0 {:#x} +8 {:#x} +10 {:#x}]; {}; {}; bools {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}", ctx, q(0), q(8), q(0x10),
+        hand("right", hand_ik_right, 0x1c), hand("left", hand_ik_left, 0xfc), b[0x118], b[0x119], b[0x11a], b[0x11b], b[0x11c], b[0x11d], b[0x11e], b[0x11f]);
+}
 void set_board_carry(std::uintptr_t core, std::uint32_t milliseconds, float rise, float reach, float top, float hold) noexcept {
     auto& c = board_carry();
     c.start.store(0, std::memory_order_release);
@@ -2424,12 +2707,29 @@ void set_kinematic_spin(std::uintptr_t core, std::uint32_t milliseconds, float r
 }
 void finish_kinematic_spin() noexcept { kinematic_spin().finish_now.store(true, std::memory_order_relaxed); }
 bool kinematic_spin_running() noexcept { return kinematic_spin().start.load(std::memory_order_acquire) != 0; }
+void take_kinematic_spin_smoothness(float& move, float& turn) noexcept {
+    auto& k = kinematic_spin();
+    move = k.max_move;
+    turn = k.max_turn;
+    k.max_move = 0;
+    k.max_turn = 0;
+}
+std::string take_kinematic_spin_guard() {
+    auto& k = kinematic_spin();
+    const auto text = std::format("worst at {:.0f}% / {:.0f}%, held back {} moves and {} turns", k.max_move_p * 100, k.max_turn_p * 100, k.guarded_moves, k.guarded_turns);
+    k.guarded_moves = 0;
+    k.guarded_turns = 0;
+    return text;
+}
 std::string take_kinematic_spin_check() {
     auto& k = kinematic_spin();
     const float drift = k.drift.exchange(0), low_read = k.low_read.exchange(2.0f), low_wrote = k.low_wrote.exchange(2.0f);
     if (low_read > 1.5f) return {};
-    return std::format("written vs read back: largest drift {:.0f} deg; lowest up row height written {:.2f}, read {:.2f}; ended at {:.2f} of its time{}", drift, low_wrote, low_read,
-                       k.ended_at.exchange(-1.0f), k.ended_early.exchange(false) ? " (stopped early)" : "");
+    const float move = k.max_move, turn = k.max_turn;
+    k.max_move = 0;
+    k.max_turn = 0;
+    return std::format("written vs read back: largest drift {:.0f} deg; lowest up row height written {:.2f}, read {:.2f}; ended at {:.2f} of its time{}; steps: largest move {:.3f} m, turn {:.1f} deg", drift, low_wrote, low_read,
+                       k.ended_at.exchange(-1.0f), k.ended_early.exchange(false) ? " (stopped early)" : "", move, turn);
 }
 std::uint32_t take_kinematic_spin_steps(std::uint32_t& failures, std::uint32_t& skipped) noexcept {
     failures = kinematic_spin().failures.exchange(0, std::memory_order_relaxed);

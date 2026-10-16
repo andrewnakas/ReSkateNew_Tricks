@@ -27,10 +27,11 @@ Tiers describe how a trick gets built:
 | 11 | Dolphin flip and 360 dolphin/dragon flip | sake, DS | C | Board pitch rotation done procedurally | ready to test: in-air click with the stick up/down (dolphin turn) or on an up-diagonal (dragon flip: dolphin + 360 shuv); both checked on an ollie |
 | 12 | Muska flip | Don Kedic | C | 180 body varial heelflip | todo: needs the owner to say which Muska flip is meant |
 | 13 | Hurricane grind (animation and registration) | strumzino | D | No clip exists; registration only | parked |
-| 14 | Grabs during grinds | Punkrek | D? | Grind plus the grab layer, if it blends | research |
+| 14 | Grabs during grinds | Punkrek | D? | Trigger while grinding: the game's own ground grab held on the rail (grab states + the graph's physics family held at riding) | ready to test (2026-10-16: hand 0.04-0.06 m from the deck through the grind, 3/3) |
 | 15 | Wallpush | Krispy Kreme Massacre | D | Wallride plus an impulse; no clip exists | parked |
 | 16 | Project 8-style wallride animation | Krispy Kreme Massacre | D | New animation | parked |
 | 17 | Nata spin | Luca.Antrix | D | No clip exists | parked |
 | 18 | Revert flip (Skate 3 tricklining) | WinterWZ | trainer | Timing and physics only | ReSkate Trainer |
 | 19 | 180 into a manual registers the wrong stance | strumzino | E | Stance bit in the manual scoring | research |
 | 20 | Custom trick names ("Tre Flip", "Nightmare") | strumzino | E | Runtime display-name override, with no EBX edits | partly: mod tricks show their names as notices (`tricks names`); renaming the game's own tricks todo |
+| 21 | Kickflip indy (flip grab: trigger during a flip) | owner | C | The mod's flip out and up in front, back on to the game's grab board; the game's own grab hand takes it | ready to test (2026-10-16: hand 0.07 m from the deck from ~65% to the landing, 12/12; no step over 0.05 m / 23 deg) |
