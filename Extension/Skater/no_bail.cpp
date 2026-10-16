@@ -240,8 +240,9 @@ std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
     LastError error;
     auto chosen = filtered && next == wipeout_physics_state && protected_owner(selector, &Owner::selector) ? current : next;
     auto& w = state_watch();
-    // ReSkate Tricks: a wipeout asked for (the selector's own result for a bad contact), taken on the ground only.
-    if (selector == w.selector.load(std::memory_order_acquire) && current >= 100 && current <= 105 &&
+    // ReSkate Tricks: a wipeout asked for (the selector's own result for a bad contact), taken on the ground or a rail
+    // (a tweaked grab landed in a grind).
+    if (selector == w.selector.load(std::memory_order_acquire) && ((current >= 100 && current <= 105) || (current >= 400 && current <= 406)) &&
         GetTickCount64() < forced_wipeout_until().load(std::memory_order_acquire)) {
         forced_wipeout_until().store(0, std::memory_order_release);
         chosen = wipeout_physics_state;

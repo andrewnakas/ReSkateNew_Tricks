@@ -177,7 +177,12 @@ struct Runtime {
     int grind_grab_scored_grind{-1};   // the grind (Enum.GS.SkateGrindType) the grab grind was scored on
     std::uintptr_t s_skate_grind_type{};
     std::uintptr_t s_grab_left_hand{}, s_grab_right_hand{};
-    bool fandango{false}, fandango_on{}, fandango_any{}, fandango_north{};
+    bool fandango{true}, fandango_on{}, fandango_any{}, fandango_north{};
+    int fandango_family{1};
+    bool tweak_fall{true}, was_on_rail{};
+    int air_grab_type{};
+    std::uint64_t air_grab_seen{}, air_tweak_seen{};
+    std::uintptr_t s_detailed_grab{};  // the graph held at riding (1: the push's back foot off) or air (2: Ollie South)
     std::uintptr_t s_ollie_south{};
     std::uint32_t flip_grab_spin_ms{650}; // out, flipped, and back into the game's grab
     float flip_grab_rise{0.35f};  // metres the board rises at the top of a flip grab (from the feet to the waist)
@@ -1964,7 +1969,11 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         if (r.grind_grab || r.grind_grab_on) {
             const bool grinding = physics.valid && physics.state >= 400 && physics.state <= 406;
             const bool left = pad[2] > 100, right = pad[3] > 100; // LT, RT
-            const bool want = r.grind_grab && trick_enabled(r, "grindgrab") && grinding && (left || right);
+            // Not when the rail was met in a tweaked grab: that is a fall (below), not a grab grind.
+            const bool doomed = !r.grind_grab_on && r.tweak_fall &&
+                                ((now - r.air_tweak_seen < 200) ||
+                                 (now - r.air_grab_seen < 200 && r.air_grab_type > 0 && r.air_grab_type != 1 && r.air_grab_type != 6 && r.air_grab_type != 33));
+            const bool want = r.grind_grab && trick_enabled(r, "grindgrab") && grinding && (left || right) && !doomed;
             // The hand of the trigger brought to the board's edge, the body crouched down to it (the game's grind clips
             // never grab: its reach states did nothing).
             std::uintptr_t core{};
@@ -2053,6 +2062,35 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         // The fandango: a crooked grind with the back foot off the board, held with A (the owner, 2026-10-16). The graph is
         // held in its air family with the game's own one-foot air (Ollie South: the back foot kicked off) while the board
         // stays in its crook on the rail.
+        // A tweaked grab landed on a rail is a fall (the owner, 2026-10-16: only the standard grabs grind; "if you land in a
+        // rail in a tweaked grab you will fall"): the game's air grab type is read in the air, and a grind entered within a
+        // moment of a tweaked one (not plain BS 1, FS 6 or Double 33) ends in a wipeout.
+        if (r.tweak_fall) {
+            const bool airborne = physics.valid && physics.state >= 200 && physics.state < 300;
+            const bool on_rail = physics.valid && physics.state >= 400 && physics.state <= 406;
+            if (airborne) {
+                if (!r.s_detailed_grab) r.s_detailed_grab = find_state(base, "Animation/Dingo/Enum.GS.DetailedGrabType");
+                double grab{};
+                if (r.s_detailed_grab && read_state_at(base, r.s_detailed_grab, 1, grab)) {
+                    r.air_grab_type = static_cast<int>(grab);
+                    r.air_grab_seen = now;
+                }
+            }
+            // Or held so as the rail is met: a trigger with the right stick pushed out (the tweak, before the game has
+            // turned it into its grab type).
+            std::int16_t trx{}, try_{};
+            std::memcpy(&trx, pad.data() + 8, 2);
+            std::memcpy(&try_, pad.data() + 10, 2);
+            const bool tweaking = (pad[2] > 100 || pad[3] > 100) && std::hypot(trx / 32767.0f, try_ / 32767.0f) > 0.5f;
+            if (airborne && tweaking) r.air_tweak_seen = now;
+            if (on_rail && !r.was_on_rail && ((now - r.air_grab_seen < 150 && r.air_grab_type > 0 && r.air_grab_type != 1 && r.air_grab_type != 6 &&
+                r.air_grab_type != 33) || (now - r.air_tweak_seen < 150 && tweaking))) {
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: landed on a rail in a tweaked grab (type {}): a fall.", r.air_grab_type);
+                request_wipeout();
+                r.air_grab_type = 0;
+            }
+            r.was_on_rail = on_rail;
+        }
         if (r.fandango || r.fandango_on) {
             if (!r.s_skate_grind_type) r.s_skate_grind_type = find_state(base, "Animation/Dingo/Enum.GS.SkateGrindType");
             double grind{};
@@ -2065,17 +2103,17 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             const bool a_held = (face & 0x1000) != 0; // XINPUT_GAMEPAD_A
             const bool want = r.fandango && trick_enabled(r, "fandango") && grinding && (crooked || r.fandango_any) && a_held;
             if (!r.s_ollie_south) r.s_ollie_south = find_state(base, r.fandango_north ? "Animation/Dingo/Bool.Intent.OllieNorth" : "Animation/Dingo/Bool.Intent.OllieSouth");
-            if (want || r.fandango_on) (void)write_state_at(base, r.s_ollie_south, 0, want);
+            if (r.fandango_family == 2 && (want || r.fandango_on)) (void)write_state_at(base, r.s_ollie_south, 0, want);
             if (want) {
                 if (!r.hooks) r.hooks = start_holds(base);
                 if (!r.s_filtered) r.s_filtered = find_state(base, "Animation/Dingo/EnumGS.FilteredPhysicsState");
-                hold_object(r.s_filtered, 2, 120);
-                (void)write_state_at(base, r.s_filtered, 1, 2);
+                hold_object(r.s_filtered, static_cast<std::uint32_t>(r.fandango_family), 120);
+                (void)write_state_at(base, r.s_filtered, 1, r.fandango_family);
                 air_poke.base.store(base, std::memory_order_relaxed);
                 air_poke.entity.store(r.entity, std::memory_order_relaxed);
                 air_poke.state.store(r.s_filtered, std::memory_order_relaxed);
                 air_poke.last.store(0, std::memory_order_relaxed);
-                air_poke.value.store(2, std::memory_order_relaxed);
+                air_poke.value.store(static_cast<std::uint32_t>(r.fandango_family), std::memory_order_relaxed);
                 air_poke.until.store(now + 120, std::memory_order_relaxed);
                 set_tricks_step(&air_poke_step);
                 if (!r.fandango_on) score_trick("fandango", crooked ? (g < 18 || (g >= 35 && g < 45) ? "FS Fandango" : "BS Fandango") : std::format("One Foot {}", grind_name(g)));
@@ -3117,6 +3155,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
     if (verb == "fandango") {
         if (arguments.empty()) return "usage: tricks fandango on|off | any 0|1 | north 0|1";
         if (arguments[0] == "on" || arguments[0] == "off") r.fandango = arguments[0] == "on";
+        else if (arguments.size() == 2 && arguments[0] == "family") r.fandango_family = std::atoi(arguments[1].c_str()); // <dev>
         else if (arguments.size() == 2 && arguments[0] == "any") r.fandango_any = arguments[1] == "1"; // <dev> on every grind
         else if (arguments.size() == 2 && arguments[0] == "north") { r.fandango_north = arguments[1] == "1"; r.s_ollie_south = 0; } // <dev> the front foot
         else return "usage: tricks fandango on|off | any 0|1 | north 0|1";
