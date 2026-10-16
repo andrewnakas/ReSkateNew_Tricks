@@ -261,6 +261,19 @@ struct Runtime {
     // A primo's flick-out as the game's own ollie + flip trick (Bool.Intent.OllieNorth, EnumGS.Intent.FlipTrick held
     // for a moment once the skater rides): the flip trick wanted (0 none), until when, and since when it is asked.
     bool primo_game_pop{true};
+    std::uint32_t primo_pop_hold_ms{300}; // how long the primo's way out is held (CurrentGroundTrick 7) before it is let go
+    // The primo's flick-out (the owner's pick, 2026-10-15): the primo's own way out let go after `primo_pop_hold_ms`
+    // pops (its FS shuvit clip lifts the board: about 0.45 m, run n5), and the flick's turn plays on the board in that hop.
+    // The game has no flip out of a primo, and its ollie is only read once the way out is over (about 2.5 s: runs n3, n5).
+    bool primo_hop_flip{true};
+    // The primo's flip out turns the way the board rolls out of the primo (the owner, 2026-10-15: the board "spins one
+    // direction to get out of primo and then reverses" for the flip; the flip should go on the same way). Its roll way
+    // is read at the start of the hop: that picks kickflip or heelflip, and the varial's shuvit goes with it (kick + BS,
+    // heel + FS). The flick picks the kind: 0 the flip, 1 the varial, 2 the 360 (tre / laser).
+    bool out_follow{};
+    bool out_from_primo{};
+    std::uint32_t primo_flip_ms{430};
+    int out_kind{};
     // The anti casper as a nose manual (the owner, 2026-10-14: the mirrored casper "totally twists you and spins you
     // around"; "it should just be a nose manual casper, front foot on the nose, rear foot under the board"): the game's
     // own nose manual held (EnumGS.Intent.Manual at the nose manual's value, learned from the player's nose manuals),
@@ -438,6 +451,7 @@ void start_air_spin(const Runtime &r, float roll, float yaw, float pitch, std::u
         start_board_spin_kinematic(kin_core, roll, yaw, pitch, ms, 1.0f, kdip);
         set_kinematic_spin_follow(follow_clip);
         if (pose != -2) set_kinematic_spin_pose(true, pose);
+        set_kinematic_spin_to_feet(pose != -2); // a flick-out ends under the feet, where the legs are
         if (r.feet_free < 1.0f) set_feet_free(kin_core, ms + 60, r.feet_free);
         return;
     }
@@ -1558,10 +1572,16 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         } else {
                         logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flicked out of the {} ({}).", freestyle_name(r.freestyle), turn);
                         // Named as the flip it is (the owner, 2026-10-14: "Kickflip", not "Casper Kickflip").
-                        score_trick(id, turn);
+                        const bool follow = !casper && r.primo_hop_flip && !(r.anti && r.anti_nose);
+                        if (!follow) score_trick(id, turn); // a primo's is named once its way round is known
+                        r.out_follow = follow;
+                        r.out_kind = flick >= 100.0f ? 0 : flick < 80.0f ? 1 : 2;
                         if (casper && !(r.anti && r.anti_nose)) {
                             r.out_until = now + 1500;
                             leave(9, 2500);
+                        } else if (r.primo_hop_flip && !(r.anti && r.anti_nose)) {
+                            r.out_until = now + 1500;
+                            leave(0, r.primo_pop_hold_ms);
                         } else if (r.primo_game_pop || (r.anti && r.anti_nose)) {
                             // The primo has no pop of its own. It puts the board down (its own way out) and, the moment the
                             // skater rides, the game is asked for an ollie with this flip trick: the game's own flip, which
@@ -1616,7 +1636,38 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 }
             }
             // The flick's turn, once the casper's flip out is in the air; dropped again on the ground.
-            if (r.out_until && in_air) {
+            // A primo's flip out waits for the hop's real air (physics 200/201): the way out's clip lifts the board a
+            // moment before it, and a turn started there touched down 125 ms in (run n9).
+            const auto out_physics = watched_physics_state();
+            if (r.out_until && in_air && (!r.out_follow || (out_physics.valid && out_physics.state >= 200 && out_physics.state < 300))) {
+                r.out_from_primo = r.out_follow;
+                if (r.out_follow) {
+                    r.out_follow = false;
+                    float b[12]{};
+                    const float back = r.rig && copy_rows(r.rig + 0x48a0, b, 12) ? std::atan2(-b[1], b[5]) * 57.2958f : 0.0f;
+                    const bool kick = back >= 0.0f; // the roll's positive way is the kickflip's (as the casper's flip outs)
+                    r.out_dir = kick ? 1 : -1;
+                    r.out_roll = kick ? 360.0f : -360.0f;
+                    const char *name{}, *id{};
+                    if (r.out_kind == 1) {
+                        r.out_yaw = kick ? 180.0f : -180.0f;
+                        name = kick ? "Varial Kickflip" : "Varial Heelflip";
+                        id = kick ? "flick_kickflip" : "flick_heelflip";
+                        r.out_legs_flip = kick ? 2 : 3;
+                    } else if (r.out_kind == 2) {
+                        r.out_yaw = kick ? 360.0f : -360.0f;
+                        name = kick ? "Tre Flip" : "Laser Flip";
+                        id = "flick_treflip";
+                        r.out_legs_flip = kick ? 11 : 3;
+                    } else {
+                        r.out_yaw = 0;
+                        name = kick ? "Kickflip" : "Heelflip";
+                        id = kick ? "flick_kickflip" : "flick_heelflip";
+                        r.out_legs_flip = kick ? 2 : 3;
+                    }
+                    score_trick(id, name);
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flip out the way it rolls out: {} (roll back {:.0f} deg at the hop).", name, back);
+                }
                 if (r.out_pose) {
                     // Timed by the whole turn (about 180 for the roll back over), so a half flip is not slowed to a
                     // big flip's time nor a big one rushed (the owner: tre from a casper "does way too much").
@@ -1624,7 +1675,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     // Done before the touchdown (the casper's hop is short: a landing mid-turn finished the rest in 90 ms
                     // and threw the skater, the owner 2026-10-15), with no dip (the hop is a few centimetres off the
                     // ground: a dipped board went into it, "fall through the map").
-                    const auto ms = static_cast<std::uint32_t>((180.0f + 0.5f * turn) * static_cast<float>(r.out_spin_ms) / 320.0f);
+                    auto ms = static_cast<std::uint32_t>((180.0f + 0.5f * turn) * static_cast<float>(r.out_spin_ms) / 320.0f);
+                    // A primo's hop is down 560-700 ms after it starts (runs n7, n9): its turn ends well before.
+                    if (r.out_from_primo) ms = std::min<std::uint32_t>(ms, r.primo_flip_ms);
                     start_air_spin(r, r.out_roll, r.out_yaw, 0, ms, true, false, r.out_dir);
                     r.out_spinning = true;
                     r.out_spin_at = now;
@@ -2834,9 +2887,15 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return r.anti_nose ? "The anti casper is a nose manual with the board turned over." : "The anti casper is the casper mirrored and turned.";
     }
     if (verb == "primopop") {
-        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: tricks primopop on|off";
+        if (std::uint32_t ms{}; arguments.size() == 2 && arguments[0] == "ms" && number(arguments[1], ms) && ms <= 3000) { // <dev>
+            r.primo_pop_hold_ms = ms;
+            return std::format("A primo's way out is held {} ms before the pop.", ms);
+        }
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off" && arguments[0] != "hop")) return "usage: tricks primopop hop|on|off | ms <n>";
+        r.primo_hop_flip = arguments[0] == "hop";
         r.primo_game_pop = arguments[0] == "on";
-        return r.primo_game_pop ? "A primo's flick-out is the game's own ollie and flip." : "A primo's flick-out goes through the casper.";
+        return r.primo_hop_flip ? "A primo's flick-out is its own way out's hop with the flick's turn on the board."
+             : r.primo_game_pop ? "A primo's flick-out is the game's own ollie and flip, once riding (about 2.5 s)." : "A primo's flick-out goes through the casper.";
     }
     if (verb == "anti") {
         // tricks anti on|off | steady <ms>

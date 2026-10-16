@@ -662,9 +662,11 @@ void put_back_feet(FeetFree& f) noexcept {
 }
 void tricks_feet_free(std::uintptr_t core) noexcept {
     auto& f = feet_free();
-    // The hold comes back over 150 ms after the spin (all at once, the feet were yanked to the deck).
+    // The hold comes back over 300 ms after the spin (all at once, the feet were yanked to the deck; over 150 ms the
+    // legs still jumped on to it at the landing, the owner 2026-10-15).
+    constexpr ULONGLONG regain = 300;
     const auto now = GetTickCount64(), until = f.until.load(std::memory_order_relaxed);
-    const bool wanted = core && core == f.core.load(std::memory_order_relaxed) && now < until + 150;
+    const bool wanted = core && core == f.core.load(std::memory_order_relaxed) && now < until + regain;
     const bool holding = std::any_of(f.held.begin(), f.held.end(), [](bool h) { return h; });
     if (!wanted) {
         if (holding && core == f.core.load(std::memory_order_relaxed)) put_back_feet(f);
@@ -682,7 +684,7 @@ void tricks_feet_free(std::uintptr_t core) noexcept {
     std::uintptr_t records{};
     if (!peek_at(w + 0xe68, records) || !records) return;
     const float lowest = std::clamp(f.scale.load(std::memory_order_relaxed), 0.0f, 1.0f);
-    const float scale = now < until ? lowest : lowest + (1.0f - lowest) * static_cast<float>(now - until) / 150.0f;
+    const float scale = now < until ? lowest : lowest + (1.0f - lowest) * static_cast<float>(now - until) / static_cast<float>(regain);
     for (int k = 0; k < f.rows.count; ++k) {
         const auto row = records + static_cast<std::uintptr_t>(f.rows.rows[k]) * 0xc0;
         std::array<float, 3> point{};
@@ -1550,6 +1552,9 @@ struct KinematicSpin {
     // The base is the board as it was at the start, not levelled: a pose's flick-out (its roll already brings the
     // board right side up: the levelling's half turn came on top of it, the owner 2026-10-14 "does way too much").
     std::atomic<bool> pose{};
+    // The end turned on to the line of the rider's feet (a flick-out, the owner 2026-10-15: "the body and legs totally
+    // move last minute to make the landing ... should end up where the legs are").
+    std::atomic<bool> to_feet{};
     // The base turned about the world's up with the skater's pelvis (a flip grab while the left stick spins the skater:
     // the board stayed on the start heading, "out of position", the owner 2026-10-14).
     std::atomic<bool> with_pelvis{};
@@ -1741,6 +1746,25 @@ void tricks_kinematic_spin(std::uintptr_t core) noexcept {
                 float target[3][3];
                 for (int r = 0; r < 3; ++r)
                     for (int c = 0; c < 3; ++c) target[r][c] = bt.rows[static_cast<std::size_t>(r * 3 + c)].load(std::memory_order_relaxed);
+                if (k.to_feet.load(std::memory_order_relaxed) && bodies.parts.size() > 27) {
+                    // The game's board turned about the vertical so its length lies along the feet (back foot 23 to
+                    // front foot 27, either way round: the nearer heading is taken below).
+                    SourceReader r4;
+                    const auto f0 = r4.value<std::array<float, 3>>(bodies.parts[23], 0x50);
+                    const auto f1 = r4.value<std::array<float, 3>>(bodies.parts[27], 0x50);
+                    r4.verify();
+                    const float lx = f1[0] - f0[0], lz = f1[2] - f0[2];
+                    const float tx = target[2][0], tz = target[2][2];
+                    if (std::sqrt(lx * lx + lz * lz) > 0.15f && std::sqrt(tx * tx + tz * tz) > 0.3f) {
+                        float turn = std::atan2(lx, lz) - std::atan2(tx, tz);
+                        while (turn > 3.14159265f) turn -= 6.2831853f;
+                        while (turn < -3.14159265f) turn += 6.2831853f;
+                        if (turn > 1.5707963f) turn -= 3.14159265f;
+                        if (turn < -1.5707963f) turn += 3.14159265f;
+                        const float axis[3]{0.0f, 1.0f, 0.0f};
+                        for (auto& row : target) kin_rotate(row, axis, turn);
+                    }
+                }
                 if (last) {
                     // The end: exactly the target (turned half round from the way blended to, if it was: a deck looks the
                     // same either way round, and the drive then has nothing to swing).
@@ -2368,6 +2392,7 @@ void set_kinematic_spin_lift(float up, float out) noexcept {
     kinematic_spin().lift_out.store(out, std::memory_order_relaxed);
 }
 void set_kinematic_spin_follow(bool follow) noexcept { kinematic_spin().follow.store(follow, std::memory_order_relaxed); }
+void set_kinematic_spin_to_feet(bool on) noexcept { kinematic_spin().to_feet.store(on, std::memory_order_relaxed); }
 void set_kinematic_spin_pose(bool pose, int dir) noexcept {
     kinematic_spin().pose_dir.store(dir, std::memory_order_relaxed);
     kinematic_spin().pose.store(pose, std::memory_order_relaxed);
@@ -2375,6 +2400,7 @@ void set_kinematic_spin_pose(bool pose, int dir) noexcept {
 void set_kinematic_spin(std::uintptr_t core, std::uint32_t milliseconds, float roll, float yaw, float pitch, float top, float ease_in, float ease_slow, float dip) noexcept {
     kinematic_spin().lift_up.store(0, std::memory_order_relaxed);
     kinematic_spin().lift_out.store(0, std::memory_order_relaxed);
+    kinematic_spin().to_feet.store(false, std::memory_order_relaxed);
     auto& k = kinematic_spin();
     k.follow.store(false, std::memory_order_relaxed);
     k.pose.store(false, std::memory_order_relaxed);
