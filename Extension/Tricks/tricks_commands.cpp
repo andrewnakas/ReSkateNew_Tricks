@@ -63,6 +63,7 @@ void register_tricks_commands(Commands &registry) {
         {"fall", "What losing a casper or primo does", "hop|slam"},
         {"edgefall", "Lose a pose when the right stick is held at its edge", "on|off"},
         {"scheme", "Freestyle controls: landed into and held on the right stick, or click + flick", "hold|flick"},
+        {"stroke", "<dev> Play the right-stick stroke the mod pops with", "<flip> [strength] | side"},
         {"groundshuv", "Ground shuvit (no pop): do one, or switch the control", "[bs|fs] | on|off | ms <length>"},
         {"level", "Keep the board from pitching up in a casper or primo slide", "on|off"},
         {"slide","How hard casper and primo slides scrub speed (m/s each second)", "[m/s]"},

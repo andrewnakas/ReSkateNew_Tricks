@@ -34,6 +34,7 @@ extern "C" void DingoSDKOverlayTricksMask();
 extern "C" std::uint32_t DingoSDKOverlayTricksMaskedPolls();
 extern "C" void DingoSDKOverlayTricksAutoMask();
 extern "C" void DingoSDKOverlayTricksMaskLeft();
+extern "C" void DingoSDKOverlayTricksStroke(const float *xy, const std::uint32_t *ms, std::uint32_t count);
 // <dev> The scripted controller (Extension/UI/Overlay/input_capture.cpp), for test runs.
 extern "C" void DingoSDKOverlayScriptController(const void *gamepad);
 extern "C" void DingoSDKOverlayScriptControllerPolls(std::uint64_t *polls, std::uint64_t *served);
@@ -321,8 +322,17 @@ struct Runtime {
     float gs_peak{}, gs_rim_at{0.88f};
     float gs_lift{0.08f}; // metres the body rises for a ground shuvit's turn (the pelvis drive raised)
     float gs_jump{0.4f}, gs_speed{1.6f}; // the ground shuvit as the game's pop shuvit: its pop strength and turn speed
-    bool gs_game{false}; // (the game's ollie asked for never popped from riding: runs r11-r14)   // the ground shuvit as the game's own pop shuvit with a small pop (off: the mod turns the board)
+    bool gs_game{true}; // the ground shuvit as the game's own pop shuvit with a small pop (off: the mod turns the board)
     float pop_jump{1.0f}, pop_speed{1.0f};
+    // The mod's pops are the game's own: a right-stick stroke played to the game (its gesture reader then pops the
+    // ollie with the flip trick). Writing the ollie intent never popped (runs r11-r14): the pop is the trick clip's
+    // jump tag (request bit 13c4.9) in physics state 103, and the clip comes from the gesture. The stick side of a
+    // kickflip and of a backside shuvit for this skater, put right by the game's answer (flip 2 vs 3, 4 vs 7).
+    float kick_side{1.0f}, bs_shuv_side{1.0f};
+    std::uint32_t pop_asked{};
+    std::uint64_t pop_stroke_at{};
+    std::uintptr_t s_riding_node{};
+    bool pop_wait_riding{}; // a primo's pop waits for the riding node (its way out is a clip of its own)
     int shuv_side{};
     bool trace{true};
     std::uint64_t primo_out_at{};
@@ -693,12 +703,53 @@ void air_poke_step() noexcept {
 }
 void announce(std::string_view name);
 void score_trick(std::string_view id, std::string_view name);
+// The stroke that makes the game pop with flip trick `flip` (0 or 1 the ollie, 2 kickflip, 3 heelflip, 4 shuvit,
+// 7 frontside shuvit, 11 the 360 flip): the stick pulled down for a setup time, then flicked, quickly. `strength`
+// (0..1) is the setup time, 40 to 500 ms (measured 2026-10-15: how quick the flick is changes nothing).
+// The 360 flip is the game's pattern (Gesture_FlipTrick_360Flip, its y is the stick's down): from the side away from
+// the kick, rolled down through the bottom and flicked up to the kick's diagonal.
+void play_pop_stroke(Runtime &r, std::uint32_t flip, float strength) {
+    std::array<float, 16> xy{};
+    std::array<std::uint32_t, 8> ms{};
+    std::uint32_t n = 0;
+    const auto step = [&](float x, float y, std::uint32_t t) { xy[2 * n] = x; xy[2 * n + 1] = y; ms[n++] = t; };
+    const auto setup = static_cast<std::uint32_t>(std::lround(40.0f + 460.0f * std::clamp(strength, 0.0f, 1.0f)));
+    const float kick = r.kick_side, shuv = r.bs_shuv_side;
+    switch (flip) {
+    case 2: case 3:
+        step(0, -1, setup);
+        step(flip == 2 ? 0.7f * kick : -0.7f * kick, 0.7f, 150);
+        break;
+    case 4: case 7: {
+        const float x = flip == 4 ? shuv : -shuv;
+        step(0, -1, setup);
+        step(0.7f * x, -0.7f, 40);
+        step(x, 0, 120);
+        break;
+    }
+    case 11:
+        step(-kick, -0.2f, setup);
+        step(-0.6f * kick, -0.7f, 40);
+        step(0, -0.8f, 40);
+        step(0.6f * kick, 0.45f, 150);
+        break;
+    default:
+        step(0, -1, setup);
+        step(0, 1, 150);
+        break;
+    }
+    step(0, 0, 60);
+    DingoSDKOverlayTricksStroke(xy.data(), ms.data(), n);
+    r.pop_asked = flip;
+    r.pop_stroke_at = GetTickCount64();
+}
 void start_ground_shuv(Runtime &r, std::uint64_t now, bool frontside) {
     // The game's own pop shuvit with a small pop (the owner, 2026-10-15: the board turned under feet still on it, "the feet
     // need a clear flick"): the game's legs scoop and lift off and the board turns under them, barely off the ground.
     if (r.gs_game) {
         r.pop_flip = frontside ? 7u : 4u;
         r.pop_until = now + 600;
+        r.pop_wait_riding = false;
         r.pop_started = 0;
         r.pop_jump = r.gs_jump;
         r.pop_speed = r.gs_speed;
@@ -930,7 +981,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
         const auto physics = watched_physics_state();
         if (r.freestyle != Freestyle::off || r.leaving || r.gs_phase) pose_seen = now;
         if (physics.valid && static_cast<int>(physics.state) != last_state) {
-            if (now - pose_seen < 4000)
+            if (now - pose_seen < 4000 || now - r.pop_stroke_at < 3000)
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: physics {} -> {} ({}, {:.1f} m/s) at {} ms.", last_state, static_cast<int>(physics.state),
                              freestyle_name(r.freestyle), trainer::telemetry().speed, now % 100000);
             std::uint32_t contact{};
@@ -1516,9 +1567,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                             // skater rides, the game is asked for an ollie with this flip trick: the game's own flip, which
                             // the catch can take into a pose again (the owner, 2026-10-14: not through the casper).
                             r.pop_flip = id == std::string_view("flick_kickflip") ? 2u : id == std::string_view("flick_heelflip") ? 3u : id == std::string_view("flick_shuvit") ? 4u : id == std::string_view("flick_fsshuvit") ? 7u : 11u;
-                            r.pop_until = now + 1500;
+                            r.pop_until = now + 3500;
+                            r.pop_wait_riding = true;
                             r.pop_started = 0;
-                            r.pop_jump = 1.0f;
+                            r.pop_jump = 0.2f;
                             r.pop_speed = 1.0f;
                             r.out_roll = r.out_yaw = 0; // the game's own flip: no turn of ours
                             r.out_pose = false;
@@ -1645,20 +1697,26 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             if (now >= r.pop_until || (physics.valid && physics.state >= 300)) {
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flick-out {} gave up (physics {}).", r.pop_flip, physics.valid ? static_cast<int>(physics.state) : -1);
                 r.pop_flip = 0;
-            } else if (physics.valid && physics.state == 100 && !r.pop_started) r.pop_started = now;
-            const bool asking = r.pop_started && now - r.pop_started < 160;
-            if (r.pop_started) {
-                if (!r.s_ollie) r.s_ollie = find_state(base, "Animation/Dingo/Bool.Intent.OllieNorth");
-                if (!r.s_jump) r.s_jump = find_state(base, "Animation/Dingo/Float.Intent.JumpStrength");
-                if (!r.s_flip_intent) r.s_flip_intent = find_state(base, "Animation/Dingo/EnumGS.Intent.FlipTrick");
-                if (!r.s_flip_speed_intent) r.s_flip_speed_intent = find_state(base, "Animation/Dingo/Float.Intent.TrickFlipSpeed");
-                (void)write_state_at(base, r.s_ollie, 0, asking ? 1 : 0);
-                if (asking) (void)write_state_at(base, r.s_jump, 2, r.pop_jump);
-                (void)write_state_at(base, r.s_flip_intent, 1, r.pop_flip);
-                (void)write_state_at(base, r.s_flip_speed_intent, 2, r.pop_speed);
+            } else if (physics.valid && physics.state == 100 && !r.pop_started && [&] {
+                           if (!r.pop_wait_riding) return true;
+                           // The game reads a flick only once its graph is in the riding node: the primo's way out (a
+                           // ground clip, physics 103 and 100 by turns) took every stroke played before it (run n2).
+                           if (!r.s_riding_node) r.s_riding_node = find_state(base, "Animation/Dingo/Bool.State.Onboard.Riding");
+                           double riding{};
+                           return r.s_riding_node && read_state_at(base, r.s_riding_node, 0, riding) && riding != 0;
+                       }()) {
+                r.pop_started = now;
+                play_pop_stroke(r, r.pop_flip, r.pop_jump);
             }
             if (in_air && r.pop_started) {
-                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flick-out popped as the game's flip trick {} ({} ms after riding).", r.pop_flip, now - r.pop_started);
+                // The game's answer puts the stroke's sides right for the next one (kickflip and heelflip, the shuvits).
+                if (!r.s_current_flip) r.s_current_flip = find_state(base, "Animation/Dingo/EnumGS.Anim.CurrentFlipTrick");
+                double got{};
+                (void)read_state_at(base, r.s_current_flip, 1, got);
+                const auto answer = static_cast<std::uint32_t>(got);
+                if ((r.pop_flip == 2 && answer == 3) || (r.pop_flip == 3 && answer == 2)) r.kick_side = -r.kick_side;
+                if ((r.pop_flip == 4 && answer == 7) || (r.pop_flip == 7 && answer == 4)) r.bs_shuv_side = -r.bs_shuv_side;
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: mod pop: asked flip {}, the game played {} ({} ms after the stroke, {} ms after the ask).", r.pop_flip, answer, now - r.pop_started, now + (r.pop_flip == 4 || r.pop_flip == 7 ? 600 : 3500) - r.pop_until);
                 r.pop_flip = 0; // the game's own trick from here: the catch is as after any flip
                 r.leaving_until = std::min(r.leaving_until, now);
             }
@@ -2918,6 +2976,16 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return r.hold_scheme ? "Scheme hold: land a flip with the right stick part of the way left / right (primo), or with the left stick clicked (casper); "
                                "centre to leave, flick to flip out, held at the edge the pose is lost."
                              : "Scheme flick: hold the left stick's click on the board and flick the right stick.";
+    }
+    if (verb == "stroke") { // <dev> tricks stroke <flip> [strength] | side: play the stroke the mod pops with
+        if (!arguments.empty() && arguments[0] == "side")
+            return std::format("Stroke sides: kickflip {:+.0f}, backside shuvit {:+.0f}.", r.kick_side, r.bs_shuv_side);
+        std::uint32_t flip{};
+        if (arguments.empty() || !number(arguments[0], flip)) return "usage: tricks stroke <flip 0|2|3|4|7|11> [strength 0..1] | side";
+        const float strength = arguments.size() > 1 ? static_cast<float>(std::atof(arguments[1].c_str())) : 1.0f;
+        play_pop_stroke(r, flip, strength);
+        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: stroke for flip {} played (strength {:.2f}).", flip, strength);
+        return std::format("Stroke for flip {} played.", flip);
     }
     if (verb == "groundshuv") {
         // tricks groundshuv [fs|bs|on|off|ms <n>]

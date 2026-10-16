@@ -4,6 +4,7 @@
 #include "held_input.h"
 #include "Engine/Game/Input/playstation_report.h"
 #include <hidsdi.h>
+#include <algorithm>
 #include <atomic>
 #include <format>
 #include <array>
@@ -618,11 +619,38 @@ struct TricksPad {
     // game steers and leans the skater with it).
     std::atomic<std::uint64_t> left_until{};
     std::atomic<std::uint32_t> changed{}; // <dev> recorded polls the masks changed (a stock trick must see none)
+    // A right-stick stroke Tricks plays to the game (its own gesture reader then pops its own ollie or flip): up to
+    // eight steps, each rx (bits 0..15), ry (16..31) and how long it lasts in ms (32..63), from `stroke_start` on.
+    std::array<std::atomic<std::uint64_t>, 8> stroke{};
+    std::atomic<std::uint32_t> stroke_count{};
+    std::atomic<std::uint64_t> stroke_start{};
+    std::atomic<std::uint32_t> stroke_serial{};
 };
 TricksPad& tricks_pad() { static auto* value = new TricksPad; return *value; }
+// The stroke step for this moment, if one is playing (`index`: which step, from 1).
+bool tricks_stroke_at(std::uint64_t now, SHORT& rx, SHORT& ry, std::uint32_t& index) noexcept {
+    auto& t = tricks_pad();
+    const auto count = t.stroke_count.load(std::memory_order_acquire);
+    if (!count) return false;
+    std::uint64_t at = t.stroke_start.load(std::memory_order_relaxed);
+    if (now < at) return false;
+    for (std::uint32_t i = 0; i < count && i < t.stroke.size(); ++i) {
+        const auto step = t.stroke[i].load(std::memory_order_relaxed);
+        at += step >> 32;
+        if (now < at) {
+            rx = static_cast<SHORT>(step & 0xffff);
+            ry = static_cast<SHORT>((step >> 16) & 0xffff);
+            index = i + 1;
+            return true;
+        }
+    }
+    return false;
+}
 // XInput exports can forward through one another, so one poll can pass through the hook more than once: the
 // innermost pass sees the state as it is (`record`), every pass hides what the mask hides.
-void tricks_filter(XINPUT_GAMEPAD& pad, bool record) noexcept {
+// Returns which stroke step it played (0 none): the poll's packet number has to change with it, or the game takes the
+// poll for the state it already has.
+std::uint32_t tricks_filter(XINPUT_GAMEPAD& pad, bool record) noexcept {
     auto& t = tricks_pad();
     if (record) {
         std::uint64_t low{};
@@ -639,12 +667,19 @@ void tricks_filter(XINPUT_GAMEPAD& pad, bool record) noexcept {
         pad.sThumbLY = 0;
     }
     const bool held = (pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0 || pad.bLeftTrigger > 128;
-    if (now >= t.mask_until.load(std::memory_order_relaxed) && !(held && now < t.auto_until.load(std::memory_order_relaxed))) return;
-    if (record && (held || pad.sThumbRX || pad.sThumbRY)) t.changed.fetch_add(1, std::memory_order_relaxed);
-    pad.wButtons = static_cast<WORD>(pad.wButtons & ~XINPUT_GAMEPAD_LEFT_THUMB);
-    pad.sThumbRX = 0;
-    pad.sThumbRY = 0;
-    pad.bLeftTrigger = 0; // the left trigger catches a pose too: not a grab
+    if (now < t.mask_until.load(std::memory_order_relaxed) || (held && now < t.auto_until.load(std::memory_order_relaxed))) {
+        if (record && (held || pad.sThumbRX || pad.sThumbRY)) t.changed.fetch_add(1, std::memory_order_relaxed);
+        pad.wButtons = static_cast<WORD>(pad.wButtons & ~XINPUT_GAMEPAD_LEFT_THUMB);
+        pad.sThumbRX = 0;
+        pad.sThumbRY = 0;
+        pad.bLeftTrigger = 0; // the left trigger catches a pose too: not a grab
+    }
+    std::uint32_t index{};
+    if (SHORT rx{}, ry{}; tricks_stroke_at(now, rx, ry, index)) {
+        pad.sThumbRX = rx;
+        pad.sThumbRY = ry;
+    }
+    return index;
 }
 // How deep the current poll is in forwarded XInput exports, and the deepest it went.
 struct XInputNesting { int depth{}, deepest{}; };
@@ -684,7 +719,8 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
         // not change between opening the menu and its next controller poll.
         output->dwPacketNumber ^= 0x80000000u;
     } else if (result == ERROR_SUCCESS && output && user == 0) {
-        tricks_filter(output->Gamepad, innermost);
+        if (const auto step = tricks_filter(output->Gamepad, innermost))
+            output->dwPacketNumber += 0x01000000u * step + 0x00100000u * (tricks_pad().stroke_serial.load(std::memory_order_relaxed) & 0xf);
     }
     return result;
 }
@@ -728,6 +764,21 @@ extern "C" void DingoSDKOverlayTricksAutoMask() {
 }
 extern "C" std::uint32_t DingoSDKOverlayTricksMaskedPolls() {
     return dingosdk::overlay::detail::tricks_pad().changed.exchange(0, std::memory_order_relaxed);
+}
+// Play a right-stick stroke to the game from now on: `count` steps of x, y (-1..1) held for `ms` each. A count of 0
+// stops one that is playing.
+extern "C" void DingoSDKOverlayTricksStroke(const float* xy, const std::uint32_t* ms, std::uint32_t count) {
+    auto& t = dingosdk::overlay::detail::tricks_pad();
+    t.stroke_count.store(0, std::memory_order_release);
+    count = std::min<std::uint32_t>(count, static_cast<std::uint32_t>(t.stroke.size()));
+    const auto axis = [](float v) {
+        return static_cast<std::uint64_t>(static_cast<std::uint16_t>(static_cast<SHORT>(std::clamp(v, -1.f, 1.f) * 32767.f)));
+    };
+    for (std::uint32_t i = 0; i < count; ++i)
+        t.stroke[i].store(axis(xy[2 * i]) | (axis(xy[2 * i + 1]) << 16) | (static_cast<std::uint64_t>(ms[i]) << 32), std::memory_order_relaxed);
+    t.stroke_start.store(GetTickCount64(), std::memory_order_relaxed);
+    t.stroke_serial.fetch_add(1, std::memory_order_relaxed);
+    t.stroke_count.store(count, std::memory_order_release);
 }
 extern "C" void DingoSDKOverlayTricksMask() {
     dingosdk::overlay::detail::tricks_pad().mask_until.store(GetTickCount64() + 500, std::memory_order_relaxed);
