@@ -1,6 +1,22 @@
 # ReSkate Tricks: status
 
-## START HERE (2026-10-15 evening): the fix session
+## START HERE (2026-10-15 late): the next push
+7fb61eb is installed in the Skate folder but not launched. The full list is in the memory note `project_reskate_tricks.md` ("START HERE"); the plan is `C:\Users\andre\.claude\plans\peppy-baking-eclipse.md`.
+
+**Done (fe784d7, 7fb61eb):**
+- The mod's pops are a right-stick stroke played to the game's polls (`tricks stroke`). Each step must change the packet number, or the game ignores the poll.
+- The ground shuv is the game's pop shuv: 0.13-0.31 m.
+- Primo flick-outs: the exit clip's hop, then the mod's flip, turning the way the board rolls out (flick: up-left flip, up-right varial, up 360).
+- Every flick-out ends under the feet, and the feet regain the deck over 300 ms.
+
+**Open:**
+1. Hand IK (grind grab, kickflip indy).
+2. The casper flick-out legs.
+3. The first BS ground shuv of a session plays flip 5.
+4. Primo flick-outs in goofy and on the other primo side.
+5. The regression sweep.
+
+## (older) START HERE (2026-10-15 evening): the fix session
 6d78737 is installed in the Skate folder but not launched. The full list, with every measured fact, is in the memory note `project_reskate_tricks.md` ("NEXT SESSION").
 
 1. **Hand IK targets** for both the kickflip indy and the grind grab.
