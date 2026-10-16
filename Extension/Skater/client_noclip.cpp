@@ -2714,6 +2714,10 @@ void take_kinematic_spin_smoothness(float& move, float& turn) noexcept {
     k.max_move = 0;
     k.max_turn = 0;
 }
+void hand_ik_deck(float& up, float& out) noexcept {
+    up = hand_ik().deck_up.load(std::memory_order_relaxed);
+    out = hand_ik().deck_out.load(std::memory_order_relaxed);
+}
 std::string take_kinematic_spin_guard() {
     auto& k = kinematic_spin();
     const auto text = std::format("worst at {:.0f}% / {:.0f}%, held back {} moves and {} turns", k.max_move_p * 100, k.max_turn_p * 100, k.guarded_moves, k.guarded_turns);

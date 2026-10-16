@@ -176,7 +176,9 @@ struct Runtime {
     std::uint32_t flip_grab_spin_ms{650}; // out, flipped, and back into the game's grab
     float flip_grab_rise{0.35f};  // metres the board rises at the top of a flip grab (from the feet to the waist)
     float flip_grab_reach{0.25f};  // and out in front of the skater (toward the toes, the skater's side row)
-    float grab_rigid{40.0f};      // the board's drive strength through a flip grab's path
+    float grab_rigid{40.0f};
+    float flip_grab_leash{1.4f};  // the board this far from the pelvis in a flip grab: let go (it was flying off)
+    bool flip_grab_holding{};      // the board's drive strength through a flip grab's path
     float grab_side{0.11f};      // the board's edge the back hand takes, in the deck's side axis (the front hand the other)
     float grab_gain{0.6f};      // the share of the way to the board a hand is pulled each step
     float grab_crouch{0.3f};     // metres the pelvis drive is lowered toward the board in a grind grab
@@ -345,6 +347,8 @@ struct Runtime {
     std::uint64_t zone_since{}, shuv_down_at{}, shuv_side_at{};
     bool gs_rim{};           // the ground shuvit's stroke went out to the rim (the game's pop shuvit, not this)
     float gs_peak{}, gs_rim_at{0.88f};
+    std::uint64_t pop_after{};     // the stroke not before this (a ground shuv's neutral gap)
+    std::uint32_t gs_gap{300};     // ms of a neutral stick between the player's flick and the ground shuv's stroke
     float gs_lift{0.08f}; // metres the body rises for a ground shuvit's turn (the pelvis drive raised)
     float gs_jump{0.4f}, gs_speed{1.6f}; // the ground shuvit as the game's pop shuvit: its pop strength and turn speed
     bool gs_game{true}; // the ground shuvit as the game's own pop shuvit with a small pop (off: the mod turns the board)
@@ -792,6 +796,10 @@ void start_ground_shuv(Runtime &r, std::uint64_t now, bool frontside) {
         r.pop_until = now + 600;
         r.pop_wait_riding = false;
         r.pop_started = 0;
+        // The player's own flick still in the game's reading of the stick merged with the stroke (the owner's log: asked
+        // 7, the game played 13, the stroke played as the player's let go): the stick neutral a moment first.
+        r.pop_after = now + r.gs_gap;
+        r.pop_until = now + r.gs_gap + 600;
         r.pop_jump = r.gs_jump;
         r.pop_speed = r.gs_speed;
         score_trick("groundshuv", frontside ? "FS Ground Shuvit" : "Ground Shuvit");
@@ -1420,7 +1428,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 const bool posed = r.by_hold && r.freestyle != Freestyle::off;
                 const bool held_103 = (posed || exit_guard) && physics.valid && physics.state == 103;
                 // A flip grab's board follows its path closely (it lagged and swung out on the drive's own strength).
-                set_board_rigid(held_103 ? r.rigid : r.flip_grab_on ? r.grab_rigid : 0.0f);
+                set_board_rigid(held_103 ? r.rigid : r.flip_grab_on && r.flip_grab_holding ? r.grab_rigid : 0.0f);
                 // Through the way out's air too: there the game's own frame follows the board, still upside down when
                 // the flip out pops, and the skater swung over head first (owner, 2026-10-14).
                 set_freestyle_root_upright(held_103 || exit_guard ? r.rootup : 0);
@@ -1803,7 +1811,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             if (now >= r.pop_until || (physics.valid && physics.state >= 300)) {
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: primo flick-out {} gave up (physics {}).", r.pop_flip, physics.valid ? static_cast<int>(physics.state) : -1);
                 r.pop_flip = 0;
-            } else if (physics.valid && physics.state == 100 && !r.pop_started && [&] {
+            } else if (physics.valid && physics.state == 100 && !r.pop_started && now >= r.pop_after && [&] {
                            if (!r.pop_wait_riding) return true;
                            // The game reads a flick only once its graph is in the riding node: the primo's way out (a
                            // ground clip, physics 103 and 100 by turns) took every stroke played before it (run n2).
@@ -1854,6 +1862,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     r.flip_grab_on = true;
                     r.flip_grab_until = now + r.flip_grab_ms;
                     r.flip_grab_started = now;
+                    r.flip_grab_holding = true;
                     r.grab_hand_back = right;
                     // The flip is the mod's from here (the clip's board would turn it twice), played on the game's own board
                     // for its grab (the drive's target): the game's grab clip brings the hand to that board, so the hand
@@ -1885,6 +1894,20 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 // The tuck is held while the trigger is (eased out over 0.15 s when let go); the board is the game's grab
                 // once the flip has turned.
                 const bool holding = r.grab_hand_back ? right : left;
+                r.flip_grab_holding = holding;
+                // The board flown away from the rider (the owner, 2026-10-16: "can glitch out and launch you across the
+                // map"; the log had the deck 1.7 m, then 11 m from the pelvis, held to the drive's target at 40x the game's
+                // own strength): let go at once, the flip ended and the board the game's again.
+                if (in_air && holding && r.hand_ik && now - r.flip_grab_started > 80) {
+                    float deck_up{}, deck_out{};
+                    hand_ik_deck(deck_up, deck_out);
+                    if (std::hypot(deck_up, deck_out) > r.flip_grab_leash) {
+                        logging::log(logging::Level::info, logging::Channel::skater, "Tricks: flip grab let go: the board {:.2f} m up, {:.2f} m out from the pelvis at {} ms.", deck_up, deck_out, now - r.flip_grab_started);
+                        r.flip_grab_on = false;
+                        r.flip_grab_holding = false;
+                        stop_board_spin();
+                    }
+                }
                 if (in_air && holding && core) set_limb_free(core, 80, 0, 1.0f, r.grab_tuck);
                 // The hand on the board's toe edge (the back hand) or heel edge (the front) from the catch on, through
                 // the game's own hand IK: it follows the board down to the feet.
@@ -3191,6 +3214,10 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             return std::format("Ground shuvit: the game's {} (pop {:.2f}, turn speed {:.2f}).", r.gs_game ? "on" : "off", r.gs_jump, r.gs_speed);
         }
         std::uint32_t ms{};
+        if (arguments.size() == 2 && arguments[0] == "gap" && number(arguments[1], ms) && ms <= 1000) { // <dev>
+            r.gs_gap = ms;
+            return std::format("Ground shuvit: the stroke {} ms after the flick.", ms);
+        }
         if (arguments.size() == 2 && arguments[0] == "ms" && number(arguments[1], ms) && ms >= 100 && ms <= 2000) {
             r.gs_ms = ms;
             return std::format("Ground shuvits take {} ms.", ms);

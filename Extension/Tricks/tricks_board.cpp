@@ -75,7 +75,7 @@ float smooth(float x) noexcept {
 // boneless uses 1000 and its slappy 30. A posed board on the ground at speed is pushed past the limit of 1 (it rocks,
 // and a primo's is knocked flat): while `rigid` is above 0 the three are held at it, and put back to 1 after.
 constexpr std::uintptr_t drive_strengths[]{0x7a0, 0x7b0, 0x794};
-std::atomic<float> rigid{}, rigid_seen{-1.0f};
+std::atomic<float> rigid{}, rigid_seen{-1.0f}, rigid_before{1.0f};
 std::atomic<bool> rigid_restore{};
 std::atomic<std::uint32_t> rigid_writes{};
 // <dev> How far the board's target frame (the animated pose on the skater's root) leans while a pose is held: the
@@ -170,7 +170,9 @@ void hold_rigid(std::uintptr_t board) noexcept {
         if (!(now[i] >= 0.0f && now[i] <= 2000.0f)) return;
     }
     if (rigid_seen.load(std::memory_order_relaxed) < 0) rigid_seen.store(now[0], std::memory_order_relaxed);
-    for (const auto at : drive_strengths) *reinterpret_cast<volatile float *>(board + at) = restore ? 1.0f : strength;
+    // Put back as the game had them when the hold began (a flip's are near 0: 1 there pulled the board in hard).
+    if (!restore && !rigid_restore.load(std::memory_order_relaxed)) rigid_before.store(now[0], std::memory_order_relaxed);
+    for (const auto at : drive_strengths) *reinterpret_cast<volatile float *>(board + at) = restore ? rigid_before.load(std::memory_order_relaxed) : strength;
     if (!restore) {
         rigid_restore.store(true, std::memory_order_relaxed);
         rigid_writes.fetch_add(1, std::memory_order_relaxed);

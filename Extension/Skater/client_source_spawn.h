@@ -129,6 +129,8 @@ std::string hand_ik_places();
 void take_kinematic_spin_smoothness(float& move, float& turn) noexcept;
 // <dev> Where the worst steps were and how many steps the no-jump guard held back, since the last call.
 std::string take_kinematic_spin_guard();
+// The deck's centre from the pelvis (height, level distance) at the last measured physics step (hand IK held).
+void hand_ik_deck(float& up, float& out) noexcept;
 // <dev> Write the IK target into the game's context (the board's clips never read it: off by default).
 void set_hand_ik_write(bool on) noexcept;
 // <dev> The hand IK context of this skater entity, as one line.
