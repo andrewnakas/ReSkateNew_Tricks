@@ -7,6 +7,7 @@
 // (Layout and handle rules as found for the ReSkate Trainer.)
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace dingosdk::tricks {
 enum class State : std::uint8_t {
@@ -56,6 +57,11 @@ std::uint32_t held_asked(State state) noexcept;
 // key the scripts pass as TheKey; it is taken from the game's own write of Bool.Intent.EnableCaspers (its
 // ExperimentalSettings script, on every mount), so the key is the skater's whose settings ran last.
 bool start_setter_watch(std::uintptr_t base) noexcept;
+// The skater the key belongs to. With no mount after a level change or a respawn, the key comes from the skater's
+// own state writes (checked through the game's key -> states accessor); a key that no longer leads to a new
+// skater's states is dropped.
+void set_key_skater(std::uintptr_t base, std::uintptr_t entity) noexcept;
+std::string key_recapture_note();
 // Once the key is known: finds the other states by name through the game's own asset lookup, in the asset domain of
 // the EnableCaspers object the game passed (game thread). Returns how many it found; below 0: not possible yet.
 int resolve_state_objects(std::uintptr_t base) noexcept;

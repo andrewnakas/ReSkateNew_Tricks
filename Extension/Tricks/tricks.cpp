@@ -996,6 +996,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             r.leaving = false;
             release_all();
             forget_skater_key();
+            set_key_skater(base, 0);
         }
         return;
     }
@@ -1008,6 +1009,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             const auto bodies = r.entity ? client_source::detail::debug_noclip_bodies(base, client, r.entity) : decltype(client_source::detail::debug_noclip_bodies(base, client, r.entity)){};
             set_board_context(r.entity ? bodies.context : 0);
             r.rig = r.entity ? bodies.rig_wrapper : 0;
+            set_key_skater(base, r.entity);
         } catch (...) {
             r.entity = 0;
             r.rig = 0;
@@ -2607,7 +2609,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return std::format("Tricks: states {}, mode {}, setters {}, key {}, holds {}, skater {}, freestyle {}, exit flip {}, writes {}. "
                            "Store value/asked (wants, trick, flip, caspers, groundtrick):{}. Game reads:{}",
                            state_objects_known() ? "found" : (searching.load() ? "searching" : "not found"), r.mode_hold ? "hold" : "set",
-                           r.setters ? "watched" : "off", skater_key_known() ? std::format("{:x}", skater_key()) : std::string("none"),
+                           r.setters ? "watched" : "off", (skater_key_known() ? std::format("{:x}", skater_key()) : std::string("none")) + " (" + key_recapture_note() + ")",
                            r.hooks ? "hooked" : "off", r.entity ? "yes" : "no", freestyle_name(r.freestyle), r.exit_flip, r.writes, live, game);
     }
     if (verb == "freestyle") {

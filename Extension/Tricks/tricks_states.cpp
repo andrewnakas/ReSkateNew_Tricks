@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string_view>
 #include <array>
+#include <format>
 #include <string>
 
 namespace dingosdk::tricks {
@@ -117,6 +118,21 @@ std::uintptr_t states_block(std::uintptr_t base, std::uintptr_t entity) noexcept
     }
     return 0;
 }
+std::uintptr_t skater_animatable(std::uintptr_t base, std::uintptr_t entity) noexcept {
+    std::uintptr_t collection{}, owner{};
+    std::uint8_t count{};
+    if (!entity || !peek(entity + component_collection, collection) || !pointer(collection) || !peek(collection, owner) || owner != entity ||
+        !peek(collection + collection_count, count) || count > 128)
+        return 0;
+    for (unsigned i = 0; i < count; ++i) {
+        std::uintptr_t component{}, type{}, animatable{};
+        if (!peek(collection + collection_first + i * collection_step, component) || !pointer(component) || !peek(component, type) ||
+            type != base + ant_driven_vtable)
+            continue;
+        return peek(component + driven_animatable, animatable) && pointer(animatable) ? animatable : 0;
+    }
+    return 0;
+}
 
 // The game's lookup of a state's value: (state object, context with the pages) -> where the value
 // is, 0 when the context has none. These are its first bytes.
@@ -187,6 +203,58 @@ std::atomic<std::intptr_t> reference_delta{};
 std::atomic<bool> delta_known{};
 std::atomic<bool> resolved{}; // every state came from the game's asset lookup: the memory search leaves them alone
 
+// The key again after a level change or a respawn, when no mount writes EnableCaspers: any game write whose key
+// the game's own key -> state accessor (game_state__accessor_for_key, which the setters call first) maps to the
+// tracked skater's state holder (its animatable + 0xe8). Keys that map elsewhere (other skaters) are remembered
+// and passed over.
+constexpr std::uintptr_t key_accessor = 0x108bf70;
+using KeyAccessor = std::uintptr_t (*)(const std::uint64_t *key, const std::uintptr_t *state, std::uintptr_t *out);
+std::atomic<std::uintptr_t> key_base{}, key_entity{};
+std::atomic<bool> key_accessor_checked{}, key_accessor_ok{};
+std::atomic<std::uint32_t> key_tries{}, key_recaptures{}, key_dropped{};
+std::array<std::atomic<std::uint64_t>, 8> key_refused{};
+std::atomic<std::uint32_t> key_refused_next{};
+
+std::uintptr_t skater_animatable(std::uintptr_t base, std::uintptr_t entity) noexcept;
+// The setter calls the accessor in its first bytes (the build's own code, checked once).
+bool accessor_called_by_setter(std::uintptr_t base) noexcept {
+    if (key_accessor_checked.exchange(true)) return key_accessor_ok.load(std::memory_order_relaxed);
+    bool ok = false;
+    __try {
+        const auto *code = reinterpret_cast<const unsigned char *>(base + set_bool_native);
+        for (int i = 0; i + 5 <= 0x80 && !ok; ++i)
+            if (code[i] == 0xe8) {
+                std::int32_t rel{};
+                std::memcpy(&rel, code + i + 1, 4);
+                ok = base + set_bool_native + i + 5 + rel == base + key_accessor;
+            }
+    } __except (1) { ok = false; }
+    key_accessor_ok.store(ok, std::memory_order_relaxed);
+    return ok;
+}
+void try_key(std::uint64_t k, const std::uintptr_t *state) noexcept {
+    const auto base = key_base.load(std::memory_order_relaxed);
+    const auto entity = key_entity.load(std::memory_order_relaxed);
+    if (!base || !entity || !k || !accessor_called_by_setter(base)) return;
+    for (const auto &refused : key_refused)
+        if (refused.load(std::memory_order_relaxed) == k) return;
+    const auto animatable = skater_animatable(base, entity);
+    std::uintptr_t holder{};
+    if (!animatable || !peek(animatable + 0xe8, holder) || !holder) return;
+    key_tries.fetch_add(1, std::memory_order_relaxed);
+    std::uintptr_t out{};
+    bool found = false;
+    __try {
+        found = reinterpret_cast<KeyAccessor>(base + key_accessor)(&k, state, &out) != 0;
+    } __except (1) { found = false; }
+    if (found && out == holder) {
+        captured_key.store(k, std::memory_order_relaxed);
+        key_known.store(true, std::memory_order_release);
+        key_recaptures.fetch_add(1, std::memory_order_relaxed);
+    } else if (found)
+        key_refused[key_refused_next.fetch_add(1, std::memory_order_relaxed) % key_refused.size()].store(k, std::memory_order_relaxed);
+}
+
 void set_bool_hook(const std::uint64_t *key, const std::uintptr_t *state, std::uint8_t value) {
     auto &caspers = objects[static_cast<std::size_t>(State::enable_caspers)];
     std::uintptr_t reference{};
@@ -205,6 +273,7 @@ void set_bool_hook(const std::uint64_t *key, const std::uintptr_t *state, std::u
             key_known.store(true, std::memory_order_release);
             break;
         }
+        if (!key_known.load(std::memory_order_acquire) && delta_known.load(std::memory_order_relaxed)) try_key(k, state);
     }
     const auto original = set_bool_original.load(std::memory_order_acquire);
     if (original) original(key, state, value);
@@ -472,6 +541,31 @@ std::uint64_t skater_key() noexcept { return captured_key.load(std::memory_order
 void forget_skater_key() noexcept {
     key_known.store(false, std::memory_order_relaxed);
     resolved.store(false, std::memory_order_relaxed);
+}
+void set_key_skater(std::uintptr_t base, std::uintptr_t entity) noexcept {
+    key_base.store(base, std::memory_order_relaxed);
+    if (key_entity.exchange(entity, std::memory_order_relaxed) == entity) return;
+    for (auto &refused : key_refused) refused.store(0, std::memory_order_relaxed);
+    // A new skater (a respawn can build one): the key it had must still lead to this skater's states, or it goes and
+    // the skater's own writes give the new one.
+    if (!entity || !key_known.load(std::memory_order_acquire) || !accessor_called_by_setter(base)) return;
+    const std::uintptr_t reference = reference_of(State::enable_caspers);
+    const auto animatable = skater_animatable(base, entity);
+    std::uintptr_t holder{}, out{};
+    if (!reference || !animatable || !peek(animatable + 0xe8, holder) || !holder) return;
+    const std::uint64_t k = captured_key.load(std::memory_order_relaxed);
+    bool found = false;
+    __try {
+        found = reinterpret_cast<KeyAccessor>(base + key_accessor)(&k, &reference, &out) != 0;
+    } __except (1) { found = false; }
+    if (!found || out != holder) {
+        key_known.store(false, std::memory_order_relaxed);
+        key_dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+std::string key_recapture_note() {
+    return std::format("key from the skater's writes {} times ({} keys tried, {} dropped for a new skater, accessor {})", key_recaptures.load(), key_tries.load(), key_dropped.load(),
+                       key_accessor_checked.load() ? (key_accessor_ok.load() ? "found" : "not found") : "not checked");
 }
 bool write_state(std::uintptr_t base, State state, std::uint32_t value) noexcept {
     if (!setters_ready.load(std::memory_order_relaxed) || !skater_key_known()) return false;
