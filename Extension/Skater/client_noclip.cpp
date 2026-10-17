@@ -1493,6 +1493,96 @@ void tricks_board_carry(std::uintptr_t core) noexcept {
         }
     } catch (...) {}
 }
+// The fandango (the owner, 2026-10-16: "you crooked grind with your back foot off the board"): the back foot's drives
+// to the deck (their points behind the deck's middle) moved by `up` / `back` / `side` metres in the deck's frame, eased
+// in and out over 150 ms, the back leg's motors eased with set_limb_free so the leg goes with it. (The game's push, held
+// at riding, only kicked the foot down and straight back on.)
+struct FootLift {
+    std::atomic<std::uintptr_t> core{};
+    std::atomic<ULONGLONG> until{};
+    std::atomic<float> up{0.2f}, back{0.25f}, side{};
+    std::atomic<bool> move{};                                // the drives moved (else only the feet measured)
+    std::atomic<std::uint32_t> writes{};
+    std::array<std::atomic<float>, 3> back_at{}, front_at{}; // the left (23) and right (27) toes in the deck's frame (side, up, forward)
+    // Physics thread only.
+    RiderDrives rows;
+    float weight{};
+    float last[3]{};
+    std::array<std::array<float, 3>, 12> saved{}, wrote{};
+    std::array<bool, 12> held{};
+};
+FootLift& foot_lift() { static auto* value = new FootLift; return *value; }
+void tricks_foot_lift(std::uintptr_t core) noexcept {
+    auto& f = foot_lift();
+    if (!core || core != f.core.load(std::memory_order_relaxed)) return;
+    const bool wanted = GetTickCount64() < f.until.load(std::memory_order_relaxed);
+    if (!wanted && f.weight <= 0) return;
+    std::uintptr_t a{}, b{}, c{}, w{};
+    if (!peek_at(core + 0x430, a) || !peek_at(a + 0x718, b) || !peek_at(b + 0x80, c) || !peek_at(c + 0x28, w) || !w) return;
+    if (w != f.rows.w) {
+        f.held.fill(false);
+        f.rows.w = w;
+        f.rows.deck = -1;
+        f.rows.count = 0;
+    }
+    if (f.rows.deck < 0 && !find_rider_rows(f.rows)) return;
+    std::uintptr_t records{};
+    if (!peek_at(w + 0xe68, records) || !records) return;
+    const float dt = step_seconds(core);
+    f.weight = std::clamp(f.weight + (wanted ? dt : -dt) / 0.15f, 0.0f, 1.0f);
+    if (wanted) {
+        f.last[0] = std::clamp(f.side.load(std::memory_order_relaxed), -0.5f, 0.5f);
+        f.last[1] = std::clamp(f.up.load(std::memory_order_relaxed), -0.2f, 0.6f);
+        f.last[2] = std::clamp(f.back.load(std::memory_order_relaxed), -0.3f, 0.6f);
+    }
+    const float e = f.move.load(std::memory_order_relaxed) ? carry_smooth(f.weight) : 0.0f;
+    for (int k = 0; k < f.rows.count; ++k) {
+        const auto at = records + static_cast<std::uintptr_t>(f.rows.rows[static_cast<std::size_t>(k)]) * 0xc0;
+        std::array<float, 3> point{};
+        if (!peek_at(at + 0x30, point)) continue;
+        auto& saved = f.saved[static_cast<std::size_t>(k)];
+        auto& wrote = f.wrote[static_cast<std::size_t>(k)];
+        auto& held = f.held[static_cast<std::size_t>(k)];
+        if (!held || point != wrote) saved = point; // the game's own (first, or set again by the game)
+        if (saved[1] > 0.5f || saved[2] > -0.02f) continue; // the pelvis's rows and the front foot's
+        if (e <= 0) {
+            if (held && point == wrote) { (void)copy_to(at + 0x30, saved.data(), sizeof(saved)); (void)copy_to(at + 0x88, saved.data(), sizeof(saved)); }
+            held = false;
+            continue;
+        }
+        const std::array<float, 3> moved{saved[0] + f.last[0] * e, saved[1] + f.last[1] * e, saved[2] - f.last[2] * e};
+        if (copy_to(at + 0x30, moved.data(), sizeof(moved)) && copy_to(at + 0x88, moved.data(), sizeof(moved))) {
+            (void)peek_at(at + 0x30, wrote);
+            held = true;
+            f.writes.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    // Where the feet are on the deck (dev: the proof the back foot is off it).
+    SourceLastError error;
+    auto& state = source_state();
+    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
+    SourceBusyScope scope{state.busy};
+    try {
+        auto& t = board_turn_back();
+        const auto bodies = debug_noclip_bodies(state.trial.base, t.client.load(std::memory_order_relaxed), t.entity.load(std::memory_order_relaxed));
+        if (bodies.core != core || bodies.parts.size() < 32) return;
+        SourceReader reader;
+        const auto deck = bodies.parts[8];
+        const auto right = reader.value<std::array<float, 4>>(deck, 0x20), up = reader.value<std::array<float, 4>>(deck, 0x30),
+                   forward = reader.value<std::array<float, 4>>(deck, 0x40);
+        const auto centre = reader.value<std::array<float, 3>>(deck, 0x50);
+        const auto f0 = reader.value<std::array<float, 3>>(bodies.parts[23], 0x50), f1 = reader.value<std::array<float, 3>>(bodies.parts[27], 0x50);
+        reader.verify();
+        const auto put = [&](const std::array<float, 3>& q, std::array<std::atomic<float>, 3>& out) {
+            const float d[3]{q[0] - centre[0], q[1] - centre[1], q[2] - centre[2]};
+            out[0].store(d[0] * right[0] + d[1] * right[1] + d[2] * right[2], std::memory_order_relaxed);
+            out[1].store(d[0] * up[0] + d[1] * up[1] + d[2] * up[2], std::memory_order_relaxed);
+            out[2].store(d[0] * forward[0] + d[1] * forward[1] + d[2] * forward[2], std::memory_order_relaxed);
+        };
+        put(f0, f.back_at);
+        put(f1, f.front_at);
+    } catch (...) {}
+}
 // The rider's own joints (measured 2026-10-15 with `tricks drives`): the deck's solver world holds, besides the rider-to-
 // deck drives, a joint row for each rider body to its parent (child A, parent B; record +0x00 10000 1000 10000 1000,
 // then the joint's motor strengths at +0x10: hip 90, knee 70, ankle 40, spine 80/150, clavicle 100, upper arm 80,
@@ -2334,6 +2424,7 @@ void noclip_physics_update(std::uintptr_t core) {
     tricks_kinematic_spin(core);
     tricks_board_carry(core);
     tricks_limb_free(core);
+    tricks_foot_lift(core);
     tricks_hand_pull(core);
     tricks_hand_ik(core);
     tricks_drive_dump(core);
@@ -2667,6 +2758,23 @@ void set_limb_free(std::uintptr_t core, std::uint32_t milliseconds, int mask, fl
     f.until.store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_relaxed);
 }
 std::uint32_t take_limb_free_writes() noexcept { return limb_free().writes.exchange(0, std::memory_order_relaxed); }
+void set_foot_lift(std::uintptr_t core, std::uint32_t milliseconds, float up, float back, float side, bool move) noexcept {
+    auto& f = foot_lift();
+    f.move.store(move, std::memory_order_relaxed);
+    f.core.store(core, std::memory_order_relaxed);
+    f.up.store(up, std::memory_order_relaxed);
+    f.back.store(back, std::memory_order_relaxed);
+    f.side.store(side, std::memory_order_relaxed);
+    f.until.store(milliseconds ? GetTickCount64() + milliseconds : 0, std::memory_order_relaxed);
+}
+std::uint32_t take_foot_lift(float* back_foot, float* front_foot) noexcept {
+    auto& f = foot_lift();
+    for (std::size_t i = 0; i < 3; ++i) {
+        back_foot[i] = f.back_at[i].load(std::memory_order_relaxed);
+        front_foot[i] = f.front_at[i].load(std::memory_order_relaxed);
+    }
+    return f.writes.exchange(0, std::memory_order_relaxed);
+}
 void set_pull_moves_place(bool on) noexcept { pull_moves_place().store(on, std::memory_order_relaxed); }
 void set_kinematic_spin_with_pelvis(bool on) noexcept { kinematic_spin().with_pelvis.store(on, std::memory_order_relaxed); }
 void request_drive_dump(std::uintptr_t core) noexcept { drive_dump_core.store(core, std::memory_order_relaxed); }

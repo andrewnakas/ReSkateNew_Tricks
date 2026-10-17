@@ -85,6 +85,20 @@ void request_drive_dump(std::uintptr_t core) noexcept;
 // The rider's limbs let go of the clip's pose (mask 1 back arm, 2 front arm, 4 back leg, 8 front leg; motors at `scale`)
 // and the pelvis drive lowered by `drop` metres, for `milliseconds` (renewed by calling again), eased in and out.
 void set_limb_free(std::uintptr_t core, std::uint32_t milliseconds, int mask, float scale, float drop) noexcept;
+// The fandango: the back foot's drives to the deck moved up / back / out (metres, the deck's frame) for this long (`move`
+// false: the feet only measured).
+void set_foot_lift(std::uintptr_t core, std::uint32_t milliseconds, float up, float back, float side, bool move) noexcept;
+// The left (body 23) and right (27) toes in the deck's frame (side, up, forward) as last measured; the drive writes since.
+std::uint32_t take_foot_lift(float* back_foot, float* front_foot) noexcept;
+// The fandango's leg on the drawn pose: the back leg (-1: the foot nearer the back truck, 0 right, 1 left) bent so its foot
+// is `up` m off the deck and `back` m toward the tail, for this long. Installs the animation hook the first time (the
+// engine thread); false with `detail` when it cannot.
+bool set_leg_lift(std::uintptr_t base, std::uintptr_t core, std::uint32_t milliseconds, float up, float back, float side, int leg, std::string& detail) noexcept;
+std::string take_leg_lift();
+// The pre-grab's hand on the drawn pose: the right (0) or left (1) hand taken to the nose (`end` +1, the front truck's end)
+// or tail (-1), `over` m past the truck and `up` m over its joint, for this long. Same hook as the leg lift.
+bool set_hand_reach(std::uintptr_t base, std::uintptr_t core, std::uint32_t milliseconds, int hand, float end, float over, float up, std::string& detail) noexcept;
+std::string take_hand_reach();
 std::uint32_t take_limb_free_writes() noexcept;
 void set_kinematic_spin_with_pelvis(bool on) noexcept;
 void set_pull_moves_place(bool on) noexcept;

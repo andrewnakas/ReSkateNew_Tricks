@@ -10,8 +10,8 @@
 #include <string_view>
 
 namespace dingosdk::tricks {
-enum class Family : std::uint8_t { poses, flickouts, ground, nocomply, air, flickit };
-inline constexpr std::size_t family_count = 6;
+enum class Family : std::uint8_t { poses, flickouts, ground, nocomply, air, flickit, pregrab };
+inline constexpr std::size_t family_count = 7;
 struct FamilyInfo {
     const char *id;
     const char *name;
@@ -24,6 +24,7 @@ inline constexpr FamilyInfo family_catalog[family_count]{
     {"nocomply", "No comply and boneless flips", "A flick after a no comply, boneless or footplant flips the board in its air"},
     {"air", "In-air extras", "A tap of the left stick's click in the air turns the board once more"},
     {"flickit", "Flick-it flips", "New flip tricks popped from riding with their own flick"},
+    {"pregrab", "Pre-grabs", "The nose or tail held while riding, popped with the hand on or thrown in a flip"},
 };
 
 struct TrickInfo {
@@ -55,6 +56,9 @@ inline constexpr TrickInfo trick_catalog[]{
     {"grindgrab", Family::air, "Grind Grab", "Press a trigger while grinding: RT indy, LT melon, both a double grab, on any grind", 200},
     {"fandango", Family::air, "Fandango", "Hold A in a crooked grind: the back foot comes off the board", 300},
     {"dolphin", Family::flickit, "Dolphin Flip", "Flick down, up and straight back down: a forward varial (one front flip, half a turn)", 500},
+    {"pregrab", Family::pregrab, "Nose / Tail Grab", "Riding: a trigger with the left stick up grabs the nose, down the tail (RT the right hand, LT the left)", 0},
+    {"pregrab_ollie", Family::pregrab, "Nose / Tail Grab Ollie", "From a pre-grab, flick an ollie or nollie: a small pop with the hand still on, into the air grab", 250},
+    {"fingerflip", Family::pregrab, "Fingerflip", "From a pre-grab, flick a kickflip, heelflip or shuvit: the hand throws the board", 400},
     {"dragon", Family::flickit, "Dragon Flip", "Flick down, up and back down to a lower diagonal: a forward 360 (one front flip, a full turn)", 650},
 };
 inline constexpr std::size_t trick_count = std::size(trick_catalog);
@@ -90,6 +94,9 @@ inline constexpr SettingInfo setting_catalog[]{
     {"groundshuv_hop", Family::ground, "Ground shuvit lift", "How far the board comes off the ground in the middle of the turn", 0, 0.2f, 0.01f, "%.2f m"},
     {"nc_spin_ms", Family::nocomply, "No comply flip time", "How long the board takes to flip in a no comply's air", 200, 800, 10, "%.0f ms"},
     {"air_spin_ms", Family::air, "Extra flip time", "How long an in-air extra takes", 150, 800, 10, "%.0f ms"},
+    {"pregrab_pop", Family::pregrab, "Pre-grab pop", "How big the ollie from a pre-grab is (0 the smallest)", 0, 1, 0.05f, "%.2f"},
+    {"pregrab_over", Family::pregrab, "Hand past the truck", "Where the hand holds the nose or tail, past the truck", 0, 0.3f, 0.01f, "%.2f m"},
+    {"fingerflip_ms", Family::pregrab, "Fingerflip time", "How long the hand's throw takes to turn the board", 250, 900, 10, "%.0f ms"},
     {"flickit_spin_ms", Family::flickit, "Flick-it flip time", "How long a dolphin, dragon or big spin takes to turn the board", 250, 900, 10, "%.0f ms"},
 };
 inline constexpr std::size_t setting_count = std::size(setting_catalog);

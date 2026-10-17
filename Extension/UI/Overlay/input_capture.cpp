@@ -618,6 +618,10 @@ struct TricksPad {
     // The left stick hidden too (a held pose: the thumb holding the click down cannot keep the stick still, and the
     // game steers and leans the skater with it).
     std::atomic<std::uint64_t> left_until{};
+    // The right stick alone (a pre-grab: the trigger holding the board is the game's, the flick is the mod's).
+    std::atomic<std::uint64_t> right_until{};
+    // Both triggers (a pre-grab's pop: the game's ground grab held by the trigger never pops).
+    std::atomic<std::uint64_t> triggers_until{};
     std::atomic<std::uint32_t> changed{}; // <dev> recorded polls the masks changed (a stock trick must see none)
     // A right-stick stroke Tricks plays to the game (its own gesture reader then pops its own ollie or flip): up to
     // eight steps, each rx (bits 0..15), ry (16..31) and how long it lasts in ms (32..63), from `stroke_start` on.
@@ -665,6 +669,16 @@ std::uint32_t tricks_filter(XINPUT_GAMEPAD& pad, bool record) noexcept {
         if (record && (pad.sThumbLX || pad.sThumbLY)) t.changed.fetch_add(1, std::memory_order_relaxed);
         pad.sThumbLX = 0;
         pad.sThumbLY = 0;
+    }
+    if (now < t.right_until.load(std::memory_order_relaxed)) {
+        if (record && (pad.sThumbRX || pad.sThumbRY)) t.changed.fetch_add(1, std::memory_order_relaxed);
+        pad.sThumbRX = 0;
+        pad.sThumbRY = 0;
+    }
+    if (now < t.triggers_until.load(std::memory_order_relaxed)) {
+        if (record && (pad.bLeftTrigger || pad.bRightTrigger)) t.changed.fetch_add(1, std::memory_order_relaxed);
+        pad.bLeftTrigger = 0;
+        pad.bRightTrigger = 0;
     }
     const bool held = (pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0 || pad.bLeftTrigger > 128;
     if (now < t.mask_until.load(std::memory_order_relaxed) || (held && now < t.auto_until.load(std::memory_order_relaxed))) {
@@ -758,6 +772,14 @@ extern "C" void DingoSDKOverlayTricksPad(void* gamepad) {
 // Hide the right stick and the left stick's click from the game for the next half second.
 extern "C" void DingoSDKOverlayTricksMaskLeft() {
     dingosdk::overlay::detail::tricks_pad().left_until.store(GetTickCount64() + 300, std::memory_order_relaxed);
+}
+// Hide the right stick alone from the game for the next 300 ms.
+extern "C" void DingoSDKOverlayTricksMaskRight() {
+    dingosdk::overlay::detail::tricks_pad().right_until.store(GetTickCount64() + 300, std::memory_order_relaxed);
+}
+// Hide both triggers from the game for the next 150 ms.
+extern "C" void DingoSDKOverlayTricksMaskTriggers() {
+    dingosdk::overlay::detail::tricks_pad().triggers_until.store(GetTickCount64() + 150, std::memory_order_relaxed);
 }
 extern "C" void DingoSDKOverlayTricksAutoMask() {
     dingosdk::overlay::detail::tricks_pad().auto_until.store(GetTickCount64() + 300, std::memory_order_relaxed);

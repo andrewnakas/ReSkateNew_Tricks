@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -37,6 +38,8 @@ struct SkeletonMesh {
     std::vector<SkeletonVertex> vertices;
     std::vector<std::uint8_t> parts;      // each vertex's body: its heaviest bone's own or nearest ancestor's joint
     std::vector<std::uint32_t> triangles; // vertex indices, three a triangle
+    std::vector<std::string> names;       // the render skeleton's bones (the drawn pose's joints by index)
+    std::vector<int> parents;             // each bone's, before it; -1 for the root
 };
 // Binds a mesh skinned on `skeleton`. Throws when the skeleton lacks a body's joint, or a vertex
 // rides on a bone no body moves (the root, the board) or does not fit it.

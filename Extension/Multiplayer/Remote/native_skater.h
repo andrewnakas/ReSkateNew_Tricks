@@ -39,6 +39,8 @@ void set_entity_destroyed_listener(EntityDestroyed listener) noexcept;
 // install_entity_hooks. Runs on the thread that evaluates animation.
 using AnimationEvaluated = void (*)(std::uintptr_t component) noexcept;
 void set_animation_evaluated_listener(AnimationEvaluated listener) noexcept;
+// A second listener, called after the first: edits the local pose just evaluated (ReSkate Tricks' leg poses).
+void set_animation_pose_editor(AnimationEvaluated editor) noexcept;
 // Called after a skeleton's pose is handed to the renderer, with
 // its animation interface (animation holder + 0xc0), on the calling thread.
 using RenderPosePublished = void (*)(std::uintptr_t animation_interface) noexcept;

@@ -75,6 +75,8 @@ SkeletonMesh bind_skeleton(const frostbite::Skeleton& skeleton, const frostbite:
     const auto body_of = bodies_of(skeleton);
     SkeletonMesh result;
     result.bone_count = skeleton.names.size();
+    result.names = skeleton.names;
+    result.parents = skeleton.parents;
     for (const auto& source : mesh.vertices) {
         // The heaviest few bones, scaled back to 1.
         std::array<std::size_t, 8> order{0, 1, 2, 3, 4, 5, 6, 7};

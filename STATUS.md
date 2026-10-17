@@ -1,5 +1,35 @@
 # ReSkate Tricks: status
 
+## START HERE (2026-10-17 ~17:30): pre-grab (nose / tail) built; the hand on the board does not draw yet
+Plan: `C:\Users\andre\.claude\plans\wobbly-painting-sunset.md`. Committed locally, not installed (run.ps1 restores the old files after each run).
+
+**Controls.** Riding:
+- A trigger with the left stick up grabs the nose; down grabs the tail. Up means the end ahead.
+- RT uses the right hand, LT the left.
+- The trigger alone is still the game's ground grab.
+- From the pre-grab, an ollie or nollie flick gives a small pop with the hand on. A kickflip, heelflip or shuvit flick gives a hand throw.
+
+**Proven headlessly (flat rig, runs pq/pr/pj/pk):**
+- The pre-grab starts with RT and with LT, and ends when the trigger is let go.
+- Nose/tail grab ollie:
+  - The game pops its own ollie through the stroke: 500 ms of air at pop 0 (stock is about 800).
+  - It needs `pregrab gap 400`, the trigger hidden from the game first; at 150 it never popped. 400 is now the default.
+  - In the air, `Enum.GS.DetailedGrabType` is written as 21 / 11. The game then names the trick in its own line ("FS Nose Grab", "FS Tail Grab Ollie").
+  - Holding the trigger lands back in the pre-grab.
+- Fingerflip, the mod's throw: "Nose Finger Heelflip" lands; largest step 0.05 m / 23 deg. The game's own fingerflip types are still -1 (not read yet): `tricks pregrab ff kick <type>`.
+- The nollie stroke (up then down) played game flip 32. The flip grab is now skipped during a pre-grab; it had turned that nollie into a "Flip Indy".
+
+**Not working: the drawn hand.**
+- The pose editor (`set_hand_reach`, client_first_person.cpp) resolves the arm by name: RightArm/ForeArm/Hand 47/48/49, 5 joints up to Hips.
+- It solves the IK to the goal and writes about 60 edits/s, but nothing changes on screen. With the goal 1.2 m over the deck (pkup) the still matches the reach-off one (pkoff).
+- So the evaluated pose the hook edits is not what gets drawn. The fandango's leg lift (same hook) almost certainly does not draw either.
+- Next: edit at the renderer's hand-off instead (`set_render_pose_listener`; Hall of Meat reads the renderer's skinning matrices). Or find where the pose is copied after `original_animation`.
+
+**Rig:**
+- Mount: `trainer marker go 1;wait 6;tricks pad b:150 n:1200 b:150 n:1500 y:200 n:3000;wait 8` (the owner: B, B/start out of the menu, then Y). It still fails about 1 in 4.
+- PowerShell `-replace` is case-insensitive: it ate `shot-`.
+- `pregrab_pop` is a saved setting (tricks.json).
+
 ## START HERE (2026-10-16 ~03:00): the push on the open items, done headlessly; the owner's playtest is next
 The plan was `C:\Users\andre\.claude\plans\misty-wondering-whistle.md`. The code is committed locally and installed, not launched.
 

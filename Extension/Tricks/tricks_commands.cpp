@@ -45,6 +45,7 @@ void register_tricks_commands(Commands &registry) {
         {"watchair", "Dev: log the body and board heading after every air", "[off]"},
         {"handik", "The hand on the board through the game's own hand grab IK (grind grab, flip grab)", "on|off | dump | write 0|1 | backright 0|1 | up <m> | catch <share> | tune <speed> <p5> <flag6> | hold <ms> <right 0|1> <x> <y> <z>"},
         {"grindgrab","Grab grinds: a trigger while grinding (RT indy, LT melon, both double)", "on|off"},
+        {"pregrab", "Pre-grabs: nose or tail held while riding (trigger + left stick up/down), popped or thrown from it", "on|off | reach 0|1 | place <over> <up> | pop <0..1> | gap <ms> | grab <nose> <tail> | write 0|1 | ff <kind> <type> | status"},
         {"fandango", "The fandango: A held in a crooked grind takes the back foot off", "on|off | any 0|1 | north 0|1"},
         {"antistyle", "The anti casper as a nose manual with the board turned over, or the mirrored casper", "nose|mirror | pitch <degrees>"},
         {"primopop", "A primo's flick-out as the game's own ollie and flip (or through the casper)", "on|off"},
