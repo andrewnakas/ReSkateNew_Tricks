@@ -224,7 +224,11 @@ struct Runtime {
     std::uint32_t pregrab_switch_ms{300}; // from an indy / melon, the right stick held up or down this long takes the nose / tail
     std::uint64_t pregrab_trigger_since{};
     float pregrab_rear{0.0f};            // 1: the rear hand's nose / tail grab does the tricks too (a saved setting)
-    bool pregrab_rear_said{};              // the right stick back in the middle since the entry: flicks are read only then
+    bool pregrab_rear_said{};
+    // The owner, 2026-10-18: the end held stays the end held until the trigger is let go (the stick pushed the other way
+    // does not change it, and a pre-grab dropped with the trigger still down comes back on that end).
+    float pregrab_keep_end{};
+    int pregrab_keep_hand{-1};              // the right stick back in the middle since the entry: flicks are read only then
     bool pregrab_write_grab{true};       // the game's air grab written as the nose / tail grab type
     int pregrab_nose_grab{21}, pregrab_tail_grab{11}; // Enum.DetailedGrabType: Nose, Tail
     float pregrab_jump{-1};              // <dev> Float.Intent.JumpStrength held through the pop (-1 off)
@@ -2063,6 +2067,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             const auto end_name = [&] { return std::abs(r.pregrab_end) < 0.5f ? (r.pregrab_hand ? "Melon" : "Indy") : r.pregrab_end >= 0 ? "Nose" : "Tail"; };
             const auto stop = [&](const char *why) {
                 if (r.pregrab_stage == 1) ground_grab(false);
+                r.pregrab_keep_end = r.pregrab_end;
+                r.pregrab_keep_hand = r.pregrab_hand;
                 logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pre-grab off ({}; stage {}; {}).", why, r.pregrab_stage, take_hand_reach());
                 r.pregrab_stage = 0;
                 r.pregrab_flick = -1;
@@ -2076,10 +2082,24 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 const bool can = r.pregrab && trick_enabled(r, "pregrab") && on_ground && (lt || rt) && r.freestyle == Freestyle::off && !r.pop_flip &&
                                  state_objects_known();
                 const bool asking = can && std::abs(held_y) > 0.5f && std::abs(held_x) < 0.5f;
+                // The trigger never let go since the last pre-grab: back on the same end, whatever the stick says.
+                if (r.pregrab_keep_hand >= 0 && !(r.pregrab_keep_hand ? lt : rt)) r.pregrab_keep_hand = -1;
+                if (r.pregrab_keep_hand >= 0 && can) {
+                    r.pregrab_stage = 1;
+                    r.pregrab_since = now;
+                    r.pregrab_hand = r.pregrab_keep_hand;
+                    r.pregrab_end = r.pregrab_keep_end;
+                    r.pregrab_neutral = false;
+                    r.pregrab_flick = -1;
+                    r.pregrab_flick_stage = 0;
+                    r.pregrab_stick_since = r.pregrab_trigger_since = 0;
+                    r.pregrab_keep_hand = -1;
+                    logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pre-grab {} {} again (the trigger held).", end_name(), r.pregrab_hand ? "LT" : "RT");
+                }
                 // The game must not read the push as the start of an ollie flick.
                 if (asking) DingoSDKOverlayTricksMaskRight();
                 // The trigger alone: the game's own indy / melon, which the mod pops or throws from.
-                const bool alone = can && r.pregrab_mid && std::abs(held_x) < 0.3f && std::abs(held_y) < 0.3f;
+                const bool alone = !r.pregrab_stage && can && r.pregrab_mid && std::abs(held_x) < 0.3f && std::abs(held_y) < 0.3f;
                 if (!alone) r.pregrab_trigger_since = 0;
                 else if (!r.pregrab_trigger_since) r.pregrab_trigger_since = now;
                 else if (now - r.pregrab_trigger_since >= r.pregrab_mid_ms) {
@@ -2242,7 +2262,11 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                         score_trick("fingerflip", std::format("{} Finger {}", end_name(), names[k]));
                         r.pregrab_scored = true;
                     }
-                    if (!r.pregrab_thrown || now - r.pregrab_air_at < r.ff_delay + r.ff_ms * 3 / 10) reach(60);
+                    // Held: low through the flip, and the hand back on the same end once it is caught.
+                    const bool caught = r.pregrab_thrown && now - r.pregrab_air_at >= r.ff_delay + r.ff_ms;
+                    if (holding) lift = r.pregrab_lift;
+                    if (caught && holding) reach(120);
+                    else if (!r.pregrab_thrown || now - r.pregrab_air_at < r.ff_delay + r.ff_ms * 3 / 10) reach(60);
                     if (r.ff_type[k] >= 0 && r.pregrab_thrown && now - r.pregrab_air_at < r.ff_delay + 200) {
                         put(r.s_can_grab, "Animation/Dingo/Bool.GP.CanGrab", 0, 1);
                         put(r.s_ff_intent, "Animation/Dingo/Bool.Intent.Fingerflip", 0, 1);
@@ -2254,12 +2278,16 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     if (flip) take_kinematic_spin_smoothness(move, turn);
                     logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pre-grab landed {} ms after the pop (grab type {} last seen; {}{}).", now - r.pregrab_air_at, r.air_grab_type,
                                  take_hand_reach(), flip ? std::format("; throw's largest step {:.3f} m / {:.1f} deg", move, turn) : std::string());
-                    if (holding && !flip) {
+                    if (holding) {
+                        if (flip) stop_board_spin();
                         r.pregrab_stage = 1;
                         r.pregrab_since = now;
                         r.pregrab_flick = -1;
                         r.pregrab_flick_stage = 0;
                     } else stop("landed");
+                } else if (!in_air && holding && (!flip || now - r.pregrab_air_at >= r.ff_delay + r.ff_ms)) {
+                    reach(120);
+                    lift = r.pregrab_lift;
                 }
             }
             set_hand_reach_lift(r.pregrab_stage == 3 ? lift : 0.0f);
