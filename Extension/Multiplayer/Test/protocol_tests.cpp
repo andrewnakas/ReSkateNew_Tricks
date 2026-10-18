@@ -588,6 +588,10 @@ void object_codec() {
     served.sync_effects = false;
     const auto plain = decode(encode(served));
     check(plain && !plain->sync_effects && listed && listed->sync_effects, "The roster's skater effects rule failed to round-trip");
+    served.sync_drones = false;
+    const auto grounded = decode(encode(served));
+    check(grounded && !grounded->sync_drones && grounded->sync_effects == served.sync_effects && listed && listed->sync_drones,
+          "The roster's drones rule failed to round-trip");
     served.object_scaling = false;
     const auto fixed = decode(encode(served));
     check(fixed && !fixed->object_scaling && listed && listed->object_scaling, "The roster's object scaling rule failed to round-trip");
@@ -675,6 +679,23 @@ void chat_codec() {
     check(clean_chat_text(std::string(199, 'a') + "\xC3\xA9").size() == 199, "Chat cleaning cut a character in half");
     check(clean_chat_text("\x01\x02").empty(), "Chat cleaning left only controls");
     check(valid_chat_text(clean_chat_text("  typed \xE2\x80\x94 text  ")), "Cleaned chat text is not valid");
+    Packet typing;
+    typing.kind = PacketKind::typing; typing.session = 9; typing.epoch = 10; typing.map = 11;
+    typing.source = 76561198000000001ULL; typing.typing = true;
+    const auto typed = decode(encode(typing));
+    check(typed && typed->kind == PacketKind::typing && typed->typing && typed->source == typing.source,
+          "Typing notice failed to round-trip");
+    check(decode_wire(encode_wire(typing))->typing, "Typing notice failed the wire codec");
+    typing.typing = false;
+    const auto stopped = decode(encode(typing));
+    check(stopped && !stopped->typing, "A stopped typing notice stayed on");
+    typing.source = 0;
+    check(reject(typing), "A typing notice without a sender was encoded");
+    typing.source = 76561198000000001ULL;
+    typing.typing = true;
+    auto bad = encode(typing);
+    bad.back() = 2; // the on/off byte; anything but 0 or 1 is refused
+    check(!decode(bad), "A typing notice with a bad flag decoded");
 }
 // Linked throwdowns: the packet carries one opaque message; the message codec is strict.
 void throwdown_codec() {
@@ -965,6 +986,37 @@ void dedicated_server_codec() {
         try { encode(fx); } catch (const std::invalid_argument &) { refused = true; }
         check(refused, "A material past the game's table was encoded");
     }
+    // A player's FPV drone position, for the marker others see.
+    {
+        Packet d;
+        d.kind = PacketKind::drone; d.session = 9; d.epoch = 10; d.map = 11; d.source = 12;
+        d.drone_active = true; d.drone_position = {594.5f, 199.15f, -1070.1f};
+        d.drone_rotation = {0.f, 0.38268343f, 0.f, 0.92387953f}; // 45 degrees of yaw
+        const auto back = decode(encode(d));
+        check(back && back->kind == PacketKind::drone && back->drone_active && back->drone_position == d.drone_position &&
+                  back->drone_rotation == d.drone_rotation,
+              "A drone position and facing failed to round-trip");
+        auto tilted = d;
+        tilted.drone_rotation = {0.f, 0.f, 0.f, 0.f};
+        bool turned_away{};
+        try { encode(tilted); } catch (const std::invalid_argument &) { turned_away = true; }
+        check(turned_away, "A drone facing that is not a rotation was encoded");
+        tilted.drone_rotation = {std::numeric_limits<float>::quiet_NaN(), 0.f, 0.f, 1.f};
+        turned_away = false;
+        try { encode(tilted); } catch (const std::invalid_argument &) { turned_away = true; }
+        check(turned_away, "A non-finite drone facing was encoded");
+        d.drone_active = false;
+        const auto stopped = decode(encode(d));
+        check(stopped && !stopped->drone_active, "A drone stop notice failed to round-trip");
+        d.drone_position = {std::numeric_limits<float>::quiet_NaN(), 0.f, 0.f};
+        bool refused{};
+        try { encode(d); } catch (const std::invalid_argument &) { refused = true; }
+        check(refused, "A non-finite drone position was encoded");
+        d.drone_position = {2.0e6f, 0.f, 0.f};
+        refused = false;
+        try { encode(d); } catch (const std::invalid_argument &) { refused = true; }
+        check(refused, "A drone position outside the world was encoded");
+    }
     extras.kind = PacketKind::physics_extras; extras.session = 9; extras.epoch = 10; extras.map = 11; extras.source = player;
     check(decode(encode(extras)) && decode(encode(extras))->kind == PacketKind::physics_extras && decode(encode(extras))->extras.empty(),
           "Empty physics extras (the game's own) lost");
@@ -1172,6 +1224,13 @@ void dedicated_server_codec() {
               other_map_version("Sandos-Vancouver_Plaza-2.0.0", "Sandos-Vancouver_Plaza").empty() &&
               other_map_version("Sandos-Vancouver_Plaza-2.0.0", "Other-Vancouver_Plaza-1.9.0").empty() &&
               other_map_version("Sandos-Vancouver_Plaza-2.0.0", "").empty() && other_map_version("", "").empty() &&
+              // (A player ahead of the host keeps their version.)
+              other_map_version("Sandos-Vancouver_Plaza-1.9.0", "Sandos-Vancouver_Plaza-2.0.0").empty() &&
+              other_map_version("Sandos-Vancouver_Plaza-1.9.2", "Sandos-Vancouver_Plaza-1.10.0").empty() &&
+              other_map_version("Sandos-Vancouver_Plaza-1.10.0", "Sandos-Vancouver_Plaza-1.9.2") == "1.9.2" &&
+              map_version_newer("1.10.0", "1.9.2") && map_version_newer("2.0", "1.9.9") && map_version_newer("1.0.1", "1.0") &&
+              !map_version_newer("1.0.0", "1.0.0") && !map_version_newer("1.0", "1.0.0") && !map_version_newer("1.9.2", "1.10.0") &&
+              !map_version_newer("", "1.0.0") && !map_version_newer("1.0.0-beta", "0.9.0") && !map_version_newer("abc", "1.0.0") &&
               map_package_version("Sandos-Vancouver_Plaza-2.0.0") == "2.0.0" && map_package_version("Sandos-Vancouver_Plaza").empty(),
           "A map's version is not compared with the host's as it should be");
     check(map_package_name("Sandos-Vancouver_Plaza", "2.0.0") == "Sandos-Vancouver_Plaza-2.0.0" &&

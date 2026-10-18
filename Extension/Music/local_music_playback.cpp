@@ -1,4 +1,6 @@
 #include "local_music_playback.h"
+#include "Extension/Music/spotify_station.h"
+#include "Extension/Music/spotify_rows.h"
 
 #include "local_music_playback_policy.h"
 #include "Engine/Core/Hooks/hooks.h"
@@ -136,6 +138,21 @@ bool song_count(std::uintptr_t playlist_asset, std::uint32_t& count) noexcept {
     return count > 0 && count <= 8192 && valid_range(entries, static_cast<std::size_t>(count) * 8);
 }
 
+// The last of a playlist's members is made its first (the others move down one).
+bool last_member_first(std::uintptr_t begin, std::uint32_t count) noexcept {
+    if (count < 2) return true;
+    __try {
+        unsigned char last[16];
+        auto* const members = reinterpret_cast<unsigned char*>(begin);
+        std::memcpy(last, members + std::size_t{count - 1} * 16, 16);
+        std::memmove(members + 16, members, std::size_t{count - 1} * 16);
+        std::memcpy(members, last, 16);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 bool member_count(std::uintptr_t node, std::uintptr_t& begin, std::uint32_t& count) noexcept {
     std::uintptr_t end{};
     if (!read_at(node + 0x10, begin) || !read_at(node + 0x18, end) || !begin || end < begin ||
@@ -223,6 +240,38 @@ bool member_index(std::uintptr_t members, std::uint32_t member_count_value,
         }
     }
     return true;
+}
+
+// Whether the game's selection would read past the end of the playlist asset's songs.
+//
+// A playlist asset of type 4 with a selector (the reference at +0x68) has the game score the
+// queue's candidates (the u32 list at queue + 0x78 .. + 0x80, each an index into the asset's
+// songs): for each it reads the song at that place in the asset's own list (+0x60) and a number
+// from the song (sub_1414F8ED0, the branch at 0x14f9569, and its callback 0x14f23a0, which
+// checks nothing). In the game's own sessions the candidates are that asset's, so they fit. A
+// channel bound to a playlist the asset was not made for (Favorites, local files, a mod's: any
+// of thousands of songs) has candidates the asset has no song for, and the game then reads
+// whatever lies beyond its list as a song (seen 2026-10-13 in 2.0.8's crash reports: place
+// 0x840 of an authored list, and a "song" of 0x7fa12fb757340c93).
+bool selector_overruns(std::uintptr_t queue, std::uintptr_t playlist_asset,
+                       std::uint32_t& candidates, std::uint32_t& songs) noexcept {
+    candidates = songs = 0;
+    std::uint32_t type{};
+    std::uintptr_t selector{}, begin{}, end{};
+    if (!read_at(playlist_asset + 0x70, type) || type != 4 ||
+        !read_at(playlist_asset + 0x68, selector) || !(selector & ~std::uintptr_t{4})) return false;
+    if (!read_at(queue + 0x78, begin) || !read_at(queue + 0x80, end) || end < begin || (end - begin) % 4) return false;
+    const auto count = (end - begin) / 4;
+    if (!count) return false; // (nothing is scored)
+    candidates = count > 0xffffffffu ? 0xffffffffu : static_cast<std::uint32_t>(count);
+    // (No songs at all, or more than a playlist can have: nothing the candidates could fit.)
+    if (!song_count(playlist_asset, songs)) { songs = 0; return true; }
+    if (count > songs) return true;
+    for (std::uintptr_t i = 0; i < count; ++i) {
+        std::uint32_t place{};
+        if (!read_at(begin + i * 4, place) || place >= songs) return true;
+    }
+    return false;
 }
 
 bool pending_song_request(std::uintptr_t queue, bool& pending) noexcept {
@@ -416,10 +465,108 @@ bool music_playback_available() noexcept { return playback_available.load(std::m
 
 MusicSelectNext& music_select_next_original() noexcept { return select_next; }
 
+// The scorer asks for places the asset has no song at (selector_overruns, which sees only what
+// the queue holds before the game is asked: 2.0.9 still crashed here with places such as 0xd570,
+// far past any list the queue had). The game's callback reads whatever lies there as a song.
+// This is that callback with the one check it lacks: a place past the end has no song, which
+// the game's own answer for is 0. It replaces the game's whole function, which is these few
+// reads.
+MusicSongScore song_score{};
+MusicSongScore& music_song_score_original() noexcept { return song_score; }
+void __fastcall music_song_score_hook(std::uint32_t place, std::uint32_t* out, std::uintptr_t** context) {
+    const auto* const songs = *context ? reinterpret_cast<const std::uintptr_t*>(**context) : nullptr;
+    // (The count is the u32 before the first song, its top bit apart: song_count.)
+    const auto count = songs ? *(reinterpret_cast<const std::uint32_t*>(songs) - 1) & 0x7fffffffu : 0u;
+    if (place >= count) {
+        *out = 0;
+        static std::atomic<unsigned> said{};
+        if (said.fetch_add(1, std::memory_order_relaxed) < 8) {
+            try {
+                dingosdk::logging::log(dingosdk::logging::Level::warning, dingosdk::logging::Channel::music,
+                    "Next song: the game asked for song {} of a playlist asset that has {}, where it would have crashed; "
+                    "it was told there is none there.", place, count);
+            } catch (...) {}
+        }
+        return;
+    }
+    const auto song = songs[place] & ~std::uintptr_t{4};
+    *out = song ? *reinterpret_cast<const std::uint32_t*>(song + 0x7c) : 0;
+}
+
+// When each channel was last bound to a playlist.
+std::array<std::atomic<std::uint64_t>, 256> channel_bound_at{};
+
 std::int32_t __fastcall music_select_next_hook(std::uintptr_t queue, std::uintptr_t playlist_asset) {
+    // A next the player asked for (the queue's flag for it, at +0xf1, is still up) is Spotify's
+    // next while a Spotify station is on.
+    // Only of the queue the station is on: the others (a speaker's in the world, the one a song
+    // grabbed from a speaker plays on) go on to their next songs for reasons of their own.
+    if (std::uint8_t asked{}; spotify_station::active() && dingosdk::memory::peek(queue + 0xf1, asked)) {
+        std::uint32_t channel{};
+        if (const auto base = image_base.load(std::memory_order_acquire); base && native_queue_channel(base, queue, channel)) {
+            if (channel == spotify_station::channel()) spotify_station::song_chosen(queue, asked != 0);
+            // A next asked of another channel is the player's too when it is not that channel
+            // being set up (a speaker's music, once grabbed, is what the player's next button
+            // works: traced 2026-10-12): a channel asks for its first song the same way as it
+            // is bound, and that is not a press of the player's.
+            else if (asked && channel < channel_bound_at.size() && GetTickCount64() - channel_bound_at[channel].load(std::memory_order_relaxed) > 2500)
+                spotify_station::next_pressed();
+        }
+    }
     if (select_next) {
         apply_policy(queue, playlist_asset);
-        return select_next(queue, playlist_asset);
+        // The game is not asked when its answer would be read from beyond the asset's songs:
+        // no song is chosen, as when the game finds none (selector_overruns).
+        std::int32_t chosen = -1;
+        if (std::uint32_t candidates{}, songs{}; selector_overruns(queue, playlist_asset, candidates, songs)) {
+            static std::atomic<unsigned> said{};
+            if (said.fetch_add(1, std::memory_order_relaxed) < 8) {
+                try {
+                    std::uint32_t channel{~0u};
+                    native_queue_channel(image_base.load(std::memory_order_acquire), queue, channel);
+                    dingosdk::logging::log(dingosdk::logging::Level::warning, dingosdk::logging::Channel::music,
+                        "Next song: channel {} (queue 0x{:x}) has {} candidate(s) for a playlist asset of {} song(s) that scores "
+                        "them by its own list, where the game would have crashed; no song was chosen for it.",
+                        channel, queue, candidates, songs);
+                } catch (...) {}
+            }
+        } else {
+            chosen = select_next(queue, playlist_asset);
+        }
+        // While a Spotify station is on, the game's one song of it is played again when the game
+        // finds none to go on to (it is at the end of a playlist of one song it can play): the
+        // music would stop otherwise.
+        static std::atomic<std::uintptr_t> last_queue{};
+        static std::atomic<std::int32_t> last_chosen{-1};
+        static std::atomic<int> last_station{-1};
+        // (Of the station's own queue alone: another channel's choices are not its.)
+        std::uint32_t queue_channel{~0u};
+        const bool stations_queue = native_queue_channel(image_base.load(std::memory_order_acquire), queue, queue_channel) && queue_channel == spotify_station::channel();
+        if (const int station = spotify_station::current(); station >= 0 && !stations_queue) {
+        } else if (station >= 0) {
+            if (last_station.exchange(station, std::memory_order_relaxed) != station) last_chosen.store(-1, std::memory_order_relaxed);
+            if (chosen >= 0) {
+                last_queue.store(queue, std::memory_order_relaxed);
+                last_chosen.store(chosen, std::memory_order_relaxed);
+            } else {
+                // (The game makes a queue anew when its channel is bound again: the place of the
+                // station's one song in it is the same.)
+                chosen = last_chosen.load(std::memory_order_relaxed);
+            }
+        } else {
+            last_station.store(-1, std::memory_order_relaxed);
+        }
+        if (static std::atomic<int> said{}; spotify_station::recent() && said.fetch_add(1, std::memory_order_relaxed) < 600) {
+            try {
+                std::uint32_t chosen_channel{~0u};
+                std::uint8_t asked{};
+                native_queue_channel(image_base.load(std::memory_order_acquire), queue, chosen_channel);
+                dingosdk::memory::peek(queue + 0xf1, asked);
+                dingosdk::logging::log(dingosdk::logging::Level::debug, dingosdk::logging::Channel::music, "Trace: channel {} (queue 0x{:x}) chose song {} of its queue{}.", chosen_channel, queue, chosen,
+                    asked ? " (asked for its next)" : "");
+            } catch (...) {}
+        }
+        return chosen;
     }
     return -1;
 }
@@ -456,9 +603,95 @@ std::uintptr_t __fastcall music_channel_playlist_bind_hook(std::uintptr_t channe
         favorites_remapped = playlist_id != requested_playlist_id;
     }
 
-    const auto result = favorites_remapped
-        ? bind_channel_playlist(channel_pointer, reinterpret_cast<std::uintptr_t>(&playlist_id))
+    // A Spotify station is a playlist whose only member is the song it was given
+    // (spotify_station.h). Looked up under the manager's lock, as Favorites is.
+    std::uint32_t station_members{};
+    int station{-1};
+    if (have_binding) {
+        const auto base = image_base.load(std::memory_order_acquire);
+        std::uintptr_t manager{};
+        if (base && read_at(base + local_music::asset_manager, manager) && manager && valid_range(manager, 0xd8)) {
+            CriticalSectionGuard manager_lock(manager + 0x20);
+            std::uintptr_t begin{};
+            if (const auto node = find_playlist_node(manager, playlist_id); node && member_count(node, begin, station_members) &&
+                station_members <= 128 && spotify_station::has_stations()) {
+                std::array<unsigned char, 128 * 16> members{};
+                std::array<unsigned char, 16> carrier{};
+                bool add{};
+                if (dingosdk::memory::peek_bytes(begin, members.data(), std::size_t{station_members} * 16))
+                    station = spotify_station::station_of(members.data(), station_members, carrier.data(), add);
+                // Its members are rows of our own, which the game cannot play: the game's song
+                // whose sound is replaced is added to it now, once.
+                // (It is put first: the game starts a playlist at a member it can play.)
+                std::uint32_t cursor{};
+                read_at(node + 0x30, cursor);
+                const int first = station >= 0 ? spotify_station::row_of(station, members.data()) : -1;
+                if (station >= 0 && add && spotify_rows::add_member(base, manager, playlist_id, carrier.data())) {
+                    std::uintptr_t now_begin{};
+                    std::uint32_t now_count{};
+                    if (member_count(node, now_begin, now_count) && now_count == station_members + 1) last_member_first(now_begin, now_count);
+                    else {
+                        try {
+                            dingosdk::logging::log(dingosdk::logging::Level::warning, dingosdk::logging::Channel::music,
+                                "Spotify station: the game's song did not go into playlist {} ({} member(s) after).", playlist_id, now_count);
+                        } catch (...) {}
+                    }
+                }
+                if (station >= 0) {
+                    try {
+                        dingosdk::logging::log(dingosdk::logging::Level::debug, dingosdk::logging::Channel::music,
+                            "Spotify station: playlist {} has {} member(s), its first is row {} of station {}, its place is {}{}.", playlist_id, station_members, first, station,
+                            cursor, add ? "; the game's song was added" : "");
+                    } catch (...) {}
+                }
+            }
+        }
+    }
+    // The playlist each channel was last bound to (0: none seen).
+    static std::array<std::atomic<std::uint32_t>, 256> bound_playlist{};
+    // Grabbing the music of a speaker in the world binds the player's channel to the speaker's
+    // playlist and has it go on to a song (traced 2026-10-12: no song is asked for by name).
+    // While a Spotify station is on the speakers' sound is Spotify's, so what the player grabs
+    // is what they have: their channel is bound to its station again and stays on Spotify.
+    // A playlist the player picks in the music screen comes by way of the screen's own code
+    // (the return address below is in every such binding traced, and in none the world made);
+    // anything else that takes the player's channel off its station is the world's doing.
+    if (have_binding && station < 0 && playlist_id != 0 && channel < bound_playlist.size() && spotify_station::active() && channel == spotify_station::channel()) {
+        constexpr std::uintptr_t music_screen_return = 0x3df0b6e;
+        void* frames[16]{};
+        const auto count = CaptureStackBackTrace(0, 16, frames, nullptr);
+        const auto image = image_base.load(std::memory_order_acquire);
+        bool from_screen{};
+        for (unsigned i = 0; i < count; ++i) from_screen = from_screen || reinterpret_cast<std::uintptr_t>(frames[i]) == image + music_screen_return;
+        if (auto own = bound_playlist[channel].load(std::memory_order_relaxed); !from_screen && own && image) {
+            spotify_station::grabbed();
+            try {
+                dingosdk::logging::log(dingosdk::logging::Level::debug, dingosdk::logging::Channel::music,
+                    "Spotify station: channel {} was asked for playlist {} by the world, not the music screen (a speaker's music was grabbed): it stays on Spotify.", channel, playlist_id);
+            } catch (...) {}
+            return bind_channel_playlist(channel_pointer, reinterpret_cast<std::uintptr_t>(&own));
+        }
+    }
+    const auto result = favorites_remapped ? bind_channel_playlist(channel_pointer, reinterpret_cast<std::uintptr_t>(&playlist_id))
         : bind_channel_playlist(channel_pointer, playlist_id_pointer);
+    if (have_binding && channel < bound_playlist.size()) bound_playlist[channel].store(playlist_id, std::memory_order_relaxed);
+    if (have_binding && channel < channel_bound_at.size()) channel_bound_at[channel].store(GetTickCount64(), std::memory_order_relaxed);
+    if (static std::atomic<int> said{}; have_binding && dingosdk::logging::enabled(dingosdk::logging::Level::debug) && said.fetch_add(1, std::memory_order_relaxed) < 600) {
+        try {
+            void* frames[10]{};
+            const auto count = CaptureStackBackTrace(1, 10, frames, nullptr);
+            const auto image = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+            std::string callers;
+            for (unsigned i = 0; i < count; ++i) {
+                char text[24];
+                std::snprintf(text, sizeof(text), " +0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[i]) - image));
+                callers += text;
+            }
+            dingosdk::logging::log(dingosdk::logging::Level::debug, dingosdk::logging::Channel::music, "Trace: channel {} bound to playlist {} ({} member(s), station {}); the Spotify station is on channel {}, a menu is {}; from{}.",
+                channel, playlist_id, station_members, station, static_cast<int>(spotify_station::channel()), spotify_station::music_screen() ? "up" : "not up", callers);
+        } catch (...) {}
+    }
+    if (have_binding) spotify_station::bound(channel, music_channel, playlist_id, station_members, station);
 
     // Said once for each change of a channel's binding. A channel outside the table cannot be
     // told from its last binding, so it is not said at all rather than every time.

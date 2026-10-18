@@ -293,6 +293,15 @@ using namespace profile_runtime;
 void set_local_location_travel_queue(LocalLocationTravelQueue queue) noexcept {
     location_travel_queue.store(queue, std::memory_order_release);
 }
+void update_local_item_browser() noexcept {
+    PreserveError preserve;
+    auto& s = local_runtime();
+    if (!s.active.load(std::memory_order_acquire)) return;
+    std::lock_guard lock(s.native_mutex);
+    if (cosmetic_runtime().update_thread != GetCurrentThreadId()) return;
+    item_browser::update(s.base);
+}
+
 void update_local_customization() noexcept {
     PreserveError preserve;
     auto& s = local_runtime();
@@ -307,6 +316,11 @@ void update_local_customization() noexcept {
             publish_cosmetic_catalog();
             publish_cosmetic_inventory();
         }
+    } catch (const std::exception& failure) {
+        // (Why, in the log: a bare "failed" left a player with no items and nothing to go on.)
+        cosmetic_runtime().catalog_failed = true;
+        const dingosdk::Json event{{"event", "local_cosmetic_catalog_failed"}, {"reason", failure.what()}};
+        dingosdk::logging::event(dingosdk::logging::Channel::profile, event.dump().c_str());
     } catch (...) {
         cosmetic_runtime().catalog_failed = true;
         dingosdk::logging::event(dingosdk::logging::Channel::profile, "{\"event\":\"local_cosmetic_catalog_failed\"}");
@@ -328,8 +342,9 @@ void update_local_customization() noexcept {
     try { update_object_categories(); }
     catch (...) { dingosdk::logging::event(dingosdk::logging::Channel::profile, "{\"event\":\"local_object_categories_failed\",\"operation\":\"update\"}"); }
     update_music_catalog();
+    try { update_music_catalog_refresh(); } catch (...) {}
+    try { update_spotify_cover(); } catch (...) {}
     update_music_shelf();
-    item_browser::update(s.base);
     try {
         if (cosmetic_runtime().update_thread == GetCurrentThreadId() && !cosmetic_runtime().items.empty())
             update_player_card();
@@ -555,6 +570,8 @@ bool initialize_local_profile(std::uintptr_t base, bool authored_offline,
                 "{\"event\":\"music_channel_playlist_binding_contract_mismatch\"}");
             hook(addr::local_music::playback_select_next_contract,
                 &music_select_next_hook, music_select_next_original());
+            hook(addr::local_music::playback_song_score_contract,
+                &music_song_score_hook, music_song_score_original());
         } else dingosdk::logging::event(dingosdk::logging::Channel::music,
             "{\"event\":\"music_playback_order_contract_mismatch\"}");
         hook(buildkit_text_exists_contract, &buildkit_text_exists, buildkit_text_functions().exists);

@@ -70,7 +70,7 @@ inline std::pair<std::uint32_t, std::string> player_role(std::uint64_t id, bool 
         case multiplayer::IdentityList::developer: return {nametag_developer, "Dev"};
         case multiplayer::IdentityList::content_creator: return {nametag_creator, "Content Creator"};
         case multiplayer::IdentityList::centrix: return {nametag_centrix, "Centrix"};
-        case multiplayer::IdentityList::staff: return {nametag_staff, "Staff"};
+        case multiplayer::IdentityList::staff: return {nametag_staff, "ReSkate Admin"};
         default: return {nametag_homie, "Homie"};
         }
     }
@@ -2697,6 +2697,7 @@ void draw_settings_tab(ServerStatusSnapshot& stats) {
         try {
             auto cfg_path = ServerEngine::instance().folder() / "ReSkateServer.json";
             auto loaded = load_config(cfg_path);
+            loaded.mods = ServerEngine::instance().config().mods; // where the Mods folder is: not in the file
             ServerEngine::instance().config() = loaded;
             sync_form_from_config(s_form, loaded);
             show_notification("Reloaded configuration from ReSkateServer.json.", 3.5, blue);

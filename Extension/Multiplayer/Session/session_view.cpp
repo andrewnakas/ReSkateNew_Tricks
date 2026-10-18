@@ -290,6 +290,7 @@ void publish(Session &s, const NativeFrame *local) {
     view.lobby_searched = lobby.searched;
     view.lobby_status = lobby.hosting;
     view.browser_status = lobby.browser;
+    view.browse_ready_us = s.browsed ? s.browsed + multiplayer_browse_interval_us : 0;
     // Dedicated servers first: they are always up and never a stranger's own session.
     view.lobbies = s.servers.rows();
     // Looked up as the list is shown: the team's list can arrive, or change, after a server was found.
@@ -338,6 +339,7 @@ void publish(Session &s, const NativeFrame *local) {
         view.roster.back().party = p.member.party;
         view.roster.back().party_leader = p.member.party_leader;
         view.roster.back().party_member = party_member(s, p.member.id);
+        view.roster.back().objects_solid = objects_solid(s, p.member.id);
         if (!p.rate_at) {
             p.rate_at = now;
             p.native_rate_count = native_count;
@@ -666,7 +668,7 @@ std::pair<std::uint32_t, std::string> mark_role(IdentityList list) {
     case IdentityList::developer: return {nametag_developer, "Dev"};
     case IdentityList::content_creator: return {nametag_creator, "Content Creator"};
     case IdentityList::centrix: return {nametag_centrix, "Centrix"};
-    case IdentityList::staff: return {nametag_staff, "Staff"};
+    case IdentityList::staff: return {nametag_staff, "ReSkate Admin"};
     default: return {nametag_homie, "Homie"};
     }
 }

@@ -158,6 +158,22 @@ rotation_extend_minutes
                    and "rotation extend [minutes]" adds time at once.
 rotation_announce  Tell players on a card when the map has 10, 5 and 1
                    minutes left (default true).
+latest_versions    Keep this server's custom maps at Thunderstore's newest
+                   version (default false). A map mod in Mods whose folder is a
+                   Thunderstore package (Owner-Name) is looked up when the
+                   server starts and every latest_check_minutes; when a newer
+                   version is out, that version is written into the folder's
+                   manifest.json and the maps are read again. Nothing is
+                   downloaded: the server only needs to know the version, and
+                   players, who are sent to the server's version of a map,
+                   fetch it as they join. A player who already has a later
+                   version than the server keeps it. The map being played is
+                   left until nobody is on it. A folder that is not a
+                   Thunderstore package is never touched.
+                   The level list is not changed: when a new version adds,
+                   removes or renames levels, copy its reskate-levels.json in.
+latest_check_minutes
+                   How often Thunderstore is asked, 5-1440 (default 60).
 parks              Layout for each park lot, e.g. "skatepark_01", or "empty".
 world_layer_sync   Force the "layers" below on every player.
 layers             World layer key -> "on" / "off".
@@ -191,6 +207,14 @@ afk_kick_minutes   Remove a player who has been away this many minutes, 1-1440
                    in chat or changing their objects. They are warned in chat
                    a minute before and can join again at once. Admins are
                    never removed for it. Console: afk-kick <minutes>|off.
+kick_minutes       How long a player kicked by an admin is kept out: 1-1440
+                   minutes (default 0: until the server restarts). They are
+                   told how long when they are kicked and when they try to
+                   join. A kick keeps the time it was given; changing this is
+                   for later kicks. A ban is still for good. One kick can be
+                   given its own time: kick <player> 30. A kick by a vote has
+                   its own time, votes.kick_minutes.
+                   Console: kick-time <minutes>|restart.
 word_warnings      The ReSkate team keeps a list of words that are not allowed
                    in chat at all (read from api.reskate.dev with the global
                    bans). A message with one is never passed on, whatever
@@ -226,8 +250,22 @@ sync_effects       Let players see each other's skater effects (default true):
                    relays none and players' games show each other without
                    them, which saves a little traffic and drawing on a busy
                    server. Console: effects on|off.
+sync_drones        Let players see each other's FPV drones (default true): the
+                   marker where a player flying ReSkate's drone mode has
+                   their drone. false relays none, and players' games
+                   neither send their drone nor show anyone else's.
+                   Console: drones on|off.
 announce_throwdowns  Tell everyone in chat when a throwdown drop is placed
                    (default true).
+throwdown_locks    Tools locked for the players of a throwdown while it runs,
+                   for fair games on a server that allows them for free
+                   skating (default [], none): any of "noclip" (with
+                   teleporting), "nobail", "boosts", "tuning" (their own
+                   physics tuning). They are locked when the throwdown starts
+                   and unlocked when the player quits it, it ends (the server
+                   hears nothing more of it for a minute or so) or they leave.
+                   Example: ["nobail", "boosts", "tuning"]. Console:
+                   throwdown-locks <tools>|off. See lock below.
 
 "anti_cheat" - What the server checks, and what it does about it.
 speed_hack         Catch players whose game runs faster than normal (Cheat
@@ -355,6 +393,9 @@ votes              Player votes, each off until turned on:
                    "cooldown_seconds" (default 60) how long a player waits before
                    starting another. Players vote with /yes and /no in chat;
                    admins cannot be vote-kicked.
+                   "kick_minutes" (default 5) is how long a player kicked by a
+                   vote is kept out: 1-1440 minutes, or 0 for until the server
+                   restarts. Console: votes kick-minutes <minutes>|restart.
                    Each vote may also have its own "seconds" and
                    "cooldown_seconds" (0: the ones above) and "min_players", the
                    players who must be on before anyone can start it (default 1).
@@ -469,7 +510,7 @@ A role is:
   name         1 to 24 of a-z, 0-9, - and _.
   tag          The word shown before the player's name in the game, up to 16
                characters ("" for none). Not one the game uses itself (Server,
-               Host, Friend, Dev, Staff...).
+               Host, Friend, Dev, ReSkate Admin...).
   color        The tag's colour, like "#FF74C6".
   rank         0 to 1000. Nobody kicks, bans or changes the role of a player
                whose rank is theirs or higher, or gives out a role whose rank
@@ -486,7 +527,8 @@ A role is:
                  unlimited_objects  no object limit; build and resize when
                                     players may not
                  movement           noclip, No Bail and the boosts when
-                                    players may not
+                                    players may not (not a tool that is
+                                    locked for them: lock)
                  no_afk_kick        never removed for being away
                  vote_kick_immune   cannot be kicked by a vote
                  anticheat_alerts   told in chat what the anti-cheat finds
@@ -533,13 +575,22 @@ or Travel, and voice, distances, placement and kicks from the Multiplayer menu.
   msg-party <player> <text>     Message everyone in that player's party ("[DM from <you> to party]").
   msg-admins <text>             Message every admin who is online ("[DM from <you> to admins]").
                                 Players can whisper each other with /w <player> <text> in chat.
-  kick <player>                 Until the server restarts. Name start or SteamID64.
+  kick <player> [minutes]       For that many minutes (1-1440), or "restart" for until
+                                the server restarts; with neither, for as long as
+                                kick-time says. Name start or SteamID64.
+  kick-time <minutes>|restart   How long a player kicked by an admin is kept
+                                out: 1-1440 minutes, or until the server restarts.
                                 Nobody kicks or bans a player of their rank or above; the console can.
   ban <player or id> [name]     For good.   unban <id>   bans
   map <name>                    e.g. map San Vansterdam, map grom, map bbcity
   maps                          The maps this server knows.
   maps reload                   Read the Mods folder again: a map mod copied in
                                 while the server runs can be switched to at once.
+  maps update                   Ask Thunderstore now for the newest version of
+                                each of this server's maps and take it (see
+                                maps.latest_versions); the log says what it did.
+  maps latest on|off            Turn maps.latest_versions on or off.
+  maps latest every <minutes>   How often Thunderstore is asked.
   map-pool [add|remove <map>|clear]   The maps players vote between and the
                                 rotation uses (see maps.pool).
   rotation [<minutes>|off]      Change the map on a timer (see maps.rotation_minutes).
@@ -554,9 +605,31 @@ or Travel, and voice, distances, placement and kicks from the Multiplayer menu.
   objects <number>|off          How many objects each player may have placed.
   object-scaling on|off         Whether players may resize the objects they place.
   effects on|off                Whether players see each other's skater effects.
+  drones on|off                 Whether players see each other's FPV drones.
   noclip on|off   nobail on|off   boosts on|off
                                 What players may use (admins always can).
   tuning on|off                 Everyone on the game's own physics tuning.
+  lock <player|SteamID64> <tool[,tool...]|all>
+                                Take tools from one player: noclip (with
+                                teleporting), nobail, boosts, tuning (their own
+                                physics tuning), or all. Everyone else keeps what
+                                the server allows, and the player's role cannot
+                                give a locked tool back (movement). Takes effect
+                                at once, and is kept for their SteamID until
+                                unlocked or the server restarts: leaving and
+                                joining again does not lift it. A player who is
+                                not here is locked by their SteamID64. Logged as
+                                "[lock] <name> (<SteamID64>): nobail, boosts
+                                locked by <who>".
+  unlock <player|SteamID64> [<tool[,tool...]|all>]
+                                Give them back (all when none are named), also
+                                to a player who left (by SteamID64 or the name
+                                they had); also ends a throwdown's locks early.
+                                Logged as "[lock] ... unlocked by <who>".
+  locks                         The players with locked tools, also those who
+                                left ("not here").
+  throwdown-locks <tools>|off   What a throwdown locks for its players
+                                (players.throwdown_locks).
   tpall [player]                Everyone to you (admins in game) or to a player.
   tphere <player>               One player to you (admins in game).
   teleport <players> <player|x y z>
@@ -588,6 +661,7 @@ or Travel, and voice, distances, placement and kicks from the Multiplayer menu.
                                 Time of day on every map (needs layer-sync on).
   votes [map|kick|tod on|off|<percent>]   The vote settings (see votes).
   votes seconds <n>   votes cooldown <n>   vote-cancel
+  votes kick-minutes <n>|restart   How long a vote kick keeps the player out (5).
   votes <vote> seconds|cooldown|min-players <n>   One vote's own limits; <vote>
                                 is map, kick, tod or a custom vote's name, which
                                 also takes on|off|<percent>.

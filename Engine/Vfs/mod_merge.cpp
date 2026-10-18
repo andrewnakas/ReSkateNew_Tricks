@@ -2,9 +2,11 @@
 
 #include "content_cache.h"
 #include "content_catalogs.h"
+#include "mod_item_sources.h"
 #include "mod_merge_internal.h"
 #include "mod_store_copies.h"
 #include "native_db.h"
+#include "Engine/Core/Platform/path_text.h"
 
 #include <Windows.h>
 
@@ -46,9 +48,9 @@ constexpr std::array<std::string_view, 2> launch_superbundles{"Win32/globals.toc
 // (mod_store_copies.h) gets a problem; true when any does. The problem says no
 // more than that the mod could not be merged: what was found is not for the
 // mod's author to read. The catalogue is only read once a mod turns out to add
-// an item at all.
+// an item at all. `added` gets the items each mod read adds, when the check ran.
 bool store_copy_problems(const Catalog& all, MergeReport& report, const std::vector<std::string>& checked,
-                         std::size_t threads, bool background) {
+                         std::size_t threads, bool background, std::optional<std::vector<StoreCopies::Added>>& added) {
     // (Only when some are skipped is the catalogue copied, without them.)
     std::optional<Catalog> fewer;
     if (!checked.empty()) {
@@ -63,6 +65,9 @@ bool store_copy_problems(const Catalog& all, MergeReport& report, const std::vec
         if (!store) store = content_cache::read_catalogs(content_cache::directory());
         return store->reserved(key);
     }, &report.notes, threads, background);
+    // (No mod to read is a check that ran and found no items.)
+    if (found.read || std::none_of(catalog.mods.begin(), catalog.mods.end(), [](const Mod& mod) { return mod.provides_layout; }))
+        added = std::move(found.added);
     for (const auto& source : found.mods) report.problems[source.mod].emplace_back(store_copies_problem);
     return !found.mods.empty();
 }
@@ -100,7 +105,9 @@ MergeReport merge_mods(const Catalog& catalog, const MergeObserver& observe, con
             fingerprint += " inactive " + mod.name + " " + mod_fingerprint(mod.directory);
         if (options.live) {
             fs::remove(output / stamp_file, error);
-        } else if (auto previous = previous_merge(output, fingerprint)) {
+        } else if (auto previous = previous_merge(output, fingerprint);
+                   previous && (!storeKnown || fs::exists(output / item_sources_file, error))) {
+            // (A patch from before items were traced to their mods is built again, once.)
             return std::move(*previous);
         }
         // A mod that adds copies of store items is not loaded at all. Found before
@@ -111,8 +118,28 @@ MergeReport merge_mods(const Catalog& catalog, const MergeObserver& observe, con
         // launch (the player is waiting on nothing else), half of them and fewer while the game runs.
         const auto cores = std::max(1U, std::thread::hardware_concurrency());
         const std::size_t readers = std::min<std::size_t>(options.live ? std::max(1U, cores / 2) : cores, options.live ? 6U : 8U);
+        std::optional<std::vector<StoreCopies::Added>> itemsRead;
         if (storeKnown && store_copy_problems(catalog, report, options.live ? options.checked : std::vector<std::string>{},
-                                              readers - 1, options.live)) return report;
+                                              readers - 1, options.live, itemsRead)) return report;
+        // Which mod each item is from (mod_item_sources.h): what was just read, and for a mod a
+        // live merge did not read again, what the launch's merge found. Read before the patch
+        // folder is cleared.
+        std::optional<std::vector<ItemSource>> itemSources;
+        if (itemsRead) {
+            const auto before = options.live ? read_item_sources(output / item_sources_file) : std::vector<ItemSource>{};
+            itemSources.emplace();
+            for (const auto* mod : mods) {
+                std::error_code outside;
+                const auto folder = fs::relative(mod->directory, catalog.root, outside);
+                ItemSource source{mod->name, mod->title, mod->author, mod->version,
+                                  outside ? std::string() : path_utf8(folder.generic_wstring()), {}};
+                const auto read = std::ranges::find(*itemsRead, mod->name, &StoreCopies::Added::mod);
+                const auto earlier = std::ranges::find(before, mod->name, &ItemSource::mod);
+                if (read != itemsRead->end()) source.keys = std::move(read->keys);
+                else if (earlier != before.end()) source.keys = earlier->keys;
+                if (!source.keys.empty()) itemSources->push_back(std::move(source));
+            }
+        }
         if (!options.live) fs::remove_all(output, error);
         lap("checking the mods");
 
@@ -289,8 +316,8 @@ MergeReport merge_mods(const Catalog& catalog, const MergeObserver& observe, con
                 // Archive 1 stays the patch's own file, never a link to a mod's:
                 // a live apply appends manifests and new mods to it while the
                 // game has it open, and a linked file cannot be swapped for a
-                // private copy then (Windows keeps it in use).
-                claimed.insert(manifestArchive);
+                // private copy then (Windows keeps it in use). Placeholder indexes name no file.
+                claimed.insert({manifestArchive, CasStore::waiting_archive, CasStore::carried_archive});
                 if (number == manifestArchive) {
                     if (const auto free = claim(directory); free) {
                         spot.archive = *free;
@@ -442,7 +469,7 @@ MergeReport merge_mods(const Catalog& catalog, const MergeObserver& observe, con
                     for (std::size_t index = 0; index < job.merged.bundles.size(); ++index) {
                         auto region = fb::read_bundle_region(job.merged.bundles[index].region);
                         if (std::ranges::any_of(region.files, [](const fb::BundleFileInfo& file) {
-                                return CasStore::waits(file.location); }))
+                                return CasStore::placeholder(file.location); }))
                             job.held.emplace_back(index, std::move(region));
                     }
             } catch (...) {
@@ -509,9 +536,10 @@ MergeReport merge_mods(const Catalog& catalog, const MergeObserver& observe, con
             }
             for (auto& chunk : job.merged.chunks) job.store->settled(chunk.location, chunk.offset);
             for (const auto& [installChunk, archive] : job.used)
-                used.emplace(installChunk, archive == CasStore::waiting_archive ? manifestArchive : archive);
+                used.emplace(installChunk, CasStore::placeholder(archive) ? manifestArchive : archive);
             report.mergedBundles += job.report.mergedBundles;
             report.mergedAssets += job.report.mergedAssets;
+            report.unchangedCopies += job.report.unchangedCopies;
             report.notes.insert(report.notes.end(), std::make_move_iterator(job.report.notes.begin()),
                                 std::make_move_iterator(job.report.notes.end()));
             for (auto& [mod, problems] : job.report.problems) {
@@ -690,6 +718,13 @@ MergeReport merge_mods(const Catalog& catalog, const MergeObserver& observe, con
         declare("layeredInstallChunkFiles");
         declare("unlayeredInstallChunkFiles");
 
+        if (itemSources) {
+            try {
+                write_item_sources(output / item_sources_file, *itemSources);
+            } catch (const std::exception& failure) {
+                report.notes.push_back(std::string("Item cards will not say which mod they are from: ") + failure.what());
+            }
+        }
         if (!options.live) {
             const auto rebuilt = native_db::write(layout);
             std::vector<unsigned char> file(native_db::envelope_size, 0);

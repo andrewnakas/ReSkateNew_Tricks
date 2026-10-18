@@ -126,6 +126,9 @@ struct Peer {
     // as their poses are shown, so the sparks are where their skater is.
     std::deque<std::pair<std::uint64_t, Impact>> impacts;
     ChatRate chat_rate;
+    // Dots above this player until this time (0: they stopped). typing_notice is the last
+    // accepted "still typing", so a flood is not relayed.
+    std::uint64_t typing_until{}, typing_notice{};
     // Chat proofs (session_receive.cpp): the copies of their lines this player sent us over
     // their own Steam connection, and the lines the host passed on as theirs that wait for one.
     struct ChatProof {
@@ -165,6 +168,7 @@ struct Session {
     unsigned object_limit{}; // objects each player may have placed; 0: no limit
     bool object_scaling{true}; // the dedicated server lets players resize what they place
     bool sync_effects{true};   // the dedicated server has players see each other's skater effects
+    bool sync_drones{true};    // the dedicated server has players see each other's FPV drones
     // What guests may use: the host's choice, or the host's roster for a guest.
     bool guest_noclip = true, guest_no_bail = true, guest_boosts = true;
     // Host: guests skate with its physics tuning. Guest: the host's roster says so (a
@@ -223,6 +227,9 @@ struct Session {
     SteamTransport transport;
     SteamLobbies lobbies{make_steam_lobby_api(), [](std::uint64_t host) { return banned_host(host) || reskate_banned(host); }};
     SteamServerBrowser servers;
+    // When the lobby and server lists were last searched. Every search in the game, asked for
+    // or automatic, waits multiplayer_browse_interval_us after it (take_browse).
+    std::uint64_t browsed{};
     // Guest of a dedicated server: whether the roster lists us as an admin,
     // and the server's voice range from it.
     // On a dedicated server: what the player's role gives them (its permissions packet), and the
@@ -255,14 +262,17 @@ struct Session {
     // The map is not installed and is being fetched (take_map_need): since when, 0 for not.
     // The host is told with what is sent while waiting (Packet::map_fetching).
     std::uint64_t fetching_since{};
+    std::uint64_t map_fetch_deadline{};
     std::optional<MapNeed> map_need;          // take_map_need()
     // The session a missing map ended, for "rejoin": who hosted it and the password key it was joined with.
     struct Rejoin {
         Invite invite;
         std::optional<PasswordKey> password;
+        std::uint64_t deadline_us{};
     };
     std::optional<Rejoin> rejoin;
     std::string leave_notice;                 // take_leave_notice()
+    std::string removed_notice;               // take_removed_notice()
     std::uint64_t joined_public_lobby{};
     std::array<Peer, max_remote_players> peers;
     // Players take the lowest free slots, so every one sits below this mark
@@ -304,6 +314,9 @@ struct Session {
     bool chat_filter = true;     // bad words in chat show as **** (Engine/Core/Text/word_filter.h)
     // Chat bubbles above each skater's head (Hud/custom_nametags.h, nametag_overlay.cpp).
     bool chat_bubbles = true, chat_bubbles_own{};
+    // Grey dots above this skater until this time. The overlay sets it while the chat
+    // input is changing, and clears it after three seconds idle or when the box closes.
+    std::uint64_t local_typing_until{};
     float chat_bubbles_distance = 40.f, chat_bubbles_duration = 5.f;
     int chat_bubbles_history = 3;
     bool game_menu{};            // a game menu is up or the game's UI is hidden: no chat on screen
@@ -329,6 +342,8 @@ struct Session {
     std::uint64_t secret{}, epoch{}, map{}, host_id{}, next_send{}, last_hello{}, last_roster{},
         last_cosmetic_capture{}, last_routes{}, last_network_log{}, network_now{};
     std::uint32_t sequence{}, roster_sequence{};
+    // Whose placed objects are solid for this player (the rest are ghosts): see objects_solid().
+    std::map<std::uint64_t, bool> objects_solid;
     std::uint64_t local_pose_count{}, logged_local_pose_count{};
     std::size_t last_skater_bones{}, last_board_bones{};
     std::optional<Appearance> sent_appearance;
@@ -446,7 +461,7 @@ bool identity_link(Session &s, std::uint64_t other);
 void add_chat(Session &s, std::uint64_t sender, std::string name, std::string text, bool local = false, bool marks = true);
 // The colour and badge of one of the backend's categories.
 std::pair<std::uint32_t, std::string> mark_role(IdentityList list);
-// A player's role colour and badge ("Dev", "Staff", "Content Creator", "Centrix", "Homie", "Admin", "Host", "Friend" or none), shown in chat
+// A player's role colour and badge ("Dev", "ReSkate Admin", "Content Creator", "Centrix", "Homie", "Admin", "Host", "Friend" or none), shown in chat
 // and on their nametag. `local`: the local player.
 std::pair<std::uint32_t, std::string> player_role(Session &s, std::uint64_t id, bool local, bool marks = true);
 // Sends one line from this player; returns why not when it cannot.
@@ -462,13 +477,14 @@ std::string answer_server_poll(Session &s, std::size_t answer);
 inline std::atomic<bool> server_vote_open_flag{};
 inline std::atomic<MapPackageLookup> map_package_lookup{};
 inline std::atomic<bool> fetching_map_flag{};
+inline std::atomic<std::uint64_t> map_fetch_deadline_flag{}, map_load_held{};
 // A guest without the map is downloading it: the clock they are loading against starts over
 // each time they say so, for as long as map_fetch_limit_us from the first time.
 inline void guest_fetching(Peer &peer, std::uint64_t now) {
     // (Only for a guest who is past the password.)
     if (!peer.handshaken && !peer.map_authorized) return;
     if (!peer.fetching_since) peer.fetching_since = now;
-    if (now - peer.fetching_since > map_fetch_limit_us) return;
+    if (map_fetch_policy::host_expired(peer.fetching_since, now)) return;
     if (!peer.handshaken) peer.connected_at = now;
     else if (peer.travel_since) peer.travel_since = now;
 }
@@ -500,6 +516,13 @@ std::string send_party_chat(Session &s, std::string_view typed);
 std::vector<MultiplayerChatCommand> chat_commands(const Session &s);
 // One encoded throwdown message from this player to everyone else (through the host).
 void send_throwdown(Session &s, std::vector<std::uint8_t> message);
+// Tell the session this player is typing (`on`) or has stopped. Relayed like chat.
+void send_typing(Session &s, bool on);
+// Whether `id`'s placed objects are solid for this player. The saved choice for them when
+// there is one; else a player's are ghosts, and a dedicated server's own (its parks, which
+// everyone is there to skate) are solid. Read when they are first seen and handed to the
+// objects (network_object_runtime.h).
+bool objects_solid(Session &s, std::uint64_t id);
 // session_send.cpp
 Packet packet(Session &s, PacketKind kind, std::uint64_t now);
 void reset_direct(Session &s, Peer &p, std::uint64_t now);
@@ -558,6 +581,9 @@ void apply_distances(Session &s, const MultiplayerDistances &distances);
 void apply_object_placement(Session &s, ObjectPlacement policy);
 // The session's limit, and this game's own share of it: none while hosting or as a server's admin.
 void apply_object_limit(Session &s, unsigned limit);
+// Whether a dedicated server lets players resize what they place, and whether this game may (the
+// host and a role that may always build are exempt): the placements follow it.
+void apply_object_scaling(Session &s, bool allowed);
 // Stores what guests may use and applies it to the local player (the host and a dedicated
 // server's admins are exempt).
 void apply_guest_tools(Session &s, bool noclip, bool no_bail, bool boosts);
