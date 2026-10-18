@@ -144,13 +144,16 @@ const std::vector<Guide> &guides(tricks::Family family) {
     static const std::vector<Guide> pregrab{
         {"pregrab", "Nose / Tail Grab (pre-grab)",
          "1. Riding, hold a trigger: RT grabs with the right hand, LT with the left (the trigger alone is the game's own grab, mid-board).\n"
-         "2. Push the left stick up for the nose (the end ahead), or down for the tail, for a moment.\n"
-         "3. The hand moves to that end. Keep the trigger held; let go of it to stand back up. The left stick can go back to the middle.",
-         {{"Trigger + left stick up: nose", Click::none, {}, false, 0, 0, {centre, at(90)}},
-          {"... left stick down: tail", Click::none, {}, false, 0, 0, {centre, at(270)}}}},
+         "2. Push the right stick up for the nose (the end ahead), or down for the tail, for a moment.\n"
+         "3. The hand moves to that end. Let the right stick back to the middle; keep the trigger held, let go of it to stand back up.\n"
+         "The front hand (the one on the nose's side) can pop and throw from it; the rear hand only holds (the 'Rear-hand tricks' setting lets it).\n"
+         "The trigger alone is the game's indy (RT) or melon (LT): from it an ollie, a kickflip or a heelflip, or hold the right stick up or down to take the nose or tail.",
+         {{"Trigger + right stick up: nose", Click::none, {centre, at(90)}, false},
+          {"... right stick down: tail", Click::none, {centre, at(270)}, false}}},
         {"pregrab_ollie", "Nose / Tail Grab Ollie",
-         "From a pre-grab, trigger still held, flick an ollie (right stick down, then up) or a nollie (up, then down). The pop is small and the hand stays on: "
-         "in the air it is a nose or tail grab, and you land back in the pre-grab while the trigger is held.",
+         "From a pre-grab, trigger still held and the right stick back in the middle, flick an ollie (right stick down, then up) or a nollie (up, then down). The pop is small and the hand stays on: "
+         "in the air it is a nose or tail grab, and you land back in the pre-grab while the trigger is held. The front hand's nose grab ollie is a Playcub Ollie; "
+         "from an indy or melon it is an Indy / Melon Ollie.",
          {{"Ollie: down, then up", Click::none, {at(270), at(90)}, false}, {"Nollie: up, then down", Click::none, {at(90), at(270)}, false}}},
         {"fingerflip", "Fingerflip",
          "From a pre-grab, flick a kickflip (down, then up to the kick's diagonal), a heelflip (the other diagonal) or a shuvit (down, then to a side). "

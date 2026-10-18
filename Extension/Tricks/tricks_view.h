@@ -56,7 +56,7 @@ inline constexpr TrickInfo trick_catalog[]{
     {"grindgrab", Family::air, "Grind Grab", "Press a trigger while grinding: RT indy, LT melon, both a double grab, on any grind", 200},
     {"fandango", Family::air, "Fandango", "Hold A in a crooked grind: the back foot comes off the board", 300},
     {"dolphin", Family::flickit, "Dolphin Flip", "Flick down, up and straight back down: a forward varial (one front flip, half a turn)", 500},
-    {"pregrab", Family::pregrab, "Nose / Tail Grab", "Riding: a trigger with the left stick up grabs the nose, down the tail (RT the right hand, LT the left)", 0},
+    {"pregrab", Family::pregrab, "Nose / Tail Grab", "Riding: a trigger with the right stick up grabs the nose, down the tail (RT the right hand, LT the left)", 0},
     {"pregrab_ollie", Family::pregrab, "Nose / Tail Grab Ollie", "From a pre-grab, flick an ollie or nollie: a small pop with the hand still on, into the air grab", 250},
     {"fingerflip", Family::pregrab, "Fingerflip", "From a pre-grab, flick a kickflip, heelflip or shuvit: the hand throws the board", 400},
     {"dragon", Family::flickit, "Dragon Flip", "Flick down, up and back down to a lower diagonal: a forward 360 (one front flip, a full turn)", 650},
@@ -95,7 +95,8 @@ inline constexpr SettingInfo setting_catalog[]{
     {"nc_spin_ms", Family::nocomply, "No comply flip time", "How long the board takes to flip in a no comply's air", 200, 800, 10, "%.0f ms"},
     {"air_spin_ms", Family::air, "Extra flip time", "How long an in-air extra takes", 150, 800, 10, "%.0f ms"},
     {"pregrab_pop", Family::pregrab, "Pre-grab pop", "How big the ollie from a pre-grab is (0 the smallest)", 0, 1, 0.05f, "%.2f"},
-    {"pregrab_over", Family::pregrab, "Hand past the truck", "Where the hand holds the nose or tail, past the truck", 0, 0.3f, 0.01f, "%.2f m"},
+    {"pregrab_rear", Family::pregrab, "Rear-hand tricks (not stock)", "1: a nose or tail held with the rear hand pops and throws too (stock: only the front hand)", 0, 1, 1, "%.0f"},
+    {"pregrab_grip", Family::pregrab, "Hand past the truck", "Where the wrist holds the nose or tail, past the truck (0.21 is the very end)", 0, 0.3f, 0.01f, "%.2f m"},
     {"fingerflip_ms", Family::pregrab, "Fingerflip time", "How long the hand's throw takes to turn the board", 250, 900, 10, "%.0f ms"},
     {"flickit_spin_ms", Family::flickit, "Flick-it flip time", "How long a dolphin, dragon or big spin takes to turn the board", 250, 900, 10, "%.0f ms"},
 };

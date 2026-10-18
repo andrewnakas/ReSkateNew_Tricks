@@ -105,6 +105,8 @@ std::string take_hand_reach();
 void set_hand_reach_frame(int frame, float ankle) noexcept;
 // The air grab: the drawn board lifted this far toward the hips (0 off), the legs bent to keep the feet on it.
 void set_hand_reach_lift(float metres) noexcept;
+// The hand on the board's nose side of the body, as last drawn: 0 right, 1 left, -1 not seen yet.
+int hand_reach_front() noexcept;
 void set_pose_edit_phase(int phase) noexcept;
 int pose_edit_phase() noexcept;
 std::uint32_t take_limb_free_writes() noexcept;
