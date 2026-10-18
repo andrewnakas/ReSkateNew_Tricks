@@ -107,6 +107,9 @@ void set_hand_reach_frame(int frame, float ankle) noexcept;
 void set_hand_reach_lift(float metres) noexcept;
 // The hand on the board's nose side of the body, as last drawn: 0 right, 1 left, -1 not seen yet.
 int hand_reach_front() noexcept;
+// The other hand on the board as well (a double grab), for as long as set_hand_reach keeps the reach on: 0 right, 1 left,
+// -1 none; `end` +1 the nose, -1 the tail, 0 its rail mid-board.
+void set_hand_reach_second(int hand, float end) noexcept;
 void set_pose_edit_phase(int phase) noexcept;
 int pose_edit_phase() noexcept;
 std::uint32_t take_limb_free_writes() noexcept;

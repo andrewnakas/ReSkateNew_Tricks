@@ -228,7 +228,14 @@ struct Runtime {
     // The owner, 2026-10-18: the end held stays the end held until the trigger is let go (the stick pushed the other way
     // does not change it, and a pre-grab dropped with the trigger still down comes back on that end).
     float pregrab_keep_end{};
-    int pregrab_keep_hand{-1};              // the right stick back in the middle since the entry: flicks are read only then
+    int pregrab_keep_hand{-1};
+    // Both hands (the owner, 2026-10-18): the other trigger as well puts that hand on the board too, on its rail, or on
+    // the nose / tail with the left stick held up / down (kept until that trigger is let go). Only an ollie or a nollie
+    // pops from it, and a smaller one.
+    bool pregrab_two{};
+    float pregrab_end2{};
+    std::uint64_t pregrab_two_since{}, pregrab_ly_since{};
+    float pregrab_two_jump{0.0f};        // Float.Intent.JumpStrength held through a two-hand pop (-1 the game's own)              // the right stick back in the middle since the entry: flicks are read only then
     bool pregrab_write_grab{true};       // the game's air grab written as the nose / tail grab type
     int pregrab_nose_grab{21}, pregrab_tail_grab{11}; // Enum.DetailedGrabType: Nose, Tail
     float pregrab_jump{-1};              // <dev> Float.Intent.JumpStrength held through the pop (-1 off)
@@ -2058,6 +2065,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
             };
             const auto reach = [&](std::uint32_t ms) {
                 if (!r.pregrab_reach || !core) return;
+                set_hand_reach_second(r.pregrab_two && ms ? 1 - r.pregrab_hand : -1, r.pregrab_end2);
                 std::string detail;
                 if (!set_hand_reach(base, core, ms, r.pregrab_hand, r.pregrab_end, r.pregrab_over, r.pregrab_up, detail) && detail != r.pregrab_error) {
                     r.pregrab_error = detail;
@@ -2065,6 +2073,24 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 }
             };
             const auto end_name = [&] { return std::abs(r.pregrab_end) < 0.5f ? (r.pregrab_hand ? "Melon" : "Indy") : r.pregrab_end >= 0 ? "Nose" : "Tail"; };
+            // Both hands: "Double Rail Grab", "Nose Tail Grab", "Nose Rail Grab" and so on.
+            const auto two_name = [&]() -> std::string {
+                const auto one = [](float e) -> std::string { return std::abs(e) < 0.5f ? "Rail" : e >= 0 ? "Nose" : "Tail"; };
+                const auto rank = [](const std::string &n) { return n == "Nose" ? 0 : n == "Tail" ? 1 : 2; };
+                const std::string a = one(r.pregrab_end), b = one(r.pregrab_end2);
+                if (a == b) return "Double " + a + " Grab";
+                return rank(a) < rank(b) ? a + " " + b + " Grab" : b + " " + a + " Grab";
+            };
+            // Up is the end ahead (the nose, or the tail riding fakie).
+            const auto end_for = [&](float y) {
+                if (!r.s_riding_fakie) r.s_riding_fakie = find_state(base, "Animation/Dingo/Bool.Physics.RidingFakie");
+                double fakie{};
+                (void)read_state_at(base, r.s_riding_fakie, 0, fakie);
+                return (y > 0) != (fakie != 0) ? 1.0f : -1.0f;
+            };
+            std::int16_t ly_raw{};
+            std::memcpy(&ly_raw, pad.data() + 6, 2);
+            const float left_y = ly_raw / 32767.0f;
             const auto stop = [&](const char *why) {
                 if (r.pregrab_stage == 1) ground_grab(false);
                 r.pregrab_keep_end = r.pregrab_end;
@@ -2073,9 +2099,13 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 r.pregrab_stage = 0;
                 r.pregrab_flick = -1;
                 r.pregrab_flick_stage = 0;
+                r.pregrab_two = false;
+                r.pregrab_two_since = 0;
                 reach(0);
             };
             const bool holding = r.pregrab_hand ? lt : rt;
+            const bool other = r.pregrab_hand ? rt : lt;
+            if (r.pregrab_stage >= 2 && r.pregrab_two && !other) r.pregrab_two = false;
             float lift = 0; // the air grab's: only in the air, holding, not thrown
             if (!r.pregrab_stage) {
                 // In: the trigger with the left stick pushed up or down for a moment, riding.
@@ -2139,8 +2169,32 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 else {
                     const bool mid = std::abs(r.pregrab_end) < 0.5f;
                     ground_grab(true);
-                    // Mid-board the game's own clip already holds the board.
-                    if (!mid) reach(120);
+                    // The other trigger: that hand on the board too.
+                    if (!other) {
+                        if (r.pregrab_two) logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pre-grab: the other hand let go.");
+                        r.pregrab_two = false;
+                        r.pregrab_two_since = 0;
+                    } else if (!r.pregrab_two) {
+                        if (!r.pregrab_two_since) r.pregrab_two_since = now;
+                        else if (now - r.pregrab_two_since >= 120) {
+                            r.pregrab_two = true;
+                            r.pregrab_end2 = std::abs(left_y) > 0.6f ? end_for(left_y) : 0.0f;
+                            r.pregrab_ly_since = 0;
+                            score_trick("pregrab", two_name());
+                            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pre-grab: both hands, {} (left stick {:.2f}).", two_name(), left_y);
+                        }
+                    } else if (std::abs(r.pregrab_end2) < 0.5f) {
+                        // From its rail, the left stick held up or down takes the nose or the tail.
+                        if (std::abs(left_y) < 0.6f) r.pregrab_ly_since = 0;
+                        else if (!r.pregrab_ly_since) r.pregrab_ly_since = now;
+                        else if (now - r.pregrab_ly_since >= r.pregrab_switch_ms) {
+                            r.pregrab_end2 = end_for(left_y);
+                            score_trick("pregrab", two_name());
+                            logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pre-grab: both hands, {} (the left stick).", two_name());
+                        }
+                    }
+                    // Mid-board the game's own clip already holds the board (one hand).
+                    if (!mid || r.pregrab_two) reach(120);
                     if (!mid && core && r.pregrab_crouch > 0) set_limb_free(core, 120, 0, 1.0f, r.pregrab_crouch);
                     // The flick is the mod's: the game's own reading of it would pop out of the grab into its own trick.
                     DingoSDKOverlayTricksMaskRight();
@@ -2176,8 +2230,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     // Which tricks: from an indy / melon an ollie, a kickflip or a heelflip; from the nose or tail, all of them
                     // with the front hand, none with the rear one (unless `pregrab_rear`).
                     const int front = hand_reach_front();
-                    const bool rear = !mid && front >= 0 && front != r.pregrab_hand && r.pregrab_rear < 0.5f;
-                    if (flick > 0 && ((mid && flick != 1 && flick != 2 && flick != 3) || rear)) {
+                    const bool rear = !mid && !r.pregrab_two && front >= 0 && front != r.pregrab_hand && r.pregrab_rear < 0.5f;
+                    // Both hands on: an ollie or a nollie only.
+                    const bool two_block = r.pregrab_two && flick != 1 && flick != 16;
+                    if (flick > 0 && ((mid && flick != 1 && flick != 2 && flick != 3) || rear || two_block)) {
                         if (rear && !r.pregrab_rear_said) {
                             r.pregrab_rear_said = true;
                             logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pre-grab: the rear hand does no tricks (tricks pregrab rear 1 lets it).");
@@ -2208,6 +2264,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 DingoSDKOverlayTricksMaskTriggers();
                 reach(120);
                 if (r.pregrab_jump >= 0) put(r.s_jump_strength, "Animation/Dingo/Float.Intent.JumpStrength", 2, r.pregrab_jump);
+                else if (r.pregrab_two && r.pregrab_two_jump >= 0) put(r.s_jump_strength, "Animation/Dingo/Float.Intent.JumpStrength", 2, r.pregrab_two_jump);
                 if (physics.valid && physics.state >= 300) stop("off the board");
                 else if (in_air) {
                     r.pregrab_stage = 3;
@@ -2215,7 +2272,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     if (!flip) {
                         const bool mid = std::abs(r.pregrab_end) < 0.5f;
                         const bool playcub = !mid && r.pregrab_end > 0 && r.pregrab_flick == 1 && hand_reach_front() == r.pregrab_hand;
-                        score_trick("pregrab_ollie", playcub ? std::string("Playcub Ollie")
+                        score_trick("pregrab_ollie", r.pregrab_two ? std::format("{} {}", two_name(), r.pregrab_flick == 16 ? "Nollie" : "Ollie")
+                                                     : playcub ? std::string("Playcub Ollie")
                                                      : mid   ? std::format("{} Ollie", end_name())
                                                              : std::format("{} Grab {}", end_name(), r.pregrab_flick == 16 ? "Nollie" : "Ollie"));
                         r.pregrab_scored = true;
@@ -3539,7 +3597,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
                            r.fandango_up, r.fandango_back, r.fandango_side, r.fandango_leg, r.fandango_family);
     }
     if (verb == "pregrab") {
-        const auto usage = "usage: tricks pregrab on|off | reach 0|1 | place <over m> <up m> | at 0|1|2 (edit after the animation, before or after the render hand-off) | frame feet|board|joints [ankle m] | airgrab <ms> | tuck <m> | lift <m> | rear 0|1 | mid 0|1 | switch <ms> | pop <0..1> | gap <ms> | entry <ms> | grab <nose> <tail> | write 0|1 | jump <v|-1> | ff <kick|heel|shuv|fsshuv> <type|-1> | ffms <ms> | status";
+        const auto usage = "usage: tricks pregrab on|off | reach 0|1 | place <over m> <up m> | at 0|1|2 (edit after the animation, before or after the render hand-off) | frame feet|board|joints [ankle m] | airgrab <ms> | tuck <m> | lift <m> | rear 0|1 | mid 0|1 | switch <ms> | twojump <0..1, -1 off> | pop <0..1> | gap <ms> | entry <ms> | grab <nose> <tail> | write 0|1 | jump <v|-1> | ff <kick|heel|shuv|fsshuv> <type|-1> | ffms <ms> | status";
         if (arguments.empty()) return usage;
         const auto &a = arguments[0];
         const auto f = [&](std::size_t i) { return static_cast<float>(std::atof(arguments[i].c_str())); };
@@ -3552,6 +3610,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         else if (a == "type" && arguments.size() == 2) r.pregrab_ground_type = std::atoi(arguments[1].c_str());
         else if (a == "crouch" && arguments.size() == 2) r.pregrab_crouch = std::clamp(f(1), 0.0f, 0.6f);
         else if (a == "tuck" && arguments.size() == 2) r.pregrab_tuck = std::clamp(f(1), 0.0f, 0.6f);
+        else if (a == "twojump" && arguments.size() == 2) r.pregrab_two_jump = std::clamp(f(1), -1.0f, 1.0f);
         else if (a == "rear" && arguments.size() == 2) r.pregrab_rear = arguments[1] == "1" || arguments[1] == "on" ? 1.0f : 0.0f;
         else if (a == "switch" && arguments.size() == 2) r.pregrab_switch_ms = static_cast<std::uint32_t>(std::clamp(std::atoi(arguments[1].c_str()), 100, 1000));
         else if (a == "mid" && arguments.size() == 2) r.pregrab_mid = arguments[1] == "1" || arguments[1] == "on";
