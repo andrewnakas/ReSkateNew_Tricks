@@ -103,6 +103,8 @@ std::string take_hand_reach();
 // pose is published, 2 after it (the default).
 // The pre-grab hand's deck: 0 the pose's board joints, 1 the feet (the ankle joints `ankle` m over it), 2 the board entity.
 void set_hand_reach_frame(int frame, float ankle) noexcept;
+// The air grab: the drawn board lifted this far toward the hips (0 off), the legs bent to keep the feet on it.
+void set_hand_reach_lift(float metres) noexcept;
 void set_pose_edit_phase(int phase) noexcept;
 int pose_edit_phase() noexcept;
 std::uint32_t take_limb_free_writes() noexcept;

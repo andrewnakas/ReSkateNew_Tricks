@@ -404,6 +404,16 @@ struct HandReach {
     std::atomic<int> board_axis{-1};          // the board entity matrix's row that runs along the feet
     std::uintptr_t board_entity{}, board_for{}; // render thread: the drawn board, found for this skater component
     LV last_place{};                          // render thread: the character's world place at the last edit
+    // The air grab: the drawn board is lifted toward the hips by `lift` (m) and both drawn legs bent to keep the feet on
+    // it (the game plays no grab of its own in the hand-on ollie and the physics tuck does not draw: runs qa-qc).
+    std::atomic<float> lift{};                // wanted (tricks sets it each tick in the air), eased in and out
+    float lift_now{};                         // render thread
+    std::uintptr_t board_holder{};            // render thread: the drawn board's animation holder
+    LV board_lift{};                          // render thread: this frame's lift in the world, for the board's hand-off
+    bool board_lift_set{};
+    std::atomic<std::uint32_t> board_lifts{}, leg_bends{};
+    std::atomic<float> lean{0.7f}, leaned{}; // the spine's largest turn toward an out-of-reach goal (rad), and the last one (deg)
+    std::atomic<float> board_bone0{}, board_bone1{}, board_place{}; // <dev> the board rig's first bones' and entity's distance from the origin
     std::atomic<float> ahead_along{}, ahead_board{}; // the travel direction against the nose direction used, and the board's row
     std::atomic<float> hand_along{};          // where the hand ends, along the deck from its middle (m; + toward the nose)
     // Whether the edits are drawn: each edit's arm rotations, compared at the next hand-off point with what is there then.
@@ -463,7 +473,8 @@ void hand_reach_edit(std::uintptr_t component, int phase) noexcept {
     const float dt = f.last ? std::clamp(static_cast<float>(now - f.last) / 1000.0f, 0.0f, 0.1f) : 0.0f;
     f.last = now;
     f.weight = std::clamp(f.weight + (wanted ? dt : -dt) / 0.12f, 0.0f, 1.0f);
-    if (f.weight <= 0) return;
+    f.board_lift_set = false;
+    if (f.weight <= 0) { f.lift_now = 0; return; }
     const auto error = GetLastError();
     try {
         if (!resolve_arms(f)) { SetLastError(error); return; }
@@ -518,7 +529,11 @@ void hand_reach_edit(std::uintptr_t component, int phase) noexcept {
                 f.board_entity = 0;
                 std::uintptr_t collection{}, entity{};
                 if (first_person_read(component + 0x18, &collection, 8) && first_person_read(collection, &entity, 8)) {
-                    try { f.board_entity = multiplayer::read_native_board(first_person_read, base, entity).entity; } catch (...) {}
+                    try {
+                        const auto board = multiplayer::read_native_board(first_person_read, base, entity);
+                        f.board_entity = board.entity;
+                        f.board_holder = board.holder;
+                    } catch (...) {}
                 }
             }
             LX j0, j1;
@@ -555,6 +570,36 @@ void hand_reach_edit(std::uintptr_t component, int phase) noexcept {
                 else middle = feet_deck + (place - feet_deck) - feet_up * dot(place - feet_deck, feet_up);
                 half = 0.19f;
                 if (length(moved) > 0.005f && length(moved) < 1.0f) f.ahead_along.store(dot(unit(moved), forward), std::memory_order_relaxed);
+                f.board_place.store(length(LV{m[12], m[13], m[14]}), std::memory_order_relaxed);
+                // The air grab's lift: the board up toward the hips, the legs bent by as much (the feet stay on it), and
+                // the hand's goal with them.
+                f.lift_now += std::clamp(f.lift.load(std::memory_order_relaxed) - f.lift_now, -dt * 2.5f, dt * 2.5f);
+                if (f.lift_now > 0.005f) {
+                    const LV offset = feet_up * f.lift_now;
+                    const auto bend = [&](const LX& up_leg, const LX& knee, const LX& foot, std::uint16_t i0, std::uint16_t i1, std::uint16_t i2) {
+                        const LV a = up_leg.p, k = knee.p, c = foot.p;
+                        const float l1 = length(k - a), l2 = length(c - k);
+                        const LV to = c + offset - a;
+                        const float reach = std::clamp(length(to), std::abs(l1 - l2) + 1e-3f, (l1 + l2) * 0.999f);
+                        const LV dir = unit(to);
+                        const LV target = a + dir * reach;
+                        LV pole = (k - a) - dir * dot(k - a, dir);
+                        if (length(pole) < 1e-4f) pole = forward;
+                        pole = unit(pole);
+                        const float al = (l1 * l1 - l2 * l2 + reach * reach) / (2.0f * reach);
+                        const LV knee_to = a + dir * al + pole * std::sqrt(std::max(0.0f, l1 * l1 - al * al));
+                        const LQ r1 = turn_between(k - a, knee_to - a);
+                        const LQ r2 = turn_between(rotate(r1, c - k), target - knee_to);
+                        const LQ nu = unit(mul(r1, up_leg.q)), nk = unit(mul(mul(r2, r1), knee.q));
+                        // The foot keeps its turn in the world (flat on the board).
+                        return write_rotation(b, i0, unit(mul(conj(hips.q), nu))) && write_rotation(b, i1, unit(mul(conj(nu), nk))) &&
+                               write_rotation(b, i2, unit(mul(conj(nk), foot.q)));
+                    };
+                    if (bend(ur, lr, fr, 8, 9, 10) && bend(ul, ll, fl, 341, 342, 343)) f.leg_bends.fetch_add(1, std::memory_order_relaxed);
+                    middle = middle + offset;
+                    f.board_lift = rotate(world.q, offset);
+                    f.board_lift_set = true;
+                }
             }
         }
         const LV h = hips.p - middle;
@@ -566,6 +611,28 @@ void hand_reach_edit(std::uintptr_t component, int phase) noexcept {
         // On the edge the clip's hand already holds (toe or heel), kept within the deck.
         const LV goal = tip + up * f.up.load(std::memory_order_relaxed) + across * std::clamp(dot(hand.p - middle, across), -0.1f, 0.1f);
         const float s = f.weight * f.weight * (3.0f - 2.0f * f.weight);
+        // Out of the arm's reach (the nose in the hand-on ollie, run qe: 0.3 m short), the body leans: the lowest spine
+        // joint turns the shoulder toward the goal, up to `lean` (and the arm with it, before its own bend).
+        if (!f.path[side].empty()) {
+            const float l1 = length(fore.p - arm.p), l2 = length(hand.p - fore.p);
+            const float excess = length(arm.p + (goal - arm.p) * s - arm.p) - (l1 + l2) * 0.95f;
+            LX spine;
+            if (excess > 0 && read_joint(b, f.path[side][0], spine)) {
+                spine = compose(hips, spine);
+                const LV from = arm.p - spine.p, to = goal - spine.p;
+                const LV axis = unit(cross(from, to));
+                const float angle = std::min({excess / std::max(length(from), 0.1f), f.lean.load(std::memory_order_relaxed),
+                                              std::acos(std::clamp(dot(unit(from), unit(to)), -1.0f, 1.0f))});
+                if (length(axis) > 0.5f && angle > 0.001f) {
+                    const LQ turn{axis.x * std::sin(angle / 2), axis.y * std::sin(angle / 2), axis.z * std::sin(angle / 2), std::cos(angle / 2)};
+                    if (write_rotation(b, f.path[side][0], unit(mul(conj(hips.q), unit(mul(turn, spine.q)))))) {
+                        const auto carry = [&](LX& x) { x = {unit(mul(turn, x.q)), spine.p + rotate(turn, x.p - spine.p)}; };
+                        carry(shoulder); carry(arm); carry(fore); carry(hand);
+                        f.leaned.store(angle * 57.2958f, std::memory_order_relaxed);
+                    }
+                }
+            } else f.leaned.store(0, std::memory_order_relaxed);
+        }
         const LV a = arm.p, k = fore.p, c = hand.p;
         const float l1 = length(k - a), l2 = length(c - k);
         const LV to = c + (goal - c) * s - a;
@@ -653,6 +720,29 @@ void pose_editors_on_render(std::uintptr_t animation_interface, std::uintptr_t r
     if (wanted == phase)
         if (const auto component = leg_lift().component.load(std::memory_order_relaxed); holder_is(component, animation_interface, holder))
             leg_lift_edit(component);
+    // The drawn board's hand-off: the air grab's lift, on the board rig's bone 1. Bone 0 sits at the origin and bone 1
+    // carries the board's world placement (run qd: 1413 m out, as the entity), so the lift is a world move of bone 1,
+    // turned into bone 0's frame.
+    if (after && hand.board_lift_set && hand.board_holder && hand.board_entity && animation_interface == hand.board_holder + 0xc0) {
+        const auto base = hand.base.load(std::memory_order_relaxed);
+        const auto pose = multiplayer::read_native_pose_layout(first_person_read, base, hand.board_holder, 64);
+        std::uintptr_t collection{};
+        std::array<std::uint8_t, 2> layout{};
+        std::array<float, 16> m{};
+        std::array<float, 12> bone{}, bone1{};
+        if (pose.buffer && first_person_read(hand.board_entity + 0x70, &collection, 8) && first_person_read(collection + 9, layout.data(), 2) &&
+            layout[0] <= 128 && layout[1] <= 32 &&
+            first_person_read(collection + 0x10 + (std::uintptr_t{layout[0]} + 2 * layout[1]) * 0x20, m.data(), sizeof(m)) &&
+            first_person_read(pose.buffer, bone.data(), sizeof(bone)) && first_person_read(pose.buffer + 0x30, bone1.data(), sizeof(bone1))) {
+            hand.board_bone0.store(length(LV{bone[8], bone[9], bone[10]}), std::memory_order_relaxed);
+            hand.board_bone1.store(length(LV{bone1[8], bone1[9], bone1[10]}), std::memory_order_relaxed);
+            const LV local = rotate(conj(unit(LQ{bone[4], bone[5], bone[6], bone[7]})), hand.board_lift);
+            const std::array<float, 3> moved{bone1[8] + local.x, bone1[9] + local.y, bone1[10] + local.z};
+            if (std::isfinite(local.x) && first_person_write(pose.buffer + 0x30 + 0x20, moved.data(), sizeof(moved)))
+                hand.board_lifts.fetch_add(1, std::memory_order_relaxed);
+        }
+        hand.board_lift_set = false;
+    }
     SetLastError(error);
 }
 bool install_pose_editors(std::uintptr_t base, std::string& detail) noexcept {
@@ -704,13 +794,15 @@ std::string take_hand_reach() {
     auto& f = hand_reach();
     const auto j = f.joints.load();
     return std::format("{} hand edits at {}, {} hand at the {}, {:.2f} m from the goal before the reach, {:.2f} after, why {} (right arm joints {} {} {}, {} above); "
-                       "drawn check: kept {} rewritten {} (worst {:.1f} deg), published buffer same {} other {}; deck from the {} ({:.2f} m from the board joints'; the board entity {:.2f} m from the feet's, {:.2f} along {:.2f} up, axis {}); travel against the nose {:.2f}, the board's row {:.2f}; hand {:.2f} m along the deck", f.edits.exchange(0, std::memory_order_relaxed),
+                       "drawn check: kept {} rewritten {} (worst {:.1f} deg), published buffer same {} other {}; deck from the {} ({:.2f} m from the board joints'; the board entity {:.2f} m from the feet's, {:.2f} along {:.2f} up, axis {}); travel against the nose {:.2f}, the board's row {:.2f}; hand {:.2f} m along the deck; lift {:.2f} m: {} leg bends, {} board lifts, lean {:.0f} deg (board bones 0/1 {:.1f} {:.1f} m out, its entity {:.1f})", f.edits.exchange(0, std::memory_order_relaxed),
                        pose_phase.load() == 0 ? "the animation" : pose_phase.load() == 1 ? "the hand-off (before)" : "the hand-off (after)",
                        f.hand.load() ? "left" : "right", f.end.load() >= 0 ? "nose" : "tail", f.gap_before.load(), f.gap_after.load(), f.why.load(), j & 0xffff, (j >> 16) & 0xffff,
                        (j >> 32) & 0xffff, j >> 48, f.kept.exchange(0), f.rewritten.exchange(0), f.worst.exchange(0), f.same_buffer.exchange(0), f.other_buffer.exchange(0),
                        f.frame.load() == 2 ? "board entity" : f.frame.load() == 1 ? "feet" : "board joints", f.frame_gap.load(), f.board_gap.load(), f.board_along.load(),
-                       f.board_up.load(), f.board_axis.load(), f.ahead_along.load(), f.ahead_board.load(), f.hand_along.load());
+                       f.board_up.load(), f.board_axis.load(), f.ahead_along.load(), f.ahead_board.load(), f.hand_along.load(), f.lift.load(), f.leg_bends.exchange(0), f.board_lifts.exchange(0), f.leaned.load(),
+                       f.board_bone0.load(), f.board_bone1.load(), f.board_place.load());
 }
+void set_hand_reach_lift(float metres) noexcept { hand_reach().lift.store(std::clamp(metres, 0.0f, 0.6f), std::memory_order_relaxed); }
 void set_hand_reach_frame(int frame, float ankle) noexcept {
     hand_reach().frame.store(std::clamp(frame, 0, 2), std::memory_order_relaxed);
     hand_reach().ankle.store(std::clamp(ankle, -0.2f, 0.3f), std::memory_order_relaxed);

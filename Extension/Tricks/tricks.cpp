@@ -204,6 +204,7 @@ struct Runtime {
     float pregrab_over{0.12f}, pregrab_up{0.05f}; // the hand's place: metres past the truck, and up from it
     float pregrab_pop{0.0f};             // the stroke's strength (0..1: 40 to 500 ms down first; the smallest pop)
     float pregrab_crouch{0.25f};         // metres the pelvis drive is lowered while pre-grabbing (the hand reaches the end)
+    float pregrab_lift{0.35f};           // metres the drawn board comes up to the hips in the air (the legs bent, the hand on it)
     float pregrab_tuck{0.0f};            // <dev> and in the air: the knees up through the pelvis drive (off: the drawn legs stay as
                                          // the ollie clip has them, run qc; the game plays no grab of its own there, run qa/qb)
     std::uint32_t pregrab_gap{400};      // ms the stick is neutral (and the trigger hidden) before the stroke (150 never
@@ -2058,6 +2059,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 reach(0);
             };
             const bool holding = r.pregrab_hand ? lt : rt;
+            float lift = 0; // the air grab's: only in the air, holding, not thrown
             if (!r.pregrab_stage) {
                 // In: the trigger with the left stick pushed up or down for a moment, riding.
                 const bool asking = r.pregrab && trick_enabled(r, "pregrab") && on_ground && (lt || rt) && std::abs(ly) > 0.5f && r.freestyle == Freestyle::off &&
@@ -2144,6 +2146,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     // written as the nose or tail grab.
                     if (now - r.pregrab_air_at < r.pregrab_air_grab_ms) DingoSDKOverlayTricksMaskTriggers();
                     reach(120);
+                    if (holding) lift = r.pregrab_lift;
                     if (holding && core && r.pregrab_tuck > 0) set_limb_free(core, 80, 0, 1.0f, r.pregrab_tuck);
                     if (r.pregrab_write_grab && holding) {
                         if (!r.s_detailed_grab) r.s_detailed_grab = find_state(base, "Animation/Dingo/Enum.GS.DetailedGrabType");
@@ -2193,6 +2196,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                     } else stop("landed");
                 }
             }
+            set_hand_reach_lift(r.pregrab_stage == 3 ? lift : 0.0f);
             if (r.pregrab_stage && now >= r.pregrab_log) {
                 r.pregrab_log = now + 250;
                 double grab{};
@@ -3441,7 +3445,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
                            r.fandango_up, r.fandango_back, r.fandango_side, r.fandango_leg, r.fandango_family);
     }
     if (verb == "pregrab") {
-        const auto usage = "usage: tricks pregrab on|off | reach 0|1 | place <over m> <up m> | at 0|1|2 (edit after the animation, before or after the render hand-off) | frame feet|board|joints [ankle m] | airgrab <ms> | tuck <m> | pop <0..1> | gap <ms> | entry <ms> | grab <nose> <tail> | write 0|1 | jump <v|-1> | ff <kick|heel|shuv|fsshuv> <type|-1> | ffms <ms> | status";
+        const auto usage = "usage: tricks pregrab on|off | reach 0|1 | place <over m> <up m> | at 0|1|2 (edit after the animation, before or after the render hand-off) | frame feet|board|joints [ankle m] | airgrab <ms> | tuck <m> | lift <m> | pop <0..1> | gap <ms> | entry <ms> | grab <nose> <tail> | write 0|1 | jump <v|-1> | ff <kick|heel|shuv|fsshuv> <type|-1> | ffms <ms> | status";
         if (arguments.empty()) return usage;
         const auto &a = arguments[0];
         const auto f = [&](std::size_t i) { return static_cast<float>(std::atof(arguments[i].c_str())); };
@@ -3454,6 +3458,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         else if (a == "type" && arguments.size() == 2) r.pregrab_ground_type = std::atoi(arguments[1].c_str());
         else if (a == "crouch" && arguments.size() == 2) r.pregrab_crouch = std::clamp(f(1), 0.0f, 0.6f);
         else if (a == "tuck" && arguments.size() == 2) r.pregrab_tuck = std::clamp(f(1), 0.0f, 0.6f);
+        else if (a == "lift" && arguments.size() == 2) r.pregrab_lift = std::clamp(f(1), 0.0f, 0.6f);
         else if (a == "airgrab" && arguments.size() == 2) r.pregrab_air_grab_ms = static_cast<std::uint32_t>(std::max(0, std::atoi(arguments[1].c_str())));
         else if (a == "gap" && arguments.size() == 2) r.pregrab_gap = static_cast<std::uint32_t>(std::max(0, std::atoi(arguments[1].c_str())));
         else if (a == "entry" && arguments.size() == 2) r.pregrab_entry_ms = static_cast<std::uint32_t>(std::max(0, std::atoi(arguments[1].c_str())));
