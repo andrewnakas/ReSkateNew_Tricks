@@ -1,6 +1,19 @@
 # ReSkate Tricks: status
 
-## START HERE (2026-10-17 ~17:30): pre-grab (nose / tail) built; the hand on the board does not draw yet
+## START HERE (2026-10-17 ~20:10): the pre-grab hand now draws on the nose / tail (ad2e0d6 INSTALLED, not launched)
+Commits 9570e02 + ad2e0d6, local only. Installed in the Skate folder; the owner's previous install (0ec1911) is in `devackup61017-190055`. Next: the owner plays it.
+
+**Why the hand never showed:** edits made right after the animation update are rewritten before the frame is drawn (run q1: 15/15 frames, ~170 deg). Edits at the render hand-off draw (the 1.2 m overhead goal raised the arm). New slot `multiplayer::set_render_pose_editor` (before and after the publication); the hand reach and the fandango leg moved there (`tricks pregrab at 0|1|2`, default 2). **The fandango leg may now draw for the first time: untested.**
+
+**Where the board is:** the pose's own board joints (376-382) are 0.6-0.8 m from the drawn board and were once turned round (run q6: the tail hand went to the nose). The deck is now the feet's (height) + the board entity's placement (middle; its matrix row 3 = the nose, it ran with the travel on every forward ride), trucks a fixed 0.19 m from the middle (`tricks pregrab frame feet|board|joints [ankle]`). Ground, run q8: hand 0.31 m out at the nose and at the tail, within 0.01 m of the goal; stills show it.
+
+**Air (hand-on ollie):** the game plays no grab of its own there (`grabbing 0` whatever the trigger timing, runs qa/qb; `tricks pregrab airgrab <ms>` dev) and the physics tuck does not draw (qc; `tricks pregrab tuck`, default 0). So in the air, holding, the render hand-off lifts the drawn board toward the hips (`tricks pregrab lift <m>`, 0.35; the board rig's bone 1 carries its world place, bone 0 is the origin), bends both drawn legs by as much, and leans the spine up to 40 deg toward a goal out of the arm's reach. Run qf: nose 0.00 m from the goal (lean 35-40), tail 0.02-0.04 m (lean 14-20). The rear camera cannot show the nose end; the tail end is visible.
+
+**Log line** "pre-grab stage N ... grabbing G: E hand edits at the hand-off (after) ... drawn check ... deck from the feet (... the board entity X m from the feet's ...); travel against the nose T ...; hand H m along the deck; lift L m: N leg bends, N board lifts, lean D deg".
+
+**Test pads (flat rig, dingolevel_root, scratchpad q*.ps1 pattern):** hold `a:200 n:500 a:200 n:500 rt=1+ly=1:400 rt=1:7000`; tail `lt=1+ly=-1`; air ollie `... rt=1:700 rt=1+ry=-1:150 rt=1+ry=1:120 rt=1:2500` with `tricks spinshot <tag> air 300`. The air comes ~800 ms after the flick.
+
+## EARLIER (2026-10-17 ~17:30): pre-grab (nose / tail) built; the hand on the board does not draw yet
 Plan: `C:\Users\andre\.claude\plans\wobbly-painting-sunset.md`. Committed locally, not installed (run.ps1 restores the old files after each run).
 
 **Controls.** Riding:
