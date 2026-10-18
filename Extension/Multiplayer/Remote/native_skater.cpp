@@ -334,7 +334,10 @@ void observe_destruction(std::uintptr_t entity) {
     }
 }
 bool render_pose_hook(std::uintptr_t animation_interface, std::uintptr_t render_data) {
+    const auto editor = shared().render_editor.load(std::memory_order_acquire);
+    if (editor) editor(animation_interface, render_data, false);
     const bool result = shared().original_render_pose(animation_interface, render_data);
+    if (editor && result) editor(animation_interface, render_data, true);
     if (const auto listener = shared().render_listener.load(std::memory_order_acquire); result && listener)
         listener(animation_interface);
     // A board holder's animation interface is holder + 0xc0.
@@ -599,6 +602,9 @@ void set_local_hidden_joint(std::uintptr_t component, std::uint16_t joint,
 }
 void set_render_pose_listener(RenderPosePublished listener) noexcept {
     shared().render_listener.store(listener, std::memory_order_release);
+}
+void set_render_pose_editor(RenderPoseEditor editor) noexcept {
+    shared().render_editor.store(editor, std::memory_order_release);
 }
 void set_animation_evaluated_listener(AnimationEvaluated listener) noexcept {
     shared().evaluated_listener.store(listener, std::memory_order_release);

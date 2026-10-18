@@ -204,8 +204,12 @@ struct Runtime {
     float pregrab_over{0.12f}, pregrab_up{0.05f}; // the hand's place: metres past the truck, and up from it
     float pregrab_pop{0.0f};             // the stroke's strength (0..1: 40 to 500 ms down first; the smallest pop)
     float pregrab_crouch{0.25f};         // metres the pelvis drive is lowered while pre-grabbing (the hand reaches the end)
+    float pregrab_tuck{0.0f};            // <dev> and in the air: the knees up through the pelvis drive (off: the drawn legs stay as
+                                         // the ollie clip has them, run qc; the game plays no grab of its own there, run qa/qb)
     std::uint32_t pregrab_gap{400};      // ms the stick is neutral (and the trigger hidden) before the stroke (150 never
                                          // popped: the game's ground grab was still letting go, runs pp/pq 2026-10-17)
+    std::uint32_t pregrab_air_grab_ms{100}; // ms into the air the trigger stays hidden, so that the game sees it pressed when it
+                                            // can grab (handed back as the board left, it never grabbed: arms out, run q9)
     int pregrab_ground_type{-1};         // <dev> EnumGS.GrabType on the ground (-1 the trigger's: 2 RT stands tall, 1 LT crouches)
     std::uint32_t pregrab_entry_ms{120}; // the left stick held this long with the trigger
     bool pregrab_write_grab{true};       // the game's air grab written as the nose / tail grab type
@@ -2136,8 +2140,11 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 if (physics.valid && physics.state >= 300) stop("off the board");
                 else if (physics.valid && physics.state >= 400 && physics.state <= 406) stop("on a rail"); // the grind grab takes it from here
                 else if (in_air && !flip) {
-                    // The hand on: the game's own air grab (the trigger is the game's again), written as the nose or tail grab.
+                    // The hand on: the game's own air grab (the trigger is the game's again, pressed a moment into the air),
+                    // written as the nose or tail grab.
+                    if (now - r.pregrab_air_at < r.pregrab_air_grab_ms) DingoSDKOverlayTricksMaskTriggers();
                     reach(120);
+                    if (holding && core && r.pregrab_tuck > 0) set_limb_free(core, 80, 0, 1.0f, r.pregrab_tuck);
                     if (r.pregrab_write_grab && holding) {
                         if (!r.s_detailed_grab) r.s_detailed_grab = find_state(base, "Animation/Dingo/Enum.GS.DetailedGrabType");
                         (void)write_state_at(base, r.s_detailed_grab, 1, r.pregrab_end >= 0 ? r.pregrab_nose_grab : r.pregrab_tail_grab);
@@ -2191,7 +2198,10 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
                 double grab{};
                 if (!r.s_detailed_grab) r.s_detailed_grab = find_state(base, "Animation/Dingo/Enum.GS.DetailedGrabType");
                 (void)read_state_at(base, r.s_detailed_grab, 1, grab);
-                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pre-grab stage {}, physics {}, grab type {}: {}.", r.pregrab_stage, physics.valid ? static_cast<int>(physics.state) : -1, grab, take_hand_reach());
+                double grabbing{};
+                if (!r.s_is_grabbing) r.s_is_grabbing = find_state(base, "Animation/Dingo/Bool.Anim.IsGrabbing");
+                (void)read_state_at(base, r.s_is_grabbing, 0, grabbing);
+                logging::log(logging::Level::info, logging::Channel::skater, "Tricks: pre-grab stage {}, physics {}, grab type {}, grabbing {}: {}.", r.pregrab_stage, physics.valid ? static_cast<int>(physics.state) : -1, grab, grabbing, take_hand_reach());
             }
         }
         // <dev> A console-held hand IK target: the hands' distances to it and the context, every 100 ms.
@@ -3431,16 +3441,20 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
                            r.fandango_up, r.fandango_back, r.fandango_side, r.fandango_leg, r.fandango_family);
     }
     if (verb == "pregrab") {
-        const auto usage = "usage: tricks pregrab on|off | reach 0|1 | place <over m> <up m> | pop <0..1> | gap <ms> | entry <ms> | grab <nose> <tail> | write 0|1 | jump <v|-1> | ff <kick|heel|shuv|fsshuv> <type|-1> | ffms <ms> | status";
+        const auto usage = "usage: tricks pregrab on|off | reach 0|1 | place <over m> <up m> | at 0|1|2 (edit after the animation, before or after the render hand-off) | frame feet|board|joints [ankle m] | airgrab <ms> | tuck <m> | pop <0..1> | gap <ms> | entry <ms> | grab <nose> <tail> | write 0|1 | jump <v|-1> | ff <kick|heel|shuv|fsshuv> <type|-1> | ffms <ms> | status";
         if (arguments.empty()) return usage;
         const auto &a = arguments[0];
         const auto f = [&](std::size_t i) { return static_cast<float>(std::atof(arguments[i].c_str())); };
         if (a == "on" || a == "off") r.pregrab = a == "on";
         else if (a == "reach" && arguments.size() == 2) r.pregrab_reach = arguments[1] == "1";
         else if (a == "place" && arguments.size() == 3) r.pregrab_over = f(1), r.pregrab_up = f(2);
+        else if (a == "at" && arguments.size() == 2) set_pose_edit_phase(std::atoi(arguments[1].c_str()));
+        else if (a == "frame" && arguments.size() >= 2) set_hand_reach_frame(arguments[1] == "board" ? 2 : arguments[1] == "joints" ? 0 : 1, arguments.size() > 2 ? f(2) : 0.08f);
         else if (a == "pop" && arguments.size() == 2) r.pregrab_pop = std::clamp(f(1), 0.0f, 1.0f);
         else if (a == "type" && arguments.size() == 2) r.pregrab_ground_type = std::atoi(arguments[1].c_str());
         else if (a == "crouch" && arguments.size() == 2) r.pregrab_crouch = std::clamp(f(1), 0.0f, 0.6f);
+        else if (a == "tuck" && arguments.size() == 2) r.pregrab_tuck = std::clamp(f(1), 0.0f, 0.6f);
+        else if (a == "airgrab" && arguments.size() == 2) r.pregrab_air_grab_ms = static_cast<std::uint32_t>(std::max(0, std::atoi(arguments[1].c_str())));
         else if (a == "gap" && arguments.size() == 2) r.pregrab_gap = static_cast<std::uint32_t>(std::max(0, std::atoi(arguments[1].c_str())));
         else if (a == "entry" && arguments.size() == 2) r.pregrab_entry_ms = static_cast<std::uint32_t>(std::max(0, std::atoi(arguments[1].c_str())));
         else if (a == "grab" && arguments.size() == 3) r.pregrab_nose_grab = std::atoi(arguments[1].c_str()), r.pregrab_tail_grab = std::atoi(arguments[2].c_str());
@@ -3453,9 +3467,9 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             if (k < 0) return usage;
             r.ff_type[static_cast<std::size_t>(k)] = std::atoi(arguments[2].c_str());
         } else if (a != "status") return usage;
-        return std::format("Pre-grab {} (stage {}, {} hand at the {}): reach {}, hand {:.2f} past the truck {:.2f} up, pop {:.2f}, gap {} ms, entry {} ms, air grab {} nose {} tail {}, jump {:.2f}; "
+        return std::format("Pre-grab {} (stage {}, {} hand at the {}): reach {} at {}, hand {:.2f} past the truck {:.2f} up, pop {:.2f}, gap {} ms, entry {} ms, air grab {} nose {} tail {}, jump {:.2f}; "
                            "fingerflip types kick {} heel {} shuv {} fsshuv {}, throw {} ms. {}",
-                           r.pregrab ? "on" : "off", r.pregrab_stage, r.pregrab_hand ? "left" : "right", r.pregrab_end >= 0 ? "nose" : "tail", r.pregrab_reach ? "on" : "off", r.pregrab_over,
+                           r.pregrab ? "on" : "off", r.pregrab_stage, r.pregrab_hand ? "left" : "right", r.pregrab_end >= 0 ? "nose" : "tail", r.pregrab_reach ? "on" : "off", pose_edit_phase(), r.pregrab_over,
                            r.pregrab_up, r.pregrab_pop, r.pregrab_gap, r.pregrab_entry_ms, r.pregrab_write_grab ? "written" : "the game's", r.pregrab_nose_grab, r.pregrab_tail_grab, r.pregrab_jump,
                            r.ff_type[0], r.ff_type[1], r.ff_type[2], r.ff_type[3], r.ff_ms, take_hand_reach());
     }

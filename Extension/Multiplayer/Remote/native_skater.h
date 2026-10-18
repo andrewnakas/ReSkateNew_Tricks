@@ -45,6 +45,11 @@ void set_animation_pose_editor(AnimationEvaluated editor) noexcept;
 // its animation interface (animation holder + 0xc0), on the calling thread.
 using RenderPosePublished = void (*)(std::uintptr_t animation_interface) noexcept;
 void set_render_pose_listener(RenderPosePublished listener) noexcept;
+// Edits a skeleton's pose at the render hand-off (ReSkate Tricks' hand and leg poses: edits made after the animation
+// update are rewritten before they are drawn). Called twice per hand-off: `after` false just before the pose is
+// published, true just after it, with the publication's render data (+0x10 its pose buffer).
+using RenderPoseEditor = void (*)(std::uintptr_t animation_interface, std::uintptr_t render_data, bool after) noexcept;
+void set_render_pose_editor(RenderPoseEditor editor) noexcept;
 // Far-player savings (puppet_cost.cpp): native work a remote player's skater and skateboard
 // skip while far away. Within 200 m of the local skater or the camera nothing changes.
 // Each is on by default; the setter is thread-safe and applies at each player's next

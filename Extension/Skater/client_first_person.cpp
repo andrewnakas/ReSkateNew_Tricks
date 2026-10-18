@@ -260,6 +260,7 @@ struct LegLift {
     std::atomic<ULONGLONG> until{};
     std::atomic<float> up{0.15f}, back{0.3f}, side{};
     std::atomic<int> leg{-1}; // -1 the foot nearer the back truck, 0 right, 1 left
+    std::atomic<std::uintptr_t> component{}; // the skater component whose physics core is `core`, from its animation update
     std::atomic<std::uint32_t> edits{};
     std::atomic<int> why{}, used_leg{-1};
     std::atomic<float> foot_before{}, foot_after{}, moved{}; // the foot's height over the deck (m), and how far it was taken
@@ -316,7 +317,7 @@ bool write_rotation(std::uintptr_t buffer, std::uint16_t index, LQ q) {
     const std::array<float, 4> r{q.x, q.y, q.z, q.w};
     return first_person_write(buffer + index * 0x30ULL + 0x10, r.data(), sizeof(r));
 }
-void leg_lift_on_animation(std::uintptr_t component) noexcept {
+void leg_lift_edit(std::uintptr_t component) noexcept {
     auto& f = leg_lift();
     const auto core = f.core.load(std::memory_order_relaxed);
     if (!core || !component) return;
@@ -395,6 +396,22 @@ struct HandReach {
     std::atomic<int> why{-1};
     std::atomic<float> gap_before{}, gap_after{};
     std::atomic<std::uint64_t> joints{}; // the arm, forearm and hand found (right), and the path's length, for the log
+    std::atomic<std::uintptr_t> component{}; // the skater component whose physics core is `core`, from its animation update
+    std::atomic<int> frame{1};                // the deck: 0 the pose's board joints, 1 the feet, 2 the board entity's placement
+    std::atomic<float> ankle{0.08f};          // the ankle joints' height over the deck (m)
+    std::atomic<float> frame_gap{};           // how far the feet's deck middle is from the board joints' (m)
+    std::atomic<float> board_gap{}, board_along{}, board_up{}; // the board entity's place from the feet's deck (m, along, up)
+    std::atomic<int> board_axis{-1};          // the board entity matrix's row that runs along the feet
+    std::uintptr_t board_entity{}, board_for{}; // render thread: the drawn board, found for this skater component
+    LV last_place{};                          // render thread: the character's world place at the last edit
+    std::atomic<float> ahead_along{}, ahead_board{}; // the travel direction against the nose direction used, and the board's row
+    std::atomic<float> hand_along{};          // where the hand ends, along the deck from its middle (m; + toward the nose)
+    // Whether the edits are drawn: each edit's arm rotations, compared at the next hand-off point with what is there then.
+    std::array<LQ, 3> written{};
+    std::uintptr_t written_buffer{};
+    int written_phase{-1};
+    std::atomic<std::uint32_t> kept{}, rewritten{}, same_buffer{}, other_buffer{};
+    std::atomic<float> worst{}; // the largest turn (deg) found between an edit and the next point, since the last log
     // Animation thread only.
     float weight{};
     ULONGLONG last{};
@@ -435,7 +452,7 @@ bool resolve_arms(HandReach& f) {
     f.joints.store(f.arm[0][0] | static_cast<std::uint64_t>(f.arm[0][1]) << 16 | static_cast<std::uint64_t>(f.arm[0][2]) << 32 | static_cast<std::uint64_t>(f.path[0].size()) << 48);
     return true;
 }
-void hand_reach_on_animation(std::uintptr_t component) noexcept {
+void hand_reach_edit(std::uintptr_t component, int phase) noexcept {
     auto& f = hand_reach();
     const auto core = f.core.load(std::memory_order_relaxed);
     if (!core || !component) return;
@@ -468,14 +485,84 @@ void hand_reach_on_animation(std::uintptr_t component) noexcept {
         }
         arm = compose(shoulder, arm); fore = compose(arm, fore); hand = compose(fore, hand);
         deck = compose(sroot, deck); tb = compose(deck, tb); tf = compose(deck, tf);
-        const LV forward = unit(tf.p - tb.p); // toward the nose
-        const LV middle = (tb.p + tf.p) * 0.5f;
+        LV forward = unit(tf.p - tb.p); // toward the nose
+        LV middle = (tb.p + tf.p) * 0.5f;
+        // The trucks' distance from the middle. The pose's board joints' (run q7: the tail's goal came out at half the
+        // nose's) is used only with them; the drawn board's is a fixed 0.19 m (a 0.38 m wheelbase).
+        float half = length(tf.p - tb.p) * 0.5f;
+        const int frame = f.frame.load(std::memory_order_relaxed);
+        if (frame >= 1) {
+            // The pose's own board joints are not where the board is drawn (run q1: the hand reached them, at the
+            // knee, with the tail far below), so the deck is taken from the feet standing on it, as the leg lift does:
+            // along the feet (the board joints only say which way the nose is), at the ankles less their height.
+            LX ur, lr, fr, ul, ll, fl;
+            if (!read_joint(b, 8, ur) || !read_joint(b, 9, lr) || !read_joint(b, 10, fr) || !read_joint(b, 341, ul) || !read_joint(b, 342, ll) || !read_joint(b, 343, fl)) {
+                f.why.store(3); SetLastError(error); return;
+            }
+            ur = compose(hips, ur); lr = compose(ur, lr); fr = compose(lr, fr);
+            ul = compose(hips, ul); ll = compose(ul, ll); fl = compose(ll, fl);
+            LV along = unit(fr.p - fl.p);
+            if (dot(along, forward) < 0) along = along * -1.0f;
+            const LV feet = (fr.p + fl.p) * 0.5f;
+            const LV h = hips.p - feet;
+            const LV feet_up = unit(h - along * dot(h, along));
+            const LV feet_deck = feet - feet_up * f.ankle.load(std::memory_order_relaxed);
+            f.frame_gap.store(length(feet_deck - middle), std::memory_order_relaxed);
+            forward = along;
+            middle = feet_deck;
+            // The drawn board: its entity's placement (world), into the pose's frame (joint 1's parent: joints 0 and 1
+            // place the character in the world).
+            const auto base = f.base.load(std::memory_order_relaxed);
+            if (f.board_for != component) {
+                f.board_for = component;
+                f.board_entity = 0;
+                std::uintptr_t collection{}, entity{};
+                if (first_person_read(component + 0x18, &collection, 8) && first_person_read(collection, &entity, 8)) {
+                    try { f.board_entity = multiplayer::read_native_board(first_person_read, base, entity).entity; } catch (...) {}
+                }
+            }
+            LX j0, j1;
+            std::uintptr_t collection{};
+            std::array<std::uint8_t, 2> layout{};
+            std::array<float, 16> m{};
+            if (f.board_entity && read_joint(b, 0, j0) && read_joint(b, 1, j1) && first_person_read(f.board_entity + 0x70, &collection, 8) &&
+                first_person_read(collection + 9, layout.data(), 2) && layout[0] <= 128 && layout[1] <= 32 &&
+                first_person_read(collection + 0x10 + (std::uintptr_t{layout[0]} + 2 * layout[1]) * 0x20, m.data(), sizeof(m))) {
+                const LX world = compose(j0, j1);
+                const LQ back = conj(world.q);
+                const LV moved = rotate(back, world.p - f.last_place);
+                f.last_place = world.p;
+                const LV place = rotate(back, LV{m[12], m[13], m[14]} - world.p);
+                int axis = 0;
+                float best = 0;
+                LV axes[3];
+                for (int i = 0; i < 3; ++i) {
+                    axes[i] = unit(rotate(back, LV{m[i * 4], m[i * 4 + 1], m[i * 4 + 2]}));
+                    if (std::abs(dot(axes[i], along)) > std::abs(best)) best = dot(axes[i], along), axis = i;
+                }
+                if (length(moved) > 0.005f && length(moved) < 1.0f) f.ahead_board.store(dot(unit(moved), axes[axis]), std::memory_order_relaxed);
+                f.board_axis.store((axis + 1) * (best < 0 ? -1 : 1), std::memory_order_relaxed); // 1..3 the row, negative when it runs toward the tail
+                f.board_gap.store(length(place - feet_deck), std::memory_order_relaxed);
+                f.board_along.store(dot(place - feet_deck, along), std::memory_order_relaxed);
+                f.board_up.store(dot(place - feet_deck, feet_up), std::memory_order_relaxed);
+                // The board's own nose is the way the board points: the pose's board joints can be turned round (run q6,
+                // riding forward with them pointing back: the tail's hand went to the nose), the board's row never was
+                // (it ran with the travel on every forward ride).
+                forward = axes[axis] * (best < 0 ? -1.0f : 1.0f);
+                if (axis == 2) forward = axes[2];
+                if (frame == 2) middle = place;
+                // The drawn board's middle along and across the deck, at the feet's height (its origin is below the deck).
+                else middle = feet_deck + (place - feet_deck) - feet_up * dot(place - feet_deck, feet_up);
+                half = 0.19f;
+                if (length(moved) > 0.005f && length(moved) < 1.0f) f.ahead_along.store(dot(unit(moved), forward), std::memory_order_relaxed);
+            }
+        }
         const LV h = hips.p - middle;
         const LV up = unit(h - forward * dot(h, forward));
         const LV across = cross(up, forward);
         if (length(forward) < 0.5f || length(up) < 0.5f) { f.why.store(4); SetLastError(error); return; }
         const float over = f.over.load(std::memory_order_relaxed);
-        const LV tip = f.end.load(std::memory_order_relaxed) >= 0 ? tf.p + forward * over : tb.p - forward * over;
+        const LV tip = middle + forward * ((half + over) * (f.end.load(std::memory_order_relaxed) >= 0 ? 1.0f : -1.0f));
         // On the edge the clip's hand already holds (toe or heel), kept within the deck.
         const LV goal = tip + up * f.up.load(std::memory_order_relaxed) + across * std::clamp(dot(hand.p - middle, across), -0.1f, 0.1f);
         const float s = f.weight * f.weight * (3.0f - 2.0f * f.weight);
@@ -495,17 +582,78 @@ void hand_reach_on_animation(std::uintptr_t component) noexcept {
         const LQ new_arm = unit(mul(r1, arm.q)), new_fore = unit(mul(mul(r2, r1), fore.q));
         const bool wrote = write_rotation(b, ids[0], unit(mul(conj(shoulder.q), new_arm))) && write_rotation(b, ids[1], unit(mul(conj(new_arm), new_fore))) &&
                            write_rotation(b, ids[2], unit(mul(conj(new_fore), hand.q)));
-        if (wrote) f.edits.fetch_add(1, std::memory_order_relaxed);
+        if (wrote) {
+            f.edits.fetch_add(1, std::memory_order_relaxed);
+            f.written = {unit(mul(conj(shoulder.q), new_arm)), unit(mul(conj(new_arm), new_fore)), unit(mul(conj(new_fore), hand.q))};
+            f.written_buffer = b;
+            f.written_phase = phase;
+        }
         f.gap_before.store(length(goal - c), std::memory_order_relaxed);
+        f.hand_along.store(dot(target - middle, forward), std::memory_order_relaxed);
         f.gap_after.store(length(goal - target), std::memory_order_relaxed);
         f.why.store(wrote ? 0 : 5, std::memory_order_relaxed);
     } catch (...) { f.why.store(6, std::memory_order_relaxed); }
     SetLastError(error);
 }
-// The one pose-editor slot: the leg and the hand.
+// Where the leg and hand are edited: 0 right after the animation update (those edits are not drawn: run pk, a goal 1.2 m
+// overhead left the arm as the clip had it), 1 at the render hand-off just before the pose is published, 2 just after.
+std::atomic<int> pose_phase{2};
+// Each component's animation update: learns which component is the skater's, and edits there in phase 0.
 void pose_editors_on_animation(std::uintptr_t component) noexcept {
-    leg_lift_on_animation(component);
-    hand_reach_on_animation(component);
+    std::uintptr_t mine{};
+    if (!component || !first_person_read(component + 0x70, &mine, 8) || !mine) return;
+    auto& leg = leg_lift();
+    auto& hand = hand_reach();
+    if (mine == leg.core.load(std::memory_order_relaxed)) leg.component.store(component, std::memory_order_relaxed);
+    if (mine == hand.core.load(std::memory_order_relaxed)) hand.component.store(component, std::memory_order_relaxed);
+    if (pose_phase.load(std::memory_order_relaxed) != 0) return;
+    leg_lift_edit(component);
+    hand_reach_edit(component, 0);
+}
+// The arm's rotations now against the last edit's (a quaternion's sign is free): the largest turn, degrees.
+float arm_turn_since_edit(const HandReach& f, std::uintptr_t buffer) {
+    const int side = f.hand.load(std::memory_order_relaxed) ? 1 : 0;
+    float worst = 0;
+    for (std::size_t i = 0; i < 3; ++i) {
+        LX now;
+        if (!read_joint(buffer, f.arm[side][i], now)) return 180;
+        const auto& q = f.written[i];
+        const float d = std::min(1.0f, std::abs(q.x * now.q.x + q.y * now.q.y + q.z * now.q.z + q.w * now.q.w));
+        worst = std::max(worst, 2.0f * std::acos(d) * 57.2958f);
+    }
+    return worst;
+}
+bool holder_is(std::uintptr_t component, std::uintptr_t animation_interface, std::uintptr_t& holder) {
+    return component && first_person_read(component + 0xa0, &holder, 8) && holder && animation_interface == holder + 0xc0;
+}
+// The render hand-off of every skeleton (engine thread).
+void pose_editors_on_render(std::uintptr_t animation_interface, std::uintptr_t render_data, bool after) noexcept {
+    const auto error = GetLastError();
+    const int phase = after ? 2 : 1;
+    const int wanted = pose_phase.load(std::memory_order_relaxed);
+    auto& hand = hand_reach();
+    std::uintptr_t holder{};
+    if (const auto component = hand.component.load(std::memory_order_relaxed); holder_is(component, animation_interface, holder)) {
+        // Did the last edit survive to here? One made after the animation is checked before the publication, one made
+        // before the publication just after it.
+        if (hand.written_phase >= 0 && hand.written_phase == phase - 1 && hand.resolved) {
+            const float turn = arm_turn_since_edit(hand, hand.written_buffer);
+            (turn < 1.0f ? hand.kept : hand.rewritten).fetch_add(1, std::memory_order_relaxed);
+            hand.worst.store(std::max(hand.worst.load(std::memory_order_relaxed), turn), std::memory_order_relaxed);
+            hand.written_phase = -1;
+        }
+        if (after) {
+            std::uintptr_t published{};
+            const auto pose = multiplayer::read_native_pose_layout(first_person_read, hand.base.load(std::memory_order_relaxed), holder, 512);
+            if (first_person_read(render_data + 0x10, &published, 8))
+                (published == pose.buffer ? hand.same_buffer : hand.other_buffer).fetch_add(1, std::memory_order_relaxed);
+        }
+        if (wanted == phase) hand_reach_edit(component, phase);
+    }
+    if (wanted == phase)
+        if (const auto component = leg_lift().component.load(std::memory_order_relaxed); holder_is(component, animation_interface, holder))
+            leg_lift_edit(component);
+    SetLastError(error);
 }
 bool install_pose_editors(std::uintptr_t base, std::string& detail) noexcept {
     static bool installed{};
@@ -514,6 +662,7 @@ bool install_pose_editors(std::uintptr_t base, std::string& detail) noexcept {
         if (!multiplayer::install_entity_hooks(base, detail)) return false;
     } catch (...) { detail = "threw"; return false; }
     multiplayer::set_animation_pose_editor(&pose_editors_on_animation);
+    multiplayer::set_render_pose_editor(&pose_editors_on_render);
     installed = true;
     return true;
 }
@@ -554,8 +703,19 @@ bool set_hand_reach(std::uintptr_t base, std::uintptr_t core, std::uint32_t mill
 std::string take_hand_reach() {
     auto& f = hand_reach();
     const auto j = f.joints.load();
-    return std::format("{} hand edits, {} hand at the {}, {:.2f} m from the goal before the reach, {:.2f} after, why {} (right arm joints {} {} {}, {} above)", f.edits.exchange(0, std::memory_order_relaxed),
+    return std::format("{} hand edits at {}, {} hand at the {}, {:.2f} m from the goal before the reach, {:.2f} after, why {} (right arm joints {} {} {}, {} above); "
+                       "drawn check: kept {} rewritten {} (worst {:.1f} deg), published buffer same {} other {}; deck from the {} ({:.2f} m from the board joints'; the board entity {:.2f} m from the feet's, {:.2f} along {:.2f} up, axis {}); travel against the nose {:.2f}, the board's row {:.2f}; hand {:.2f} m along the deck", f.edits.exchange(0, std::memory_order_relaxed),
+                       pose_phase.load() == 0 ? "the animation" : pose_phase.load() == 1 ? "the hand-off (before)" : "the hand-off (after)",
                        f.hand.load() ? "left" : "right", f.end.load() >= 0 ? "nose" : "tail", f.gap_before.load(), f.gap_after.load(), f.why.load(), j & 0xffff, (j >> 16) & 0xffff,
-                       (j >> 32) & 0xffff, j >> 48);
+                       (j >> 32) & 0xffff, j >> 48, f.kept.exchange(0), f.rewritten.exchange(0), f.worst.exchange(0), f.same_buffer.exchange(0), f.other_buffer.exchange(0),
+                       f.frame.load() == 2 ? "board entity" : f.frame.load() == 1 ? "feet" : "board joints", f.frame_gap.load(), f.board_gap.load(), f.board_along.load(),
+                       f.board_up.load(), f.board_axis.load(), f.ahead_along.load(), f.ahead_board.load(), f.hand_along.load());
+}
+void set_hand_reach_frame(int frame, float ankle) noexcept {
+    hand_reach().frame.store(std::clamp(frame, 0, 2), std::memory_order_relaxed);
+    hand_reach().ankle.store(std::clamp(ankle, -0.2f, 0.3f), std::memory_order_relaxed);
+}
+void set_pose_edit_phase(int phase) noexcept { pose_phase.store(std::clamp(phase, 0, 2), std::memory_order_relaxed); }
+int pose_edit_phase() noexcept { return pose_phase.load(std::memory_order_relaxed);
 }
 }

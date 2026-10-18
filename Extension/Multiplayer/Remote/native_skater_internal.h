@@ -59,6 +59,7 @@ struct HookState {
     std::atomic<AnimationEvaluated> evaluated_listener{};
     std::atomic<AnimationEvaluated> pose_editor{};
     std::atomic<RenderPosePublished> render_listener{};
+    std::atomic<RenderPoseEditor> render_editor{};
 };
 // Keys the per-entity hooks match, one contiguous array per kind in slot order.
 // Every native skater, board and entity callback looks its key up here: a few

@@ -99,6 +99,12 @@ std::string take_leg_lift();
 // or tail (-1), `over` m past the truck and `up` m over its joint, for this long. Same hook as the leg lift.
 bool set_hand_reach(std::uintptr_t base, std::uintptr_t core, std::uint32_t milliseconds, int hand, float end, float over, float up, std::string& detail) noexcept;
 std::string take_hand_reach();
+// Where the leg and hand edits are made: 0 after the animation update (not drawn), 1 at the render hand-off before the
+// pose is published, 2 after it (the default).
+// The pre-grab hand's deck: 0 the pose's board joints, 1 the feet (the ankle joints `ankle` m over it), 2 the board entity.
+void set_hand_reach_frame(int frame, float ankle) noexcept;
+void set_pose_edit_phase(int phase) noexcept;
+int pose_edit_phase() noexcept;
 std::uint32_t take_limb_free_writes() noexcept;
 void set_kinematic_spin_with_pelvis(bool on) noexcept;
 void set_pull_moves_place(bool on) noexcept;
