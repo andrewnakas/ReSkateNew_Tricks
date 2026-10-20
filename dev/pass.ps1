@@ -38,7 +38,7 @@ for ($i = 0; $i -lt $Passes.Count; $i++) {
     foreach ($k in ($macros.Keys | Sort-Object Length -Descending)) { $p = $p.Replace($k, $macros[$k]) }
     $all += "echo pass-$Tag-$i-begin;$mount;$p"
 }
-$log = 'C:\Program Files (x86)\Steam\steamapps\common\Skate\logs\ReSkate.log'
+$log = Join-Path $(if ($env:SKATE_DIR) { $env:SKATE_DIR } else { 'C:\Program Files (x86)\Steam\steamapps\common\Skate' }) 'logs\ReSkate.log'
 $out = & "$PSScriptRoot\run.ps1" -Commands ($all -join ';') -Level $Level -KeepInstalled -MaxSeconds $MaxSeconds -Pattern 'ZZZNOMATCH'
 $out | Select-Object -First 2
 $out | Select-Object -Last 2

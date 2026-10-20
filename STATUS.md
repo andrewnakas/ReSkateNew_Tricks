@@ -1,5 +1,23 @@
 # ReSkate Tricks: status
 
+## START HERE (2026-10-20): branch `tricks-2.1`, latest c021e1b; set up for collaborators
+New collaborators: read [CONTRIBUTING.md](CONTRIBUTING.md) first (build, the `dev/` rig, rules).
+
+What landed after the section below (2026-10-17 night to 10-18), none of it run headless yet:
+- **2b5332f** (from the owner's first desktop play of the pre-grab): the trigger + RIGHT stick up / down picks
+  the nose / tail; the wrist sits over the very end; the back bends more to hold on through the ollie; the
+  trigger alone (indy RT / melon LT) is a pre-grab too (Indy / Melon Ollie, or a thrown kickflip / heelflip);
+  the front hand does the tricks, the rear hand only holds unless `pregrab_rear`; a front-hand nose grab ollie
+  is a Playcub Ollie; hand edits before the render publication by default (`tricks pregrab at 1`).
+- **8d2d9f2**: the pre-grab's end is held until the trigger is let go; the hand stays on through the ollie's
+  landing; a flip from the nose / tail low, the hand back on at the catch.
+- **afcd5af**: ReSkate 2.1.0 merged in; TRICKS is an addon in the menu's EXTRAS.
+- **c021e1b**: both hands on the board: the other trigger adds that hand on its rail, or the nose / tail with
+  the left stick; a smaller ollie or nollie from it.
+
+Open: the owner's playtest of c021e1b; headless proof of the four commits above; the fandango leg on the
+render hand-off (untested).
+
 ## START HERE (2026-10-17 ~20:10): the pre-grab hand now draws on the nose / tail (ad2e0d6 INSTALLED, not launched)
 Commits 9570e02 + ad2e0d6, local only. Installed in the Skate folder; the owner's previous install (0ec1911) is in `devackup61017-190055`. Next: the owner plays it.
 
@@ -11,10 +29,10 @@ Commits 9570e02 + ad2e0d6, local only. Installed in the Skate folder; the owner'
 
 **Log line** "pre-grab stage N ... grabbing G: E hand edits at the hand-off (after) ... drawn check ... deck from the feet (... the board entity X m from the feet's ...); travel against the nose T ...; hand H m along the deck; lift L m: N leg bends, N board lifts, lean D deg".
 
-**Test pads (flat rig, dingolevel_root, scratchpad q*.ps1 pattern):** hold `a:200 n:500 a:200 n:500 rt=1+ly=1:400 rt=1:7000`; tail `lt=1+ly=-1`; air ollie `... rt=1:700 rt=1+ry=-1:150 rt=1+ry=1:120 rt=1:2500` with `tricks spinshot <tag> air 300`. The air comes ~800 ms after the flick.
+**Test pads (flat rig, dingolevel_root, q*.ps1 pattern):** hold `a:200 n:500 a:200 n:500 rt=1+ly=1:400 rt=1:7000`; tail `lt=1+ly=-1`; air ollie `... rt=1:700 rt=1+ry=-1:150 rt=1+ry=1:120 rt=1:2500` with `tricks spinshot <tag> air 300`. The air comes ~800 ms after the flick.
 
 ## EARLIER (2026-10-17 ~17:30): pre-grab (nose / tail) built; the hand on the board does not draw yet
-Plan: `C:\Users\andre\.claude\plans\wobbly-painting-sunset.md`. Committed locally, not installed (run.ps1 restores the old files after each run).
+Plan: the owner's local plan `wobbly-painting-sunset`. Committed locally, not installed (run.ps1 restores the old files after each run).
 
 **Controls.** Riding:
 - A trigger with the left stick up grabs the nose; down grabs the tail. Up means the end ahead.
@@ -44,7 +62,7 @@ Plan: `C:\Users\andre\.claude\plans\wobbly-painting-sunset.md`. Committed locall
 - `pregrab_pop` is a saved setting (tricks.json).
 
 ## START HERE (2026-10-16 ~03:00): the push on the open items, done headlessly; the owner's playtest is next
-The plan was `C:\Users\andre\.claude\plans\misty-wondering-whistle.md`. The code is committed locally and installed, not launched.
+The plan was the owner's local plan `misty-wondering-whistle`. The code is committed locally and installed, not launched.
 
 **Grind grab: the hand on the board.**
 - The game's own ground grab is kept playing on the rail. The grab states are held, and the graph's copy of the physics family (`EnumGS.FilteredPhysicsState`) is held at riding (1; the grind's is 3) through `air_poke`. The grind clip had taken the hand off the board 200 ms in.
@@ -100,7 +118,7 @@ The plan was `C:\Users\andre\.claude\plans\misty-wondering-whistle.md`. The code
 # ReSkate Tricks: status
 
 ## START HERE (2026-10-15 late): the next push
-7fb61eb is installed in the Skate folder but not launched. The full list is in the memory note `project_reskate_tricks.md` ("START HERE"); the plan is `C:\Users\andre\.claude\plans\peppy-baking-eclipse.md`.
+7fb61eb is installed in the Skate folder but not launched. the plan is the owner's local plan `peppy-baking-eclipse`.
 
 **Done (fe784d7, 7fb61eb):**
 - The mod's pops are a right-stick stroke played to the game's polls (`tricks stroke`). Each step must change the packet number, or the game ignores the poll.
@@ -116,7 +134,7 @@ The plan was `C:\Users\andre\.claude\plans\misty-wondering-whistle.md`. The code
 5. The regression sweep.
 
 ## (older) START HERE (2026-10-15 evening): the fix session
-6d78737 is installed in the Skate folder but not launched. The full list, with every measured fact, is in the memory note `project_reskate_tricks.md` ("NEXT SESSION").
+6d78737 is installed in the Skate folder but not launched.
 
 1. **Hand IK targets** for both the kickflip indy and the grind grab.
    - The mod's writes to the rider's hand and the arm motor scaling never moved the hand.
@@ -132,7 +150,7 @@ The plan was `C:\Users\andre\.claude\plans\misty-wondering-whistle.md`. The code
 **Curb rig:** `trainer tp 716.76 201.1 1194.24`, mount, then pad `a:200 n:300 a:200 n:300 lx=1:350 n:100 ry=-1:120 ry=1:100 n:400 rt=1:2500` gives a BS 50-50.
 
 ## (older) START HERE (2026-10-14 ~23:10): the approved plan
-Plan: `C:\Users\andre\.claude\plans\quizzical-dazzling-muffin.md` (steps 0-8, from the owner's playtest of 19ba086). Memory note `project_reskate_tricks.md` has the owner's words.
+Plan: the owner's local plan `quizzical-dazzling-muffin` (steps 0-8, from the owner's playtest of 19ba086).
 - **fafb89a** (built, NOT run yet: the commit limit was 8.5 GB free, the game needs ~10):
   - Step 1: the dolphin mask fires only on a plain pop (game flip 0), so it can't touch a kickflip or pop shuv. A `Tricks: stock check:` line per landing gives masked polls and hook turns (both must be 0 on a stock flip).
   - Step 2: fakie (`Bool.Physics.RidingFakie`) and nollie dolphin/dragon. Nollie = the reversed stroke: stick up, straight down, pushed back up (upper diagonal = dragon). Pitch -360 when fakie XOR nollie; the shuv keeps its stick side.
@@ -482,7 +500,7 @@ All runs used `dev/run.ps1`. It installs the build, boots Gravy Train, mounts wi
 - Why the pose is late in the air: a flip trick's clip carries its own landing and is only left at its branch windows - to riding at branch_end_early (tick 42 of the hardflip clip, with EBool.Intent.Action and FilteredPhysicsState ground), ~0.3 s into the air. The land node has no window but needs EBool.Anim.Is.GenericLanding; forcing Bool.Anim.IsInAir.Loop/PreLand true to get it made caspers bounce and cost most of the speed (reverted; `tricks airpose states ...` to retry). The dark catch has its own early window (branch_end_fliptricktodarkcatch, tick 18). Owner's own catches latch ~0.2 s into the air (stick still travelling). NEXT IDEAS: time-warp the flip clip while a catch is armed (PTMTrickTag TimeWarpScale = Float.Anim.TrickFlipSpeed), or find what else satisfies GenericLanding.
 
 ## 2026-10-13 04:30 build installed: early casper, no bounce, re-catch, ground shuv (sheets sheet_i1.png, sheet_j1.png)
-Plan: `C:\Users\andre\.claude\plans\peppy-stirring-moler.md`. Every number below is from `dev\pass.ps1` runs on the THPS training map (kickflip or heelflip, one push, ~17 km/h).
+Plan: the owner's local plan `peppy-stirring-moler`. Every number below is from `dev\pass.ps1` runs on the THPS training map (kickflip or heelflip, one push, ~17 km/h).
 
 **Early catch (casper).**
 - New dev log line `Tricks: nodes trick/land/riding` (reads Bool.State.Is.TrickInAir, Is.Landing, Onboard.Riding). It showed the old belief was wrong: with FilteredPhysicsState held at ground the graph was already in the landing node 16 ms after the catch, but that node carries the flip clip on in phase and only leaves at the clip's own early window, ~560 ms later, 30 ms before touchdown.

@@ -5,14 +5,16 @@
 param(
     [string]$Commands = 'tricks status',
     [string]$Level = 'levels/game/dingolevel_reskate_gravy_train/dingolevel_reskate_gravy_train',
-    [string]$Shots = 'D:\ReSkateNew_Tricks\dev\shots',
+    [string]$Shots = (Join-Path $PSScriptRoot 'shots'),
     [string]$Pattern = 'Tricks|Freestyle|Casper|tricks |error:|\[ERROR\]|\[CRITICAL\]|Startup command',
     [int]$MaxSeconds = 420, [int]$Width = 1600, [int]$Height = 900,
     [switch]$KeepInstalled
 )
-$game = 'C:\Program Files (x86)\Steam\steamapps\common\Skate'
-$build = 'D:\ReSkateNew_Tricks\build\vs2022-x64\Release'
-$backup = 'D:\ReSkateNew_Tricks\dev\backup'
+$game = if ($env:SKATE_DIR) { $env:SKATE_DIR } else { 'C:\Program Files (x86)\Steam\steamapps\common\Skate' }
+$build = Join-Path $PSScriptRoot '..\build\vs2022-x64\Release'
+$backup = Join-Path $PSScriptRoot 'backup'
+# Window captures need a screenshot helper: RESKATE_SHOT_SCRIPT, a script taking `shot <png> <width>`.
+$shotScript = $env:RESKATE_SHOT_SCRIPT
 $files = 'ReSkate.dll', 'ReSkateLauncher.exe'
 $log = Join-Path $game 'logs\ReSkate.log'
 if (Get-Process Skate, ReSkateLauncher -ErrorAction SilentlyContinue) { 'REFUSED: a game is already running.'; exit 2 }
@@ -39,7 +41,7 @@ while (((Get-Date) - $started).TotalSeconds -lt $MaxSeconds -and -not $done) {
         if ($text) {
             foreach ($m in [regex]::Matches($text, '\] shot-(\w+)')) {
                 $n = $m.Groups[1].Value
-                if (-not $taken[$n]) { $taken[$n] = 1; & 'D:\n64work\reskate\trainer-dev\ui.ps1' shot (Join-Path $Shots "$n.png") $Width | Out-Null }
+                if (-not $taken[$n]) { $taken[$n] = 1; if ($shotScript) { & $shotScript shot (Join-Path $Shots "$n.png") $Width | Out-Null } }
             }
             if ($text -match 'tricks-run-finished') { $done = $true }
         }

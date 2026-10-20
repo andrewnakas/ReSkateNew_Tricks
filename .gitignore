@@ -33,3 +33,12 @@ analysis/raw/**/*.res
 # Drone model sources (assets/models/fpv/CREDITS.md): large; only the prepared drone.glb is kept.
 /assets/models/fpv/dji_avata2.glb
 /assets/models/fpv/fpv_drone.glb
+
+# ReSkate Tricks dev rig: only the scripts and reference traces are shared.
+/dev/*
+!/dev/build.cmd
+!/dev/run.ps1
+!/dev/pass.ps1
+!/dev/jumps.py
+!/dev/sheet.py
+!/dev/trace-*.csv

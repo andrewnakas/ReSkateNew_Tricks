@@ -1,6 +1,6 @@
 # <dev> Per-step board jumps and trick events of one pass.ps1 run: python dev/jumps.py <tag>
 import sys,re
-lines=open(r'C:\Program Files (x86)\Steam\steamapps\common\Skate\logs\ReSkate.log',encoding='utf-8',errors='replace').read().splitlines()
+lines=open(__import__('os').path.join(__import__('os').environ.get('SKATE_DIR', r'C:\Program Files (x86)\Steam\steamapps\common\Skate'), 'logs', 'ReSkate.log'),encoding='utf-8',errors='replace').read().splitlines()
 tag=sys.argv[1]
 start=max(i for i,l in enumerate(lines) if f'pass-{tag}-0-begin' in l)
 prev=None
