@@ -1,356 +1,129 @@
-# ReSkate
+# ReSkate Tricks
 
-play it offline, host your own lobbies and dedicated servers, and mod it.
-the launcher, the runtime that loads into the game, and the dedicated server.
+**New tricks for skate. (2025) on ReSkate:** caspers, primos, flick-outs, dolphin and dragon flips, no comply flips, ground shuvs, grab grinds, kickflip indys, nose and tail pre-grabs, and more. They are built from the game's own animations, states and physics, plus a procedural board where the game has no clip.
 
-> ReSkate is a fan project. It is not affiliated with or endorsed by Electronic Arts or Full Circle.
-> You need your own copy of skate. on Steam.
+ReSkate Tricks is a fork of [ReSkate](https://github.com/Dingo-Shenanigans/ReSkate) (GPL-3.0). Everything ReSkate does still works the same way: see [README-ReSkate.md](README-ReSkate.md) for installing, offline play and hosting. Tricks is an **addon**: open the menu's **EXTRAS** and go to **TRICKS**. Every trick has its own switch there, along with its settings and a HOW TO page with pad diagrams. The settings are saved in `tricks.json`.
 
-## Features
+> **Status: work in progress.** Each trick listed as proven here passed scripted controller runs in the real game, with logged numbers and stills. Feel and looks still need hands-on play, and some tricks are still experimental. The full lab notebook is [STATUS.md](STATUS.md), and the per-trick tracker is [TRICKS.md](TRICKS.md).
 
-- **Offline play.** No EA servers needed. Your skater, outfits, unlocks and progress are saved on your PC,
-  and the game runs even with Steam closed.
-- **Multiplayer.**
-  - Host a Steam lobby for up to 32 players: public, or joined with a code, with an optional password.
-  - Join dedicated servers from the in-game server browser.
-  - Proximity voice chat, and text chat with emotes and an optional bad-word filter.
-  - Parties in lobbies and on dedicated servers: invite, join, leave, promote.
-  - Throwdowns with other players (Jam, Spot Battle and S.K.A.T.E.), and co-op challenges.
-- **In-game menu and console.**
-  - Map and fast travel.
-  - World: time of day, population, district levels, rotating parks.
-  - The **Park Editor**: place, move and save objects with freecam, snapping and undo. Save a selection as a
-    set and place it again anywhere, on any map.
-  - Skater options: first person, movement, boosts, noclip.
-  - **Hall of Meat** (off by default): bail and see the bones you hurt, with a skate. 3 style Meat card.
-  - **Grind exit triggers** (off by default): press LT or RT while grinding to pick the side you pop
-    out to (toe / heel, or left / right), whatever trick and spin you do
-    ([how it works](Extension/Skater/GRIND_EXITS.md)).
-  - Progression, controls, graphics and multiplayer settings.
-- **Mods.**
-  - Drop a mod in `Mods/` and it is merged into the game at launch. Mods can add custom maps, loading
-    screens, cosmetics and scripts.
-  - Browse and install mods from the [Thunderstore community](https://thunderstore.io/c/reskate/) in the
-    launcher. A mod that needs others (a mod pack) brings them with it.
-  - Save sets of mods as profiles, switch between them, and share one as a code or a file.
-  - Most mod changes apply in game without a restart.
-- **Launcher.**
-  - Checks that you have the supported game build, and can download exactly that build with your Steam
-    account.
-  - Keeps ReSkate itself up to date.
+---
 
-## Getting started
+## Where the requests came from
 
-1. Download the latest `ReSkate-<version>.zip` from
-   [Releases](https://github.com/Dingo-Shenanigans/ReSkate/releases).
-2. Extract `ReSkateLauncher.exe` and `ReSkate.dll` into **a new, empty folder of their own**, for
-   example `C:\Games\ReSkate`. Do **not** put them in Steam's skate. folder: ReSkate keeps its own
-   copy of the game there, so Steam updating skate. cannot break it.
-3. Run `ReSkateLauncher.exe`.
-   - It checks for ReSkate updates, then installs the supported build of the game into that folder
-     (about 14 GB of free space).
-   - Sign in to Steam when asked, with the account that owns skate. You can scan a QR code with the
-     Steam app, or use your username and password with Steam Guard.
-   - On later runs it checks the game files and downloads only what is missing.
-4. Press **PLAY**.
+The trick list comes from the community: the Discord thread *"What new tricks would you want to see for ReSkate?"* and its Reddit cross-post (October 2026), plus the owner's own ideas. [TRICKS.md](TRICKS.md) credits every request and sorts it into a tier:
 
-ReSkate supports one game build at a time (Steam build `25414733`).
-
-### Linux (Proton)
-
-1. Install skate. with Steam, and put `ReSkateLauncher.exe` and `ReSkate.dll` in a new, empty folder
-   of their own, for example `~/Games/ReSkate` (not Steam's skate. folder: the launcher refuses to
-   run from there).
-2. In Steam → skate. → Properties → Launch Options, enter this with your own folder's path:
-
-   ```
-   bash -c 'exec "${@/*EAAntiCheat.GameServiceLauncher.exe//home/you/Games/ReSkate/ReSkateLauncher.exe}"' -- %command%
-   ```
-
-3. Press **Play** on skate. in your Steam library. The launcher installs its own copy of the game
-   into that folder the first time.
-
-Steam starts EA's anti-cheat launcher (`EAAntiCheat.GameServiceLauncher.exe`), not `Skate.exe`, and the
-anti-cheat refuses to run under Proton (*E111000B … Wine, Proton, and Steam Deck are not supported*).
-The launch option swaps it for ReSkate's launcher, which starts the game itself. Launching from the game's
-own Steam entry, rather than adding the launcher as a non-Steam game, keeps skate.'s app ID and its
-Proton prefix.
-
-The launcher in a folder of its own is new and has not been tested on Proton yet. With the launcher
-beside `Skate.exe`, as it was set up before, ReSkate 1.1.3 was tested with Proton Experimental on
-CachyOS: the launcher, the server browser, joining a public server and hosting a lobby. Steam Deck should work the same way but is untested. If you load a
-custom map and then join a server on another map, the screen can stay black
-([#31](https://github.com/Dingo-Shenanigans/ReSkate/issues/31)): load the server's map first.
-
-### macOS (NotProton / CrossOver)
-
-Steam for Mac with a Wine-based compatibility tool works much the same way; see
-[MACOS-SETUP.md](MACOS-SETUP.md) for its launch option.
-
-### Multiplayer map downloads
-
-Missing multiplayer custom maps can be downloaded from Thunderstore after confirmation.
-The confirmation expires after two minutes. A session waits 30 minutes in all for the map to be
-checked, downloaded, installed, applied and joined; dedicated servers and player-hosted lobbies
-enforce the same limit on their own monotonic clocks. Ordinary map loading still gets 180
-seconds; loading after a live installation still gets 30 seconds.
-
-A download that has begun is not cut short when the session stops waiting: a large map on a slow
-connection goes on downloading (up to four hours), installs and is applied, and you are told to
-join the server again. Declining, or cancelling the download, stops it and removes the
-incomplete file. Installation stops before replacing an existing mod when cancellation is
-observed; a filesystem commit or live merge already in progress finishes safely rather than
-being forcibly interrupted. Retry after that work has finished, without restarting ReSkate.
-
-### Controls
-
-| Key | Opens |
+| Tier | How it gets built |
 |---|---|
-| **Insert** | the ReSkate menu |
-| **~** (grave/tilde) | the command console (`help` lists the commands) |
-| **T** | chat, in multiplayer |
+| **A** | Hidden content the game already ships (caspers, primos, the casper flip's exit clips) |
+| **B** | Existing states and clips put together in new ways (no comply flips, ground shuvs, grab grinds) |
+| **C** | A procedural board on an existing body clip (dolphin, dragon, nightmare flip, kickflip indy) |
+| **D** | Needs animation the game doesn't have (hurricane, wallpush, nata spin): parked |
+| **E** | A fix or a naming change (custom trick names, stance registration) |
 
-The menu and console keys can be changed in the launcher's Settings.
+## The tricks
 
-In **MAP → ROTATING PARKS** and the controller-friendly **MOD OPTIONS → PARKS** screen,
-**Load Random Parks** chooses and loads one random layout for each of
-San Vansterdam's three slots. Each supported layout has an equal chance; empty lots are excluded and
-a roll can pick a layout already loaded. Choices save with your profile and are shared when you host.
-**Randomize on Launch** is off by default. Turn it on to pick fresh layouts once on each subsequent
-game launch, when the park controller is ready. Changing maps does not roll again. Guests follow the
-host's layouts; a dedicated server admin can use the button to randomize the server's parks for everyone.
-Both menus share the same launch preference. It only affects your own parks, including when you host
-a lobby. Joining a host cancels any pending startup roll, so leaving the lobby restores your saved
-layouts without unexpectedly randomizing them.
-
-The console equivalents are `park random` and `park random-on-launch 0|1`. A dedicated server also
-accepts `park random` from its console or an admin.
-
-### Where things are
-
-| What | Where |
-|---|---|
-| Mods | `Mods\<mod name>\` beside `Skate.exe`, ordered by `Mods\mods.json` |
-| Logs | `logs\ReSkate.log` beside `Skate.exe` |
-| Profile (skater, progress, parks) | `%LOCALAPPDATA%\ReSkate\profiles\offline\` |
-| The game's own settings and saves | `%LOCALAPPDATA%\ReSkate\Game\` (kept apart from the normal game) |
-| Launcher settings | `ReSkateLauncher.settings.json` beside the launcher |
-
-## Mods
-
-- Install mods from the launcher's **MODS** page: browse Thunderstore, or drag a `.zip` or folder onto the
-  window.
-- **PROFILES** on that page saves which mods are on, and in what order, under a name. Loading a profile
-  switches to it and downloads any of its mods you do not have; every mod stays installed once. **COPY CODE**
-  and **SAVE FILE** share a profile, and **IMPORT CODE** and **IMPORT FILE** take one in. The codes and
-  `.r2z` files are r2modman's, so the two managers read each other's.
-- In game, the **MODS** tab of the ReSkate menu (**Insert**) turns mods on and off and applies the changes.
-- Mods are checked against the game build they were made for. Outdated mods, or mods that can't be merged
-  cleanly, are left out with a message naming them, and the rest still load.
-- A mod that adds songs can give them their own playlist in the game's music screen with a
-  `reskate-music.json` in its folder:
-
-  ```json
-  {"schema": 1, "playlists": [{"name": "My Playlist", "songs": ["Artist - Title", "Artist - Other Title"]}]}
-  ```
-
-  Each entry is the song's artist and title exactly as the mod registers them, joined by ` - `. Entries that
-  match no song are ignored, and a playlist with no matching songs is not shown. A file that does not follow
-  this shape is skipped and logged. The songs themselves still have to be added by the mod.
-
-  Optional playlist and track covers are PNG files packaged inside the mod:
-
-  ```json
-  {
-    "schema": 1,
-    "playlists": [{"name": "My Playlist", "artwork": "artwork/playlist.png", "songs": ["Artist - Title"]}],
-    "song_artwork": {"Artist - Title": "artwork/track.png"}
-  }
-  ```
-
-  Artwork paths are relative to the mod folder and use forward slashes. Images must be PNGs, at most
-  2048x2048 and 4 MiB each. Missing or invalid covers are ignored without removing the playlist or song.
-  ReSkate serves registered image bytes through a process-local HTTP endpoint bound only to `127.0.0.1`
-  on an automatically selected port; no internet hosting is needed. The endpoint exposes no filesystem
-  routes and retains at most 64 MiB of artwork. Existing content-cache covers keep their priority.
-
-Only install mods you trust. Mods change game data. Custom Lua scripts (`scripts/Custom`) are
-switched off in this version: nothing in that folder is read or run.
-
-## Dedicated servers
-
-`ReSkateServer.exe` is a headless lobby that needs neither the game nor Steam installed. It is in the
-`ReSkateServer-<version>.zip` of each release. See [Server/README.txt](Server/README.txt) for setup,
-`ReSkateServer.json`, admin commands, votes and the anti-cheat checks.
-
-### Linux servers
-
-Each release also ships `ReSkateServer-Linux-<version>.zip`: the same headless lobby as a native
-x86_64 Linux binary (no Wine, no game install). Setup in short:
-
-```sh
-unzip ReSkateServer-Linux-<version>.zip -d reskate-server && cd reskate-server
-./setup-linux-server-libs.sh
-./ReSkateServer            # writes ReSkateServer.json on first run; edit name/admins, restart
-```
-
-Details (Steam `.so` files, `world-layers.json`, `systemd`, ports, building from source with
-`cmake --preset linux-x64`) are in [Server/README-linux.md](Server/README-linux.md).
-
-## Building from source
-
-### Requirements
-
-- Windows 10 or 11, x64.
-- Visual Studio 2022 with the **Desktop development with C++** workload (MSVC v143 and a Windows SDK).
-- CMake **3.24** or newer. Visual Studio's *C++ CMake tools for Windows* component provides one.
-
-All third-party libraries are in the repository, so the build needs no package manager or network
-access.
-
-### Build
-
-From a *Developer PowerShell for VS 2022* in the repository folder:
-
-```powershell
-cmake --preset vs2022-x64
-cmake --build --preset release --parallel 4
-```
-
-The files are written to `build/vs2022-x64/Release/`:
-
-| File | What it is |
-|---|---|
-| `ReSkateLauncher.exe` | the launcher (also hosts crash reporting) |
-| `ReSkate.dll` | the runtime the launcher loads into the game |
-| `ReSkateServer.exe` | the dedicated server |
-| `ReSkateEmotePacker.exe` | builds the chat emote pack in `assets/emotes` |
-
-To work in Visual Studio, open `build/vs2022-x64/DingoSDK.sln` after configuring and select
-**Release | x64**.
-
-### Running your build
-
-Close the game. Copy `ReSkateLauncher.exe` and `ReSkate.dll` into your ReSkate folder (the one the
-launcher installed the game into, beside `Skate.exe`), then run the launcher.
-
-Local builds never replace themselves. They only report that an update exists, so a release can't
-overwrite the DLL you are testing.
-
-Useful launcher flags:
-
-| Flag | Effect |
-|---|---|
-| `--no-gui` | start the game straight away, without the launcher window; with no other launch flags it uses the launcher's saved settings |
-| `--no-update` | skip the update check |
-| `--offline`, `-offline` | play offline, without Steam running |
-| `--windowed`, `--width=N`, `--height=N` | windowed mode and its size |
-| `--log-level=<trace\|debug\|info\|warning\|error\|critical\|off>` | how much `ReSkate.log` records (`warn` works too) |
-| `--log-trace` | the same as `--log-level=trace`; an explicit `--log-level` wins |
-| `-wconsole` | also show the log live in a console window while the game runs |
-| `--menu-key=0x2D`, `--console-key=0xC0` | menu and console keys (virtual-key codes) |
-| `-map <name>` | load that map as soon as the game is up, e.g. `-map "San Vansterdam"`; the name is a map's name, short name or asset path, or the start of one |
-| `--no-loose-files` | ignore loose Lua and config files beside the game |
-| `--gpu-diagnostics` | record extra detail when the graphics driver crashes (DRED) |
-
-### CMake options
-
-| Option | Default | Effect |
+### Freestyle: caspers and primos
+| Trick | How | State |
 |---|---|---|
-| `DINGOSDK_VERSION` | `0.0.0` | version stamped into the binaries |
-| `DINGOSDK_LAUNCHER_AUTO_UPDATE` | `OFF` | let the launcher replace itself and `ReSkate.dll`, and the server replace itself (release builds) |
-| `DINGOSDK_RELEASE_REPO` | `Dingo-Shenanigans/ReSkate` | public GitHub repository whose latest release carries `launcher.json` and the files it pins |
-| `DINGOSDK_CRASH_REPORT_URL` | the project's endpoint | Sentry minidump endpoint URL; empty turns crash uploads off |
-| `DINGOSDK_TEST_GAME_ROOT` | empty | a Skate folder, for the tests that read real game data |
+| **Casper / primo** | Land into one, or hold it with L3 and the right stick. The right stick picks where (casper, primo, primo2). | Proven. The casper flop is fixed (the root's source frame is held upright), and landings don't bounce. |
+| **Anti-casper** (nose side) | The casper mirrored, with the skater turned half round. Caught with the right stick resting up. | Needs a test |
+| **Casper height on the stick** | Stick at the edge is low; toward the middle is high (the loop's own blend space) | Needs a test |
+| **Caspers and primos from a manual** | Push a nose or tail manual into its brake, then L3 and the stick | Proven headlessly |
+| **Casper slides** | A dark catch into a casper; the slide carries speed | Ready to test |
+| **Primo exit into FS shuvit** | Let go of the click in a primo (a hidden game clip) | Ready to test |
+| **Casper flip / flick-outs** | Click with the right stick up in a casper, or flick out of a casper or primo. The board rolls back over: half flip, bigger flip, tre... | Proven: 9/9 casper flick-outs landed. Primo flick-outs land 6/6 on both primo sides: they turn only in the air the game predicts, and take 85% of it. |
 
-### Tests
+### Flips
+| Trick | How | State |
+|---|---|---|
+| **Dolphin flip / 360 dolphin (dragon)** | A straight-up or straight-down stroke for the dolphin. A dragon is a dolphin plus a 360 shuv, from a lower diagonal. Works nollie and fakie too. | Proven (owner approved) |
+| **Nightmare / daydream flip** | Tap the click in the air on a varial flip: one more roll | Ready to test |
+| **Late flip, double flip, late shuvit** | In-air extras | Proven headlessly |
+| **No comply flips and shuvs** | Flick after the no comply starts | Proven: they land |
+| **Ground shuvit** (Session style, no pop) | L3 held, the stick down and rolled to a lower diagonal, then let go. FS and BS. | Proven: 6/6 on a flat street |
+| **Kickflip indy (flip grab)** | Hold the trigger during a flip. The board comes out and up in front and flips; the game's own grab hand catches it and brings it back under the feet. | Proven: the hand stays 0.07 m from the deck from about 65% of the trick to the landing (12/12). A no-teleport guard caps every frame at 0.05 m / 23°. |
 
-Each module keeps its regression tests in a `Test/` folder. Turn them on with any of
-`DINGOSDK_BUILD_MULTIPLAYER_TESTS`, `DINGOSDK_BUILD_LAUNCHER_TESTS`, `DINGOSDK_BUILD_PARK_EDITOR_TESTS`
-and `DINGOSDK_BUILD_CRASH_REPORT_TESTS`, then run CTest:
+### Grabs
+| Trick | How | State |
+|---|---|---|
+| **Grab grinds** | Trigger while grinding: RT indy, LT melon, both for a double grab. They score with the grind's own name ("Indy BS 50-50", "Double Grab BS 50-50"). A tweaked grab landed on a rail is a fall. | Proven: the hand stays 0.04–0.06 m from the deck, in a deep crouch |
+| **Pre-grab (nose / tail held while riding)** | Trigger plus the right stick up for the nose or down for the tail. Ollie or nollie out of it with the hand on (Playcub Ollie, Nose / Tail Grab Ollie), or flick a finger flip. | Proven headlessly. The hand is drawn at the render hand-off. |
+| **Both hands on the board** | The other trigger adds that hand on its rail, or on the nose / tail with the left stick. A smaller ollie or nollie comes out of it. | New, needs a test |
+| **Fandango** | A in a crooked grind takes the back foot off | Experimental, off by default |
 
-```powershell
-cmake --preset vs2022-x64 -DDINGOSDK_BUILD_MULTIPLAYER_TESTS=ON -DDINGOSDK_BUILD_LAUNCHER_TESTS=ON
-cmake --build --preset release --parallel 4
-ctest --test-dir build/vs2022-x64 -C Release
-```
+### Score and names
+- The mod's tricks are named as notices, added to the game's own trick list and counted in the LINE score.
+- Grab grinds take the game's own grind names.
 
-The project builds with `/W4 /WX`: warnings are errors.
+### Parked (needs animation the game doesn't have)
+Hurricane grind, wallpush, the Project 8-style wallride and the nata spin. The revert flip lives in [ReSkate Trainer](https://github.com/andrewnakas/reskate-trainer).
 
-## Project layout
+---
 
-The source tree loosely follows Frostbite's own layout.
+## How it works
 
-| Folder | Contents |
-|---|---|
-| `Engine/Core/` | logging, console, JSON, storage, platform helpers, Detours hooks, crash reporting (`Debug/`) |
-| `Engine/Resource/` | Frostbite data formats: EBX, TOC, CAS, bundles, shader lookup |
-| `Engine/Vfs/` | InitFS, the Mods folder, mod merging, the content cache |
-| `Engine/Scripting/` | custom Lua scripts |
-| `Engine/Game/` | the game's native ABI and data models |
-| `Engine/Game/Build/<build>/` | every address, fingerprint and patch tied to one `Skate.exe` build, as `addr::<area>::<name>` |
-| `Extension/` | ReSkate's features, the in-game UI and diagnostics |
-| `Runtime/` | `ReSkate.dll`: entry point, startup and exports |
-| `Launcher/` | `ReSkateLauncher.exe` |
-| `Server/` | `ReSkateServer.exe` |
-| `EmotePacker/` | `ReSkateEmotePacker.exe` |
-| `External/` | third-party libraries, pinned and hashed (see [External/README.md](External/README.md)) |
-| `assets/`, `config/` | files built into the binaries: launcher art, emotes, default profile settings |
-| `cmake/` | the build, split by area |
+None of the game's files are edited. Everything happens at runtime, inside ReSkate's extension layer.
 
-### Supporting a new game build
+- **The game's own pops.**
+  - The mod doesn't fake an ollie. It plays a right-stick *stroke* to the game's input polls, and the game's own gesture reader pops the trick. So the height, the timing and the scoring are the game's.
+  - The stick is hidden from the game only during the moves that need it hidden. A stock kickflip or pop shuv shows 0 masked polls and 0 hook turns in every regression run.
+- **The game's own animation graph.**
+  - Caspers, primos and grabs are the game's own hidden freestyle and grab states, held in the animation graph.
+  - Example: a grab grind holds the graph's physics family at *riding*, so the game's ground grab keeps playing on the rail.
+- **A procedural board where there is no clip.**
+  - Flips the game has no animation for (dolphin, dragon, flick-outs, the kickflip indy's flip) are turned on the board's own physics body: the *kinematic spin*.
+  - The spin blends onto the game's own board target at the end. It ends under the rider's feet, and a guard keeps any single frame from jumping.
+- **Edits at the render hand-off.**
+  - Where the drawn pose has to change (a hand on the nose, a leg lifted), it is edited at the point the renderer takes it. Edits made earlier are overwritten before the frame is drawn.
+- **Tested headlessly.**
+  - `dev/pass.ps1` boots the game with a scripted controller (`tricks pad ...`), runs a trick macro and logs numbers: hand-to-deck distance, air time, the worst frame step.
+  - It also takes stills mid-trick (`tricks spinshot`).
+  - A trick is called proven only when those numbers pass.
 
-Feature code never contains addresses. Everything tied to one `Skate.exe` lives in
-`Engine/Game/Build/<build>/` and in the pins of
-[supported_build.h](Engine/Game/Build/supported_build.h): file hashes, the Steam depot and manifest, and
-the content cache. A new game build means a new table and new pins. Most hooks and patches check the
-bytes they expect before touching them, so code from the wrong build is refused rather than patched.
+The reverse-engineering notes are kept in [STATUS.md](STATUS.md). They cover the hand grab IK context, the graph state names, the grab type enums and the grind type enums.
 
-## Crash reports and privacy
+## Building
 
-When the launcher or the game crashes, ReSkate uploads a minidump and that session's log to the
-project's self-hosted Sentry server, so crashes can be fixed. The log never contains your Steam password or
-login name.
+Build the same way as ReSkate (CMake, Visual Studio 2022 x64; see [README-ReSkate.md](README-ReSkate.md)). `dev/build.cmd` wraps it. Copy `ReSkate.dll` and `ReSkateLauncher.exe` from the build into your ReSkate folder, and **back up the old ones first**.
 
-With **Send performance timings** ticked in the launcher's Settings (ADVANCED; off unless you turn it on),
-ReSkate also sends how long a few steps took: the update check, the Steam download, mod
-installs (with the package name), the mod merge, starting the game, each level load, joining a multiplayer
-session and fetching the ReSkate lists. Time spent in a level adds its name, average frame rate and count of
-long frames. Nothing about your account is included. Turning crash reports off turns this off too.
+The console has a `tricks` command family for every trick and setting: `tricks status`, `tricks enable <trick> on|off`, `tricks set <setting> <value>`, plus dev tools (`tricks pad`, `tricks spinshot`, `tricks trace`).
 
-To turn crash reports off, untick **Send crash reports** in the launcher's Settings (ADVANCED), or set the
-environment variable `RESKATE_CRASH_REPORTING=0`.
+---
 
-ReSkate also keeps the game off EA's online services: the game's own crash reports, telemetry and
-remote configuration requests are turned off and blocked. Fast-travel artwork still comes from EA's
-image CDN (`dingo-dev-assets.akamaized.net`), which only downloads images.
+## Roadmap: into ReSkate Studio's trick tool
 
-## Third-party code
+Today every trick lives in code (`Extension/Tricks`), and its tuning is in `tricks.json` and the `tricks` console. The plan for a future build is to merge all of it into a **trick studio in ReSkate Studio**: tricks become things you author and tune there, not things you change in C++.
 
-ReSkate uses Dear ImGui, Microsoft Detours, RapidJSON, spdlog, SQLite, LZ4, Zstandard, miniz, bcdec and
-Valve's networking headers, and the Montserrat and Permanent Marker fonts. Versions, licenses and local
-patches are in [External/README.md](External/README.md). Every release ships their license files in
-`licenses/`.
+1. **Tricks as data.** Each trick becomes a definition:
+   - its input (the stick stroke, the trigger and the timing window);
+   - the game states and clips it holds;
+   - the board's turn (roll / yaw / pitch, its rate curve, the dip and the no-teleport limits);
+   - its grab rules (which hand, which rail, nose or tail);
+   - its landing rules and its name and score.
 
-## License
+   The runtime in this repo becomes the player that reads those definitions.
+2. **Studio panels for today's switches.** The TRICKS page and the `tricks` console verbs (stroke, dip, grab rise and reach, flick-out timing, casper height zones) become live sliders with a board-path preview, instead of hand-edited JSON.
+3. **Shareable trick packs.** Trick sets are exported the way Studio already builds map and asset packs, so players can share new tricks without a new DLL.
+4. **The test rig in Studio.** The headless pad macros and the proof numbers (hand-to-deck distance, air time, worst frame step) run from Studio. A trick then ships only when its numbers pass, the same rule this branch follows.
+5. **Upstream.** Once the tricks are data-driven and stable, offer the addon back to ReSkate.
 
-Copyright © 2026 the ReSkate contributors.
+### Open items before then
+- Goofy-stance runs of the primo and casper flick-outs.
+- Feel checks from play:
+  - the kickflip indy's board height;
+  - the primo short-hop quick flip;
+  - the casper flick-out's pop, which is stock heelflip height.
+- The rare "first BS ground shuv plays another flip": not reproduced. A log line now records it when it happens.
+- Not done yet:
+  - one-foot grabs with finger flips;
+  - the Muska flip;
+  - renaming the game's own tricks;
+  - the stance bit for a 180 into a manual.
 
-ReSkate's source code is free software: you can redistribute it and modify it under the terms of the
-[GNU General Public License, version 3](LICENSE). If you share a modified ReSkate, share its source
-code under the same license.
+## Credits
 
-The license covers ReSkate's own code. It does not cover:
+- [ReSkate](https://github.com/Dingo-Shenanigans/ReSkate) and its contributors: the base this addon is built on.
+- The community members who asked for these tricks, credited by name in [TRICKS.md](TRICKS.md).
+- Built by [andrewnakas](https://github.com/andrewnakas) with Claude Code.
 
-- **Third-party libraries and fonts** in `External/`, which keep their own licenses (see
-  [External/README.md](External/README.md)).
-- **The chat emotes** in `assets/emotes/`, which were made by other people.
-- **Images of the game** (`assets/launcher/background.jpg`, `assets/startup_splash.jpg`) and anything
-  else from skate. The game and its content belong to Electronic Arts, and nothing here grants any
-  rights to them.
-
-## AI disclosure
-
-Parts of ReSkate, including code, reverse-engineering notes and documentation, were written with the
-help of AI coding assistants. The maintainers direct and test that work, but AI-written code can contain
-mistakes like any other. If something looks wrong, please open an issue.
+ReSkate Tricks is released under the **GPL-3.0**, like ReSkate ([LICENSE](LICENSE)). skate. is a trademark of Electronic Arts. This project is not affiliated with EA or Full Circle, and it ships no game files.

@@ -42,3 +42,10 @@ analysis/raw/**/*.res
 !/dev/jumps.py
 !/dev/sheet.py
 !/dev/trace-*.csv
+
+# Tricks dev rig output (headless run logs, stills, install backups) stays local.
+/dev/shots/
+/dev/backup/
+/dev/rf*.txt
+/dev/last-run.log
+/dev/start_resume.cmd
